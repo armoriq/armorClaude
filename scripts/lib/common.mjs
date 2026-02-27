@@ -1,0 +1,144 @@
+import { createHash } from "node:crypto";
+
+export function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export function normalizeToolName(name) {
+  return typeof name === "string" ? name.trim().toLowerCase() : "";
+}
+
+export function parseBoolean(value, defaultValue = false) {
+  if (typeof value !== "string") {
+    return defaultValue;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return defaultValue;
+  }
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "n", "off"].includes(normalized)) {
+    return false;
+  }
+  return defaultValue;
+}
+
+export function parseInteger(value, defaultValue) {
+  if (typeof value !== "string") {
+    return defaultValue;
+  }
+  const parsed = Number.parseInt(value.trim(), 10);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+}
+
+export function parseList(value) {
+  if (typeof value !== "string") {
+    return [];
+  }
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+export function isSubsetValue(candidate, target) {
+  if (candidate === undefined) {
+    return true;
+  }
+  if (candidate === null || target === null) {
+    return candidate === target;
+  }
+  if (Array.isArray(candidate)) {
+    if (!Array.isArray(target)) {
+      return false;
+    }
+    return candidate.every((value) => target.some((item) => isSubsetValue(value, item)));
+  }
+  if (isPlainObject(candidate)) {
+    if (!isPlainObject(target)) {
+      return false;
+    }
+    for (const [key, value] of Object.entries(candidate)) {
+      if (!isSubsetValue(value, target[key])) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return candidate === target;
+}
+
+function sanitizeValue(value, limits, depth) {
+  if (depth > limits.maxDepth) {
+    return "<max-depth>";
+  }
+  if (value == null) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value.length > limits.maxChars ? `${value.slice(0, limits.maxChars)}...` : value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (typeof value === "symbol") {
+    return value.toString();
+  }
+  if (typeof value === "function") {
+    return "<function>";
+  }
+  if (value instanceof Uint8Array) {
+    return `<binary:${value.length}>`;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, limits.maxItems).map((entry) => sanitizeValue(entry, limits, depth + 1));
+  }
+  if (isPlainObject(value)) {
+    const out = {};
+    for (const [key, item] of Object.entries(value).slice(0, limits.maxKeys)) {
+      out[key] = sanitizeValue(item, limits, depth + 1);
+    }
+    return out;
+  }
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return "<unserializable>";
+  }
+}
+
+export function sanitizeParams(params, limits) {
+  const input = isPlainObject(params) ? params : {};
+  const sanitized = sanitizeValue(input, limits, 0);
+  return isPlainObject(sanitized) ? sanitized : {};
+}
+
+export function nowEpochSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+export function readString(value) {
+  return typeof value === "string" ? value.trim() || undefined : undefined;
+}
+
+export function parseStepIndex(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+export function sha256Hex(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
