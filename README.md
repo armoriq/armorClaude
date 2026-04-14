@@ -1,106 +1,166 @@
 # ArmorCowork
 
-ArmorIQ plugin scaffold for Claude Code with:
-- `PreToolUse` enforcement hook
-- `UserPromptSubmit` policy/intention handling
-- plugin-bundled MCP policy server
-- local policy engine (`allow` / `deny` / `require_approval`)
-- ArmorIQ SDK intent issuance compatibility (`capturePlan` + `getIntentToken`)
-- `/iap/verify-step` payload/response compatibility
-- CSRG proof extraction and token `step_proofs` fallback
+ArmorIQ intent-based security enforcement plugin for Claude Code and Claude Cowork. Enforces that an AI agent declares what it intends to do before doing it, and every action is checked against that declared intent.
+
+## How It Works
+
+```
+User Prompt ──► UserPromptSubmit hook ──► Intent plan captured ──► Signed token
+                                                                        │
+Tool Call ──► PreToolUse hook ──► Policy check ──► Intent verification ──┘
+                                      │                    │
+                                  deny/allow         drift detected?
+                                                          │
+Tool Result ──► PostToolUse hook ──► Audit log sent to IAP
+```
+
+1. **Before the agent acts**: Intercepts prompts, captures a structured plan (from Claude's built-in plan mode or an LLM fallback call), and sends it to ArmorIQ IAP for a signed intent token.
+2. **On every tool call**: Checks the tool against the approved plan, verifies the token hasn't expired, evaluates local policy rules (allow/deny by tool name, data classification like PCI/PII), and optionally verifies CSRG cryptographic proofs. Blocks execution if any check fails.
+3. **After tool execution**: Sends audit logs to ArmorIQ IAP for compliance tracking.
+4. **Fail-closed**: If planning fails, identity is missing, or the token is invalid — all tool calls are blocked by default.
 
 ## Structure
 
-- `.claude-plugin/plugin.json`: plugin manifest
-- `hooks/hooks.json`: hook registration
-- `.mcp.json`: plugin MCP server registration
-- `scripts/hook-router.mjs`: hook entrypoint
-- `scripts/policy-mcp.mjs`: MCP server for policy tools
-- `scripts/lib/*.mjs`: policy, intent, runtime, and engine modules
-
-## Install Locally
-
-1. Build/install dependencies (none required currently):
-```bash
-cd /Users/kbhardwaj6/armoriq/ArmorCowork
-npm install
 ```
-2. Use plugin directly:
-```bash
-claude --plugin-dir /Users/kbhardwaj6/armoriq/ArmorCowork
+armorcowork/
+├── .claude-plugin/plugin.json    # Plugin manifest with userConfig
+├── hooks/hooks.json              # Hook registration (7 lifecycle events)
+├── .mcp.json                     # MCP server for policy tools
+├── scripts/
+│   ├── hook-router.mjs           # Hook entrypoint (dispatches events)
+│   ├── policy-mcp.mjs            # MCP server (policy_update, policy_read)
+│   └── lib/
+│       ├── engine.mjs            # Main handlers for all hook events
+│       ├── config.mjs            # Configuration (env vars + userConfig)
+│       ├── planner.mjs           # Plan generation (plan file + LLM fallback)
+│       ├── intent.mjs            # Intent token verification & CSRG proofs
+│       ├── iap-service.mjs       # IAP backend (verify-step, audit, CSRG)
+│       ├── crypto-policy.mjs     # Merkle tree policy binding (CSRG)
+│       ├── policy.mjs            # Policy evaluation & management
+│       ├── runtime-state.mjs     # Session & tool discovery tracking
+│       ├── hook-output.mjs       # Hook response formatters
+│       ├── fs-store.mjs          # JSON file I/O
+│       └── common.mjs            # Utilities (sanitize, HTTP, hashing)
+└── tests/                        # node:test test suite
 ```
 
-3. Validate plugin:
+## Install
+
 ```bash
-claude plugin validate /Users/kbhardwaj6/armoriq/ArmorCowork
+cd armorcowork && npm install
+claude --plugin-dir ./armorcowork
 ```
 
-## Environment
+Or validate:
+```bash
+claude plugin validate ./armorcowork
+```
 
-Core:
-- `ARMORCOWORK_MODE=enforce|monitor` (default: `enforce`)
-- `ARMORCOWORK_INTENT_REQUIRED=true|false` (default: `false`)
-- `ARMORCOWORK_DATA_DIR` (default: `~/.claude/armorcowork`)
-- `ARMORCOWORK_POLICY_FILE` (default: `<data_dir>/policy.json`)
-- `ARMORCOWORK_RUNTIME_FILE` (default: `<data_dir>/runtime.json`)
-- `ARMORCOWORK_CONTEXT_HINTS_ENABLED=true|false` (default: `true`)
+## Configuration
 
-ArmorIQ optional endpoints:
-- `ARMORIQ_API_KEY`
-- `ARMORCOWORK_INTENT_URL`
-- `ARMORCOWORK_VERIFY_STEP_URL`
-- `ARMORCOWORK_USE_SDK_INTENT=true|false` (default: `true`)
-- `ARMORCOWORK_USE_PRODUCTION=true|false` (default: depends on `ARMORIQ_ENV`)
-- `ARMORCOWORK_BACKEND_ENDPOINT` / `BACKEND_ENDPOINT`
-- `ARMORCOWORK_IAP_ENDPOINT` / `IAP_ENDPOINT`
-- `ARMORCOWORK_PROXY_ENDPOINT` / `PROXY_ENDPOINT`
-- `ARMORCOWORK_USER_ID`
-- `ARMORCOWORK_AGENT_ID`
-- `ARMORCOWORK_CONTEXT_ID`
-- `ARMORCOWORK_VALIDITY_SECONDS` (default: `60`)
-- `ARMORCOWORK_TIMEOUT_MS` (default: `8000`)
-- `ARMORCOWORK_MAX_RETRIES` (default: `3`)
-- `ARMORCOWORK_VERIFY_SSL=true|false` (default: `true`)
-- `ARMORCOWORK_LLM_ID` (default: `claude-code`)
-- `ARMORCOWORK_MCP_NAME` (default: `claude-code`)
+### Plugin userConfig (recommended)
 
-CSRG verification:
-- `REQUIRE_CSRG_PROOFS=true|false` (default: `true`)
-- `CSRG_VERIFY_ENABLED=true|false` (default: `true`)
+When installed as a Claude Code plugin, these values are prompted on enable:
 
-Policy updates:
-- `ARMORCOWORK_POLICY_UPDATE_ENABLED=true|false` (default: `true`)
-- `ARMORCOWORK_POLICY_UPDATE_ALLOWLIST` (CSV, default: `*`)
+| Key | Sensitive | Description |
+|-----|-----------|-------------|
+| `api_key` | Yes | ArmorIQ API key |
+| `mode` | No | `enforce` (default) or `monitor` |
+| `intent_required` | No | Require intent for all tools (default: `true`) |
+| `crypto_policy_enabled` | No | Enable Merkle tree policy binding |
+| `use_production` | No | Use production ArmorIQ endpoints |
+
+### Environment Variables
+
+**Core:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARMORCOWORK_MODE` | `enforce` | `enforce` blocks on failure, `monitor` logs only |
+| `ARMORCOWORK_INTENT_REQUIRED` | `true` | Block tool calls with no intent token |
+| `ARMORCOWORK_DATA_DIR` | `$CLAUDE_PLUGIN_DATA` or `~/.claude/armorcowork` | Data storage directory |
+| `ARMORCOWORK_DEBUG` | `false` | Enable stderr debug logging |
+
+**ArmorIQ Integration:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARMORIQ_API_KEY` | — | ArmorIQ SDK API key |
+| `ARMORCOWORK_USE_SDK_INTENT` | `true` | Use ArmorIQ SDK for intent capture |
+| `ARMORCOWORK_INTENT_URL` | — | Custom intent endpoint (overrides SDK) |
+| `ARMORCOWORK_VERIFY_STEP_URL` | `<backend>/iap/verify-step` | IAP verify endpoint |
+| `ARMORCOWORK_BACKEND_ENDPOINT` | production or localhost | IAP backend URL |
+| `ARMORCOWORK_IAP_ENDPOINT` | production or localhost | CSRG service URL |
+| `ARMORCOWORK_VALIDITY_SECONDS` | `60` | Intent token TTL |
+
+**Plan Directive:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARMORCOWORK_PLANNING_ENABLED` | `true` | Inject directive telling Claude to register an intent plan |
+
+**Crypto Policy Binding:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARMORCOWORK_CRYPTO_POLICY_ENABLED` | `false` | Merkle tree policy binding |
+| `CSRG_URL` | IAP endpoint | CSRG service URL |
+| `REQUIRE_CSRG_PROOFS` | `true` | Require cryptographic proofs |
+| `CSRG_VERIFY_ENABLED` | `true` | Enable CSRG verification |
+
+**Audit Logging:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARMORCOWORK_AUDIT_ENABLED` | `true` (when API key set) | Send audit logs to IAP |
+
+**Policy Management:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARMORCOWORK_POLICY_UPDATE_ENABLED` | `true` | Allow runtime policy updates |
+| `ARMORCOWORK_POLICY_UPDATE_ALLOWLIST` | `*` | CSV of allowed actors |
+
+## Hook Events
+
+| Event | Handler | Purpose |
+|-------|---------|---------|
+| `SessionStart` | Initialize session, prune stale sessions | Lifecycle setup |
+| `UserPromptSubmit` | Policy commands, intent capture, LLM planning | Pre-processing |
+| `PreToolUse` | Policy check, intent verification, CSRG proofs, ExitPlanMode capture | **Enforcement** |
+| `PostToolUse` | Audit logging (success) | Compliance |
+| `PostToolUseFailure` | Audit logging (failure) | Compliance |
+| `Stop` | Token expiry check | Turn cleanup |
+| `SessionEnd` | Remove session state | Lifecycle cleanup |
+
+## Plan Generation
+
+ArmorCowork supports two plan generation strategies:
+
+### 1. Claude's Built-in Plan Mode (primary)
+When Claude operates in plan mode, it writes a plan file and calls `ExitPlanMode`. ArmorCowork intercepts `ExitPlanMode` via the `PreToolUse` hook, parses the plan file, and sends it to ArmorIQ for intent token generation.
+
+### 2. MCP Tool (when plan mode is off)
+A directive injected via `UserPromptSubmit` instructs Claude to call `register_intent_plan` as its first tool call. Claude produces the plan as the tool's arguments — using its own LLM in the same turn, with no separate API key or extra LLM call. The MCP tool handler sends the plan to ArmorIQ for a signed intent token.
 
 ## Policy Commands
 
-Policy commands are handled from user prompts and blocked from normal model processing after execution:
+From the chat prompt:
+- `Policy list` — show all rules
+- `Policy get <id>` — show specific rule
+- `Policy delete <id>` — remove rule
+- `Policy reset` — clear all rules
+- `Policy new: block web_fetch for payment data` — create rule
+- `Policy update <id>: allow write` — modify rule
+- `Policy prioritize <id> <position>` — reorder
 
-- `Policy list`
-- `Policy get policy1`
-- `Policy delete policy1`
-- `Policy reset`
-- `Policy update policy1: block web_fetch for payment data`
-- `Policy new: block write for PII`
-- `Policy prioritize policy2 1`
+MCP tools: `policy_update`, `policy_read`
 
-MCP tools exposed:
-- `policy_update` (`text` or structured `update`)
-- `policy_read` (`id` optional)
+## Security Model
 
-## Current Scope
+- **Intent Drift Detection**: Every tool call is checked against the approved plan. Unauthorized tools are blocked.
+- **Token Expiry**: Intent tokens have configurable TTL (default 60s). Expired tokens block all tool calls.
+- **Data Class Detection**: Automatic PCI, PAYMENT, PHI, PII detection in tool parameters.
+- **Crypto Policy Binding**: Optional Merkle tree binding via CSRG ensures policy rules can't be tampered with after token issuance.
+- **Audit Trail**: Every tool execution (success/failure) is logged to ArmorIQ IAP.
+- **Fail-Closed**: Missing tokens, failed planning, invalid proofs — all result in denied tool calls in enforce mode.
 
-Implemented:
-- local policy enforcement in `PreToolUse`
-- ArmorIQ SDK-compatible intent issuance (`capturePlan` + `getIntentToken`)
-- optional external planning endpoint (`ARMORCOWORK_INTENT_URL`)
-- ArmorIQ-compatible `/iap/verify-step` request contract
-- CSRG proof handling:
-  - explicit headers from hook input
-  - fallback proof resolution from token `step_proofs`
-  - duplicate-tool step disambiguation with per-session step usage tracking
-- MCP policy server (`policy_update`, `policy_read`)
+## Tests
 
-Not implemented yet:
-- CSRG proof path extraction and cryptographic verification parity
-- full audit trail export
+```bash
+node --test tests/*.test.mjs
+```

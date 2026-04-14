@@ -5,10 +5,11 @@ import os from "node:os";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { handlePreToolUse } from "../scripts/lib/engine.mjs";
 import {
+  checkIntentTokenPlan,
   parseCsrgProofHeaders,
-  resolveCsrgProofsFromToken,
-  verifyStep
+  resolveCsrgProofsFromToken
 } from "../scripts/lib/intent.mjs";
+import { createIapService } from "../scripts/lib/iap-service.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
   return {
@@ -20,6 +21,7 @@ function buildConfig(tmpDir, overrides = {}) {
     backendEndpoint: "http://127.0.0.1:3000",
     iapEndpoint: "http://127.0.0.1:8000",
     proxyEndpoint: "http://127.0.0.1:3001",
+    csrgEndpoint: "http://127.0.0.1:8000",
     apiKey: "ak_test_12345678",
     useSdkIntent: false,
     intentEndpoint: "",
@@ -39,6 +41,10 @@ function buildConfig(tmpDir, overrides = {}) {
     policyUpdateEnabled: true,
     policyUpdateAllowList: ["*"],
     contextHintsEnabled: true,
+    cryptoPolicyEnabled: false,
+    auditEnabled: false,
+    planningEnabled: false,
+    planningApiKey: "",
     debug: false,
     sanitize: {
       maxChars: 2000,
@@ -90,47 +96,110 @@ test("resolveCsrgProofsFromToken selects param-matched step for duplicate tools"
   assert.equal(resolved?.path, "/steps/[1]/action");
 });
 
-test("verifyStep sends armorIQ verify-step payload with jwt token and CSRG context", async () => {
+test("iapService.verifyStep sends payload with jwt token and CSRG context", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
-  const config = buildConfig(tmp, { verifyStepEndpoint: "https://example.test/iap/verify-step" });
+  const config = buildConfig(tmp, {
+    verifyStepEndpoint: "https://example.test/iap/verify-step"
+  });
+  const iapService = createIapService(config);
+
   const originalFetch = globalThis.fetch;
   let capturedPayload = null;
   globalThis.fetch = async (_url, options) => {
     capturedPayload = JSON.parse(options.body);
-    return new Response(JSON.stringify({ allowed: true, reason: "ok", step: { step_index: 2 } }), {
-      status: 200,
-      headers: { "content-type": "application/json" }
-    });
+    return new Response(
+      JSON.stringify({ allowed: true, reason: "ok", step: { step_index: 2 } }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
   };
 
   try {
-    const result = await verifyStep(config, {
-      intentTokenRaw: JSON.stringify({
+    const result = await iapService.verifyStep(
+      JSON.stringify({
         jwtToken: "jwt-token-abc",
         plan: { steps: [{ action: "read" }] }
       }),
-      toolName: "read",
-      csrgProofs: {
+      {
         path: "/steps/[2]/action",
         proof: [{ position: "left", sibling_hash: "abc" }],
         valueDigest: "deadbeef"
-      }
-    });
+      },
+      "read"
+    );
     assert.equal(capturedPayload.token, "jwt-token-abc");
     assert.equal(capturedPayload.tool_name, "read");
     assert.equal(capturedPayload.path, "/steps/[2]/action");
     assert.equal(capturedPayload.step_index, 2);
     assert.equal(capturedPayload.context.csrg_value_digest, "deadbeef");
     assert.equal(result.allowed, true);
-    assert.equal(result.stepIndex, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
+test("checkIntentTokenPlan detects intent drift", () => {
+  const token = {
+    plan: { steps: [{ action: "Read" }, { action: "Write" }] },
+    expiresAt: Math.floor(Date.now() / 1000) + 600
+  };
+  const result = checkIntentTokenPlan({
+    intentTokenRaw: JSON.stringify(token),
+    toolName: "Bash",
+    toolParams: {}
+  });
+  assert.equal(result.matched, true);
+  assert.match(result.blockReason, /intent drift/i);
+});
+
+test("checkIntentTokenPlan allows tool in plan", () => {
+  const token = {
+    plan: { steps: [{ action: "Read" }, { action: "Write" }] },
+    expiresAt: Math.floor(Date.now() / 1000) + 600
+  };
+  const result = checkIntentTokenPlan({
+    intentTokenRaw: JSON.stringify(token),
+    toolName: "Read",
+    toolParams: {}
+  });
+  assert.equal(result.matched, true);
+  assert.equal(result.blockReason, undefined);
+});
+
+test("checkIntentTokenPlan detects expired token", () => {
+  const token = {
+    plan: { steps: [{ action: "Read" }] },
+    expiresAt: Math.floor(Date.now() / 1000) - 100
+  };
+  const result = checkIntentTokenPlan({
+    intentTokenRaw: JSON.stringify(token),
+    toolName: "Read",
+    toolParams: {}
+  });
+  assert.equal(result.matched, true);
+  assert.match(result.blockReason, /expired/i);
+});
+
+test("checkIntentTokenPlan enforces parameter constraints", () => {
+  const token = {
+    plan: {
+      steps: [{ action: "Write", metadata: { inputs: { file_path: "allowed.txt" } } }]
+    },
+    expiresAt: Math.floor(Date.now() / 1000) + 600
+  };
+  const result = checkIntentTokenPlan({
+    intentTokenRaw: JSON.stringify(token),
+    toolName: "Write",
+    toolParams: { file_path: "forbidden.txt" }
+  });
+  assert.equal(result.matched, true);
+  assert.match(result.blockReason, /parameters not allowed/i);
+});
+
 test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplicate tools", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
-  const config = buildConfig(tmp, { verifyStepEndpoint: "https://example.test/iap/verify-step" });
+  const config = buildConfig(tmp, {
+    verifyStepEndpoint: "https://example.test/iap/verify-step"
+  });
   const token = {
     jwtToken: "jwt-token-xyz",
     plan: {
@@ -201,4 +270,3 @@ test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplic
     globalThis.fetch = originalFetch;
   }
 });
-

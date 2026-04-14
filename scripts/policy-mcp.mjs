@@ -1,8 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import path from "node:path";
 import { z } from "zod";
 import { loadConfig } from "./lib/config.mjs";
-import { applyPolicyCommand, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
+import { writeJson } from "./lib/fs-store.mjs";
+import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
+import { INTENT_PLAN_ZOD, normalizeIntentPlan } from "./lib/intent-schema.mjs";
+import { applyPolicyCommand, computePolicyHash, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
 
 const POLICY_RULE_SCHEMA = z.object({
   id: z.string().min(1),
@@ -110,6 +114,72 @@ async function run() {
         version: state.version,
         rules: state.policy.rules
       });
+    }
+  );
+
+  // -----------------------------------------------------------------
+  // register_intent_plan — Claude calls this to declare its plan
+  // -----------------------------------------------------------------
+  server.registerTool(
+    "register_intent_plan",
+    {
+      title: "Register Intent Plan",
+      description:
+        "Declare the tools you intend to use for this task. " +
+        "Required by ArmorCowork before any other tool call. " +
+        "Without a registered plan, all tool calls will be blocked.",
+      inputSchema: {
+        goal: INTENT_PLAN_ZOD.shape.goal,
+        steps: INTENT_PLAN_ZOD.shape.steps
+      }
+    },
+    async (args) => {
+      const parsed = INTENT_PLAN_ZOD.safeParse(args);
+      if (!parsed.success) {
+        return toTextResult(`Plan rejected: ${parsed.error.message}`);
+      }
+
+      const config = loadConfig();
+      const plan = normalizeIntentPlan(parsed.data);
+
+      // Send to ArmorIQ for signed intent token (if SDK/endpoint configured)
+      let intentResult = { skipped: true };
+      if (config.intentEndpoint || (config.useSdkIntent && config.apiKey)) {
+        try {
+          const policyState = await loadPolicyState(config.policyFile);
+          intentResult = await requestIntent(config, {
+            prompt: parsed.data.goal,
+            plan,
+            session_id: "mcp",
+            policy_hash: computePolicyHash(policyState.policy),
+            policy: policyState.policy,
+            validitySeconds: config.validitySeconds,
+            metadata: { source: "claude-code", planning: "claude-registered" }
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[armorcowork] intent capture in register_intent_plan: ${msg}\n`);
+        }
+      }
+
+      // Write to pending-plan.json — PreToolUse hook will pick it up
+      const pendingPath = path.join(config.dataDir, "pending-plan.json");
+      await writeJson(pendingPath, {
+        plan: intentResult.plan || plan,
+        tokenRaw: intentResult.tokenRaw || "",
+        allowedActions: Array.from(extractAllowedActions(intentResult.plan || plan)),
+        expiresAt: intentResult.expiresAt,
+        registeredAt: Date.now()
+      });
+
+      const tokenInfo = intentResult.tokenRaw
+        ? `Token valid ${config.validitySeconds}s.`
+        : "No ArmorIQ backend configured — plan stored locally.";
+
+      return toTextResult(
+        `Intent registered: ${plan.steps.length} steps. ${tokenInfo}`,
+        { steps: plan.steps.length, goal: parsed.data.goal }
+      );
     }
   );
 

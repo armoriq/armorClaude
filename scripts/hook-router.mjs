@@ -1,6 +1,14 @@
 import { loadConfig } from "./lib/config.mjs";
 import { denyPreTool } from "./lib/hook-output.mjs";
-import { handlePreToolUse, handleUserPromptSubmit } from "./lib/engine.mjs";
+import {
+  handlePreToolUse,
+  handlePostToolUse,
+  handlePostToolUseFailure,
+  handleSessionEnd,
+  handleSessionStart,
+  handleStop,
+  handleUserPromptSubmit
+} from "./lib/engine.mjs";
 
 async function readStdin() {
   const chunks = [];
@@ -36,19 +44,37 @@ async function main() {
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   debugLog(config, `hook=${event}`);
 
-  if (event === "UserPromptSubmit") {
-    const output = await handleUserPromptSubmit(input, config);
-    if (output) {
-      emitJson(output);
-    }
-    return;
+  let output;
+
+  switch (event) {
+    case "SessionStart":
+      output = await handleSessionStart(input, config);
+      break;
+    case "UserPromptSubmit":
+      output = await handleUserPromptSubmit(input, config);
+      break;
+    case "PreToolUse":
+      output = await handlePreToolUse(input, config);
+      break;
+    case "PostToolUse":
+      output = await handlePostToolUse(input, config);
+      break;
+    case "PostToolUseFailure":
+      output = await handlePostToolUseFailure(input, config);
+      break;
+    case "Stop":
+      output = await handleStop(input, config);
+      break;
+    case "SessionEnd":
+      output = await handleSessionEnd(input, config);
+      break;
+    default:
+      debugLog(config, `unhandled hook event: ${event}`);
+      return;
   }
 
-  if (event === "PreToolUse") {
-    const output = await handlePreToolUse(input, config);
-    if (output) {
-      emitJson(output);
-    }
+  if (output) {
+    emitJson(output);
   }
 }
 
@@ -60,4 +86,3 @@ main().catch((error) => {
     emitJson(denyPreTool(`ArmorCowork internal error: ${message}`));
   }
 });
-

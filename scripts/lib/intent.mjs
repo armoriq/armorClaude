@@ -1,9 +1,11 @@
 import armoriqSdk from "@armoriq/sdk";
 import {
+  buildAuthHeaders,
   isPlainObject,
   isSubsetValue,
   normalizeToolName,
   parseStepIndex,
+  postJson,
   readString,
   sha256Hex
 } from "./common.mjs";
@@ -244,6 +246,23 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
       plan: parsed.plan
     };
   }
+
+  // Parameter-level enforcement: check tool params against plan step constraints
+  if (isPlainObject(toolParams)) {
+    const paramCheck = checkToolAgainstPlan({
+      plan: parsed.plan,
+      toolName,
+      toolInput: toolParams
+    });
+    if (!paramCheck.allowed) {
+      return {
+        matched: true,
+        blockReason: paramCheck.reason,
+        plan: parsed.plan
+      };
+    }
+  }
+
   return {
     matched: true,
     params: isPlainObject(toolParams) ? toolParams : undefined,
@@ -510,66 +529,12 @@ export function validateCsrgProofHeaders(proofs, required) {
   return null;
 }
 
-function getTokenForVerification(intentTokenRaw) {
-  if (typeof intentTokenRaw !== "string") {
-    return { token: "", tokenObj: null };
-  }
-  try {
-    const parsed = JSON.parse(intentTokenRaw);
-    if (isPlainObject(parsed)) {
-      const jwtToken = readString(parsed.jwtToken) || readString(parsed.jwt_token);
-      if (jwtToken) {
-        return { token: jwtToken, tokenObj: parsed };
-      }
-      return { token: intentTokenRaw, tokenObj: parsed };
-    }
-    return { token: intentTokenRaw, tokenObj: null };
-  } catch {
-    return { token: intentTokenRaw, tokenObj: null };
-  }
-}
-
-async function postJson(url, payload, headers, timeoutMs) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-    const text = await response.text();
-    let data = null;
-    if (text) {
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = null;
-      }
-    }
-    return { ok: response.ok, status: response.status, text, data };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function buildHeaders(config) {
-  const headers = { "Content-Type": "application/json" };
-  if (config.apiKey) {
-    headers.Authorization = `Bearer ${config.apiKey}`;
-    headers["X-API-Key"] = config.apiKey;
-    headers["x-api-key"] = config.apiKey;
-  }
-  return headers;
-}
-
 export async function requestIntent(config, payload) {
   if (config.intentEndpoint) {
     const response = await postJson(
       config.intentEndpoint,
       payload,
-      buildHeaders(config),
+      buildAuthHeaders(config),
       config.timeoutMs
     );
     if (!response.ok) {
@@ -622,78 +587,6 @@ export async function requestIntent(config, payload) {
     tokenRaw,
     plan: parsedFromToken?.plan || plan,
     expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt
-  };
-}
-
-export async function verifyStep(config, params) {
-  if (!config.verifyStepEndpoint || !config.csrgVerifyEnabled) {
-    return { skipped: true };
-  }
-  const { token, tokenObj } = getTokenForVerification(params.intentTokenRaw);
-  if (!token) {
-    return { skipped: false, allowed: false, reason: "ArmorIQ intent token missing" };
-  }
-
-  const payload = { token };
-  if (params.csrgProofs?.path) {
-    payload.path = params.csrgProofs.path;
-    const stepIndex = parseStepIndexFromPath(params.csrgProofs.path);
-    if (stepIndex !== null) {
-      payload.step_index = stepIndex;
-    }
-  }
-  if (params.toolName) {
-    payload.tool_name = params.toolName;
-  }
-  if (Array.isArray(params.csrgProofs?.proof)) {
-    payload.proof = params.csrgProofs.proof;
-  }
-  if (params.csrgProofs?.valueDigest) {
-    payload.context = {
-      csrg_value_digest: params.csrgProofs.valueDigest,
-      proof_source: "client"
-    };
-  }
-
-  const response = await postJson(
-    config.verifyStepEndpoint,
-    payload,
-    buildHeaders(config),
-    config.timeoutMs
-  );
-  if (!response.ok && !isPlainObject(response.data)) {
-    throw new Error(response.text || `IAP verify-step failed with status ${response.status}`);
-  }
-
-  const data = isPlainObject(response.data) ? response.data : {};
-  const tokenRaw =
-    typeof data.intentTokenRaw === "string"
-      ? data.intentTokenRaw
-      : typeof data.tokenRaw === "string"
-        ? data.tokenRaw
-        : isPlainObject(data.token)
-          ? JSON.stringify(data.token)
-          : undefined;
-  const parsedFromResponse = tokenRaw ? extractPlanFromIntentToken(tokenRaw) : null;
-  const fallbackPlan = isPlainObject(tokenObj?.plan)
-    ? tokenObj.plan
-    : isPlainObject(tokenObj?.rawToken?.plan)
-      ? tokenObj.rawToken.plan
-      : undefined;
-  const stepIndex =
-    parseStepIndex(data?.step?.step_index) ??
-    parseStepIndex(data?.execution_state?.current_step) ??
-    parseStepIndexFromPath(params.csrgProofs?.path) ??
-    undefined;
-
-  return {
-    skipped: false,
-    allowed: data.allowed !== false,
-    reason: typeof data.reason === "string" ? data.reason : "",
-    tokenRaw,
-    plan: isPlainObject(data.plan) ? data.plan : parsedFromResponse?.plan || fallbackPlan,
-    expiresAt: Number.isFinite(data.expiresAt) ? data.expiresAt : parsedFromResponse?.expiresAt,
-    stepIndex
   };
 }
 

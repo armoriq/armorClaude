@@ -142,3 +142,42 @@ export function parseStepIndex(value) {
 export function sha256Hex(value) {
   return createHash("sha256").update(value).digest("hex");
 }
+
+// ---------------------------------------------------------------------------
+// HTTP helpers (shared by intent.mjs and iap-service.mjs)
+// ---------------------------------------------------------------------------
+
+export async function postJson(url, payload, headers, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let data = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = null;
+      }
+    }
+    return { ok: response.ok, status: response.status, text, data };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export function buildAuthHeaders(config) {
+  const headers = { "Content-Type": "application/json" };
+  if (config.apiKey) {
+    headers.Authorization = `Bearer ${config.apiKey}`;
+    headers["X-API-Key"] = config.apiKey;
+    headers["x-api-key"] = config.apiKey;
+  }
+  return headers;
+}

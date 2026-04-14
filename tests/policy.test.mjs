@@ -36,6 +36,9 @@ function buildConfig(tmpDir, overrides = {}) {
     policyUpdateEnabled: true,
     policyUpdateAllowList: ["*"],
     contextHintsEnabled: true,
+    cryptoPolicyEnabled: false,
+    auditEnabled: false,
+    planningEnabled: false,
     debug: false,
     sanitize: {
       maxChars: 2000,

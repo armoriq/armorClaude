@@ -1,0 +1,15 @@
+{
+  "name": "armorcowork",
+  "display_name": "ArmorCowork",
+  "version": "0.2.0",
+  "description": "ArmorIQ intent-based security enforcement — policy-based tool access control, intent verification, CSRG proof handling, and audit logging",
+  "author": { "name": "ArmorIQ" },
+  "homepage": "",
+  "userConfig": {
+    "api_key": { "description": "ArmorIQ API key", "sensitive": true },
+    "mode": { "description": "Enforcement mode: enforce (default) or monitor", "sensitive": false },
+    "intent_required": { "description": "Require intent token for all tool calls (true/false, default true)", "sensitive": false },
+    "crypto_policy_enabled": { "description": "Enable Merkle tree policy binding (true/false)", "sensitive": false },
+    "use_production": { "description": "Use production ArmorIQ endpoints (true/false)", "sensitive": false }
+  }
+}
