@@ -24,7 +24,7 @@ Tool Result ──► PostToolUse hook ──► Audit log sent to IAP
 ### One-line install (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/armoriq/armorClaude/main/install_armorclaude.sh | bash
+curl -fsSL https://armoriq.ai/install_armorclaude.sh | bash
 ```
 
 This adds the `armoriq` Claude Code marketplace and installs the `armorclaude` plugin. Dependencies are installed automatically on first hook fire.

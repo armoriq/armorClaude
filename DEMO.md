@@ -19,7 +19,7 @@ echo "# Demo project" > README.md
 
 **On screen:**
 ```
-$ curl -fsSL https://raw.githubusercontent.com/armoriq/armorClaude/main/install_armorclaude.sh | bash
+$ curl -fsSL https://armoriq.ai/install_armorclaude.sh | bash
 ```
 
 **Voiceover:**
