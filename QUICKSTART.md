@@ -5,7 +5,7 @@ Five-minute path from `curl` to your first blocked tool call.
 ## 1. Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/armoriq/armorClaude/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/armoriq/armorClaude/main/install_armorclaude.sh | bash
 ```
 
 The installer adds the `armoriq` Claude Code marketplace and installs the `armorclaude` plugin. No API key required for the local-only demo.

@@ -24,7 +24,7 @@ Tool Result ──► PostToolUse hook ──► Audit log sent to IAP
 ### One-line install (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/armoriq/armorClaude/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/armoriq/armorClaude/main/install_armorclaude.sh | bash
 ```
 
 This adds the `armoriq` Claude Code marketplace and installs the `armorclaude` plugin. Dependencies are installed automatically on first hook fire.
@@ -70,7 +70,7 @@ armorClaude/
 │   └── marketplace.json          # Marketplace listing for `claude plugin install`
 ├── hooks/hooks.json              # Hook registration (7 lifecycle events)
 ├── .mcp.json                     # MCP server for policy + intent tools
-├── install.sh                    # Curl-able installer
+├── install_armorclaude.sh        # Curl-able installer
 ├── scripts/
 │   ├── bootstrap.mjs             # Auto-installs npm deps on first run
 │   ├── hook-router.mjs           # Hook entrypoint (dispatches events)
