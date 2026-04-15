@@ -1,4 +1,4 @@
-# ArmorCowork
+# ArmorClaude
 
 ArmorIQ intent-based security enforcement plugin for Claude Code and Claude Cowork. Enforces that an AI agent declares what it intends to do before doing it, and every action is checked against that declared intent.
 
