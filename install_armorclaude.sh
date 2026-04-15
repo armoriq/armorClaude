@@ -4,8 +4,7 @@ set -euo pipefail
 # ArmorClaude installer for Claude Code
 #
 # Usage:
-#   curl -fsSL https://armoriq.ai/install-armorclaude.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/armoriq/armorClaude/main/install_armorclaude.sh | bash
+#   curl -fsSL https://armoriq.ai/install_armorclaude.sh | bash
 #
 # Non-interactive overrides:
 #   ARMORIQ_API_KEY=ak_live_...           skip the API-key prompt, use this key
