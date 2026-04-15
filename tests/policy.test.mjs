@@ -128,6 +128,107 @@ test("handlePreToolUse denies missing intent when strict", async () => {
   assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /intent plan missing/i);
 });
 
+test("handlePreToolUse allows tool when local plan matches (no backend)", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const config = buildConfig(tmp, { intentRequired: true });
+  // Seed a local plan as if register_intent_plan had been called
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(
+    config.runtimeFile,
+    JSON.stringify({
+      sessions: {
+        "local-1": {
+          plan: { steps: [{ action: "Read" }], metadata: { goal: "read x" } },
+          allowedActions: ["read"],
+          updatedAt: Math.floor(Date.now() / 1000)
+        }
+      }
+    }),
+    "utf8"
+  );
+  const output = await handlePreToolUse(
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "local-1",
+      tool_name: "Read",
+      tool_input: { file_path: "x.txt" }
+    },
+    config
+  );
+  assert.equal(output, null);
+});
+
+test("handlePreToolUse denies drift when local plan exists (no backend)", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const config = buildConfig(tmp, { intentRequired: true });
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(
+    config.runtimeFile,
+    JSON.stringify({
+      sessions: {
+        "local-2": {
+          plan: { steps: [{ action: "Read" }], metadata: { goal: "read x" } },
+          allowedActions: ["read"],
+          updatedAt: Math.floor(Date.now() / 1000)
+        }
+      }
+    }),
+    "utf8"
+  );
+  const output = await handlePreToolUse(
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "local-2",
+      tool_name: "Bash",
+      tool_input: { command: "ls" }
+    },
+    config
+  );
+  assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
+  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /intent drift|not in plan/i);
+});
+
+test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const config = buildConfig(tmp, { intentRequired: true });
+  const { writeFile } = await import("node:fs/promises");
+  // Seed an old "Read"-only plan in the session
+  await writeFile(
+    config.runtimeFile,
+    JSON.stringify({
+      sessions: {
+        "multi-1": {
+          plan: { steps: [{ action: "Read" }], metadata: { goal: "old read" } },
+          allowedActions: ["read"],
+          updatedAt: Math.floor(Date.now() / 1000)
+        }
+      }
+    }),
+    "utf8"
+  );
+  // Drop a NEW pending plan that allows Bash (simulates register_intent_plan)
+  await writeFile(
+    path.join(tmp, "pending-plan.json"),
+    JSON.stringify({
+      plan: { steps: [{ action: "Bash" }], metadata: { goal: "list etc" } },
+      tokenRaw: "",
+      allowedActions: ["bash"],
+      registeredAt: Date.now()
+    }),
+    "utf8"
+  );
+  const output = await handlePreToolUse(
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "multi-1",
+      tool_name: "Bash",
+      tool_input: { command: "ls /etc" }
+    },
+    config
+  );
+  assert.equal(output, null, "Bash should be allowed under the freshly registered plan");
+});
+
 test("handleUserPromptSubmit adds context hints for normal prompts", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
   const config = buildConfig(tmp, { contextHintsEnabled: true, policyUpdateEnabled: true });

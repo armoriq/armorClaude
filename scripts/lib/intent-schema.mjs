@@ -50,7 +50,12 @@ export const INTENT_PLAN_FORMAT = `{
 export function normalizeIntentPlan(parsed) {
   return {
     steps: parsed.steps.map((s) => ({
+      // Both `action` and `tool` are populated to match the backend's
+      // CSRG/policy enforcer expectations: the SDK's invoke() does the
+      // same (sets tool: action). The backend hashes `step.tool` for
+      // policy paths like /steps/[i]/tool.
       action: s.action,
+      tool: s.action,
       mcp: "claude-code",
       description: s.description || "",
       metadata: s.metadata || {}

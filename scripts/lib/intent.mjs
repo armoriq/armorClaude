@@ -153,7 +153,7 @@ function getStepInputCandidates(step) {
   return candidates;
 }
 
-function findPlanStepIndices(plan, toolName, toolParams) {
+export function findPlanStepIndices(plan, toolName, toolParams) {
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   const normalizedTool = normalizeToolName(toolName);
   const matches = [];

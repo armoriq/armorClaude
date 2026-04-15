@@ -15,10 +15,10 @@ export function blockPrompt(reason) {
   };
 }
 
-export function addPromptContext(context) {
+export function addPromptContext(context, hookEventName = "UserPromptSubmit") {
   return {
     hookSpecificOutput: {
-      hookEventName: "UserPromptSubmit",
+      hookEventName,
       additionalContext: context
     }
   };

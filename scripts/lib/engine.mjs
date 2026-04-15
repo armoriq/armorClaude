@@ -2,7 +2,9 @@ import { normalizeToolName, nowEpochSeconds, sanitizeParams } from "./common.mjs
 import { addPromptContext, blockPrompt, denyPreTool } from "./hook-output.mjs";
 import {
   checkIntentTokenPlan,
+  checkToolAgainstPlan,
   extractAllowedActions,
+  findPlanStepIndices,
   getSessionTokenUsedStepIndices,
   parseCsrgProofHeaders,
   recordSessionTokenUsedStepIndices,
@@ -134,6 +136,20 @@ function debugLog(config, message) {
   }
 }
 
+/**
+ * Pick the best matching step index in the plan for a given tool call.
+ * Prefers a step that matches BOTH tool name and parameters, falls back to
+ * tool name only, then to step 0. Used to populate audit log step_index so
+ * the backend can advance plan execution state to 'completed'.
+ */
+function pickStepIndex(plan, toolName, toolInput) {
+  if (!plan || typeof plan !== "object") return 0;
+  const { matches, paramMatches } = findPlanStepIndices(plan, toolName, toolInput);
+  if (paramMatches.length > 0) return paramMatches[0];
+  if (matches.length > 0) return matches[0];
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // SessionStart
 // ---------------------------------------------------------------------------
@@ -154,7 +170,8 @@ export async function handleSessionStart(input, config) {
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
   const intentLabel = config.intentRequired ? "required" : "optional";
   return addPromptContext(
-    `ArmorCowork active (${modeLabel}, intent=${intentLabel})`
+    `ArmorCowork active (${modeLabel}, intent=${intentLabel})`,
+    "SessionStart"
   );
 }
 
@@ -234,37 +251,51 @@ export async function handlePreToolUse(input, config) {
     return null;
   }
 
-  // --- Whitelist: always allow the plan-registration tool itself ---
+  // --- Whitelist: ArmorClaude's own MCP tools must never be blocked,
+  //     otherwise the agent can't register a plan or read/update policy. ---
   const norm = normalizeToolName(toolName);
-  if (
-    norm === "register_intent_plan" ||
-    norm.endsWith("__register_intent_plan")
-  ) {
+  const armorTools = ["register_intent_plan", "policy_read", "policy_update"];
+  if (armorTools.some((t) => norm === t || norm.endsWith(`__${t}`))) {
     return null;
   }
 
-  // --- ExitPlanMode interception: capture the plan ---
+  // --- ExitPlanMode interception: capture the plan, then allow ---
   if (norm === "exitplanmode") {
     return await handleExitPlanModeCapture(input, sessionId, config);
   }
 
+  // --- Whitelist: Claude Code introspection / coordination tools that have
+  //     no side effects on user files or systems. Blocking these makes the
+  //     agent fight itself (e.g. ToolSearch is needed to fetch deferred MCP
+  //     tool schemas before they can be called). ---
+  const safeInternalTools = new Set([
+    "toolsearch",
+    "todowrite",
+    "listmcpresourcestool"
+  ]);
+  if (safeInternalTools.has(norm)) {
+    return null;
+  }
+
   // --- Consume pending plan from register_intent_plan MCP tool ---
+  // Always consume if a pending file exists — the MCP handler only writes
+  // it when Claude has registered a NEW plan, and stale plans must be
+  // overwritten so each prompt gets its own plan boundary.
   const runtimeStateEarly = await loadRuntimeState(config.runtimeFile);
-  const sessionEarly = getSession(runtimeStateEarly, sessionId) || {};
-  if (!sessionEarly.intentTokenRaw && !sessionEarly.plan) {
-    const pendingPath = path.join(config.dataDir, "pending-plan.json");
-    const pending = await readJson(pendingPath, null);
-    if (pending && (pending.tokenRaw || pending.plan)) {
-      upsertSession(runtimeStateEarly, sessionId, {
-        intentTokenRaw: pending.tokenRaw || "",
-        plan: pending.plan,
-        allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
-        expiresAt: pending.expiresAt
-      });
-      await saveRuntimeState(config.runtimeFile, runtimeStateEarly);
-      await unlink(pendingPath).catch(() => {});
-      debugLog(config, "consumed pending plan from register_intent_plan");
-    }
+  const pendingPath = path.join(config.dataDir, "pending-plan.json");
+  const pending = await readJson(pendingPath, null);
+  if (pending && (pending.tokenRaw || pending.plan)) {
+    upsertSession(runtimeStateEarly, sessionId, {
+      intentTokenRaw: pending.tokenRaw || "",
+      plan: pending.plan,
+      allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
+      expiresAt: pending.expiresAt,
+      // Reset per-token execution tracking when a new plan replaces the old.
+      intentExecution: undefined
+    });
+    await saveRuntimeState(config.runtimeFile, runtimeStateEarly);
+    await unlink(pendingPath).catch(() => {});
+    debugLog(config, "consumed pending plan from register_intent_plan");
   }
 
   // --- Static policy evaluation ---
@@ -433,8 +464,29 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
+  // --- Local plan enforcement (no backend / no token) ---
+  // When a plan was registered via register_intent_plan but ArmorIQ is not
+  // configured, enforce the plan locally: tool must be in plan, and params
+  // (if declared in step.metadata.inputs) must match.
+  let localPlanMatched = false;
+  if (!intentTokenRaw && localPlan && typeof localPlan === "object") {
+    const localCheck = checkToolAgainstPlan({
+      plan: localPlan,
+      toolName,
+      toolInput
+    });
+    if (localCheck.allowed) {
+      localPlanMatched = true;
+    } else {
+      const deny = denyOrAllow(config, localCheck.reason || "ArmorCowork intent drift");
+      if (deny) {
+        return deny;
+      }
+    }
+  }
+
   // --- Enforce intent requirement ---
-  if (config.intentRequired && !remoteAllowed && !tokenCheckMatched) {
+  if (config.intentRequired && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
     const deny = denyOrAllow(config, "ArmorCowork intent plan missing for this session");
     if (deny) {
       return deny;
@@ -541,12 +593,17 @@ export async function handlePostToolUse(input, config) {
       } catch { /* use raw */ }
     }
 
+    // Compute the real step index from the registered plan so the backend's
+    // updateExecutionProgress can advance plan status to 'completed'.
+    const inputs = sanitizeParams(input.tool_input, config.sanitize);
+    const stepIdx = pickStepIndex(session.plan, toolName, inputs);
+
     const dto = {
       token,
-      step_index: -1,
+      step_index: stepIdx,
       action: toolName,
       tool: toolName,
-      input: sanitizeParams(input.tool_input, config.sanitize),
+      input: inputs,
       output: sanitizeParams(input.tool_response, config.sanitize),
       status: "success",
       executed_at: new Date().toISOString(),
@@ -554,7 +611,7 @@ export async function handlePostToolUse(input, config) {
     };
 
     await iapService.createAuditLog(dto);
-    debugLog(config, `audit log sent for ${toolName}`);
+    debugLog(config, `audit log sent for ${toolName} step=${stepIdx}`);
   } catch (error) {
     // Audit is best-effort — don't block
     debugLog(config, `audit log failed: ${error}`);
@@ -590,12 +647,14 @@ export async function handlePostToolUseFailure(input, config) {
       } catch { /* use raw */ }
     }
 
+    const inputs = sanitizeParams(input.tool_input, config.sanitize);
+    const stepIdx = pickStepIndex(session.plan, toolName, inputs);
     const dto = {
       token,
-      step_index: -1,
+      step_index: stepIdx,
       action: toolName,
       tool: toolName,
-      input: sanitizeParams(input.tool_input, config.sanitize),
+      input: inputs,
       output: null,
       status: "failed",
       error_message: typeof input.error === "string" ? input.error : "Unknown error",

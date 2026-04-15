@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/hook-router.mjs"
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.mjs router"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/hook-router.mjs"
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.mjs router"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/hook-router.mjs"
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.mjs router"
           }
         ]
       }
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/hook-router.mjs"
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.mjs router"
           }
         ]
       }
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/hook-router.mjs"
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.mjs router"
           }
         ]
       }
@@ -58,7 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/hook-router.mjs"
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.mjs router"
           }
         ]
       }
@@ -68,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/hook-router.mjs"
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.mjs router"
           }
         ]
       }
