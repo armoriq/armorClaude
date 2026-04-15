@@ -5,7 +5,7 @@ import { z } from "zod";
 import { loadConfig } from "./lib/config.mjs";
 import { writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, requestIntent } from "./lib/intent.mjs";
-import { INTENT_PLAN_ZOD, normalizeIntentPlan } from "./lib/intent-schema.mjs";
+import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { applyPolicyCommand, computePolicyHash, loadPolicyState, parsePolicyTextCommand } from "./lib/policy.mjs";
 
 const POLICY_RULE_SCHEMA = z.object({
@@ -30,6 +30,37 @@ function toTextResult(text, extra = {}) {
       ...extra
     }
   };
+}
+
+/**
+ * Some MCP clients (and Claude itself) sometimes pass complex tool arguments
+ * as JSON-encoded strings instead of structured objects. Accept either form.
+ *
+ *   { goal: "...", steps: "[{...}]" }   → parse steps as JSON
+ *   { plan:  "{\"goal\":...}" }         → parse plan envelope as JSON
+ *   { goal: "...", steps: [{...}] }     → pass through
+ */
+function coercePlanArgs(args) {
+  if (!args || typeof args !== "object") {
+    return args;
+  }
+  // If caller wrapped the entire plan in a `plan` field (string or object),
+  // unwrap it.
+  if (args.plan !== undefined) {
+    let unwrapped = args.plan;
+    if (typeof unwrapped === "string") {
+      try { unwrapped = JSON.parse(unwrapped); } catch { /* fall through */ }
+    }
+    if (unwrapped && typeof unwrapped === "object") {
+      args = { ...unwrapped, ...args };
+      delete args.plan;
+    }
+  }
+  // Coerce stringified arrays/objects on known fields.
+  if (typeof args.steps === "string") {
+    try { args = { ...args, steps: JSON.parse(args.steps) }; } catch { /* leave as-is */ }
+  }
+  return args;
 }
 
 async function loadStateAndConfig() {
@@ -72,7 +103,12 @@ async function run() {
       }
 
       if (args.update) {
-        const parsed = POLICY_UPDATE_SCHEMA.safeParse(args.update);
+        // Tolerate JSON-string update payloads (some clients stringify objects).
+        let updateInput = args.update;
+        if (typeof updateInput === "string") {
+          try { updateInput = JSON.parse(updateInput); } catch { /* let validator complain */ }
+        }
+        const parsed = POLICY_UPDATE_SCHEMA.safeParse(updateInput);
         if (!parsed.success) {
           return toTextResult(`Policy update rejected: ${parsed.error.message}`);
         }
@@ -128,13 +164,27 @@ async function run() {
         "Declare the tools you intend to use for this task. " +
         "Required by ArmorCowork before any other tool call. " +
         "Without a registered plan, all tool calls will be blocked.",
+      // Accept the canonical {goal, steps} shape AND the string-serialized
+      // variants Claude sometimes emits (steps as a JSON string, or the
+      // whole plan wrapped in a `plan` field). The handler below coerces
+      // them to the canonical shape before validating with INTENT_PLAN_ZOD.
       inputSchema: {
-        goal: INTENT_PLAN_ZOD.shape.goal,
-        steps: INTENT_PLAN_ZOD.shape.steps
+        goal: z.string().min(1).optional()
+          .describe("One-line summary of what the plan accomplishes"),
+        steps: z.union([
+          z.array(PLAN_STEP_SCHEMA).min(1),
+          z.string().min(1)
+        ]).optional()
+          .describe("Ordered list of tool calls (array, or JSON-stringified array)"),
+        plan: z.union([INTENT_PLAN_ZOD, z.string().min(1)]).optional()
+          .describe("Alternative: pass the whole plan as an object or JSON string")
       }
     },
     async (args) => {
-      const parsed = INTENT_PLAN_ZOD.safeParse(args);
+      // Claude sometimes serializes complex tool arguments as JSON strings
+      // (e.g. steps: "[{...}]" instead of steps: [{...}]). Tolerate both.
+      const coerced = coercePlanArgs(args);
+      const parsed = INTENT_PLAN_ZOD.safeParse(coerced);
       if (!parsed.success) {
         return toTextResult(`Plan rejected: ${parsed.error.message}`);
       }

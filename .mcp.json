@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "armorcowork-policy": {
+    "armorclaude-policy": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/policy-mcp.mjs"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.mjs", "mcp"]
     }
   }
 }

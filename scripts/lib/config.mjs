@@ -39,21 +39,21 @@ export function loadConfig(env = process.env) {
     env.ARMORCOWORK_BACKEND_ENDPOINT?.trim() ||
     env.BACKEND_ENDPOINT?.trim() ||
     (useProduction
-      ? "https://customer-api.armoriq.ai"
+      ? "https://staging-api.armoriq.ai"
       : "http://127.0.0.1:3000");
 
   const iapEndpoint =
     env.ARMORCOWORK_IAP_ENDPOINT?.trim() ||
     env.IAP_ENDPOINT?.trim() ||
     (useProduction
-      ? "https://customer-iap.armoriq.ai"
+      ? "https://iap.armoriq.ai"
       : "http://127.0.0.1:8000");
 
   const proxyEndpoint =
     env.ARMORCOWORK_PROXY_ENDPOINT?.trim() ||
     env.PROXY_ENDPOINT?.trim() ||
     (useProduction
-      ? "https://customer-proxy.armoriq.ai"
+      ? "https://cloud-run-proxy.armoriq.io"
       : "http://127.0.0.1:3001");
 
   const csrgEndpoint =

@@ -1,0 +1,25 @@
+{
+  "name": "armoriq",
+  "owner": {
+    "name": "ArmorIQ",
+    "email": "support@armoriq.ai",
+    "url": "https://armoriq.ai"
+  },
+  "metadata": {
+    "description": "Official ArmorIQ marketplace for Claude Code security plugins.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "armorclaude",
+      "source": "./",
+      "description": "Intent-based security enforcement for Claude Code: declared plans, policy rules, intent-drift blocking, CSRG cryptographic proofs, and audit logging.",
+      "version": "0.2.0",
+      "category": "security",
+      "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp"],
+      "homepage": "https://armoriq.ai",
+      "license": "MIT",
+      "author": { "name": "ArmorIQ", "email": "support@armoriq.ai" }
+    }
+  ]
+}

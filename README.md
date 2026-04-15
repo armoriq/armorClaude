@@ -19,20 +19,66 @@ Tool Result ──► PostToolUse hook ──► Audit log sent to IAP
 3. **After tool execution**: Sends audit logs to ArmorIQ IAP for compliance tracking.
 4. **Fail-closed**: If planning fails, identity is missing, or the token is invalid — all tool calls are blocked by default.
 
+## Install
+
+### One-line install (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/armoriq/armorClaude/main/install.sh | bash
+```
+
+This adds the `armoriq` Claude Code marketplace and installs the `armorclaude` plugin. Dependencies are installed automatically on first hook fire.
+
+### Manual install (Claude Code marketplace)
+
+```bash
+claude plugin marketplace add armoriq/armorClaude
+claude plugin install armorclaude@armoriq
+```
+
+### Verify
+
+```bash
+claude plugin list
+# ❯ armorclaude@armoriq  Status: ✔ enabled
+
+claude mcp list | grep armorclaude
+# plugin:armorclaude:armorclaude-policy: ... ✓ Connected
+```
+
+### Update / disable / uninstall
+
+```bash
+claude plugin update armorclaude
+claude plugin disable armorclaude   # turn off without removing
+claude plugin enable  armorclaude
+claude plugin uninstall armorclaude
+```
+
+### Requirements
+
+- Claude Code 2.x (`claude --version`)
+- Node.js >= 20
+- (Optional) ArmorIQ API key for backend audit + CSRG proofs — get one at https://armoriq.ai
+
 ## Structure
 
 ```
-armorcowork/
-├── .claude-plugin/plugin.json    # Plugin manifest with userConfig
+armorClaude/
+├── .claude-plugin/
+│   ├── plugin.json               # Plugin manifest with userConfig
+│   └── marketplace.json          # Marketplace listing for `claude plugin install`
 ├── hooks/hooks.json              # Hook registration (7 lifecycle events)
-├── .mcp.json                     # MCP server for policy tools
+├── .mcp.json                     # MCP server for policy + intent tools
+├── install.sh                    # Curl-able installer
 ├── scripts/
+│   ├── bootstrap.mjs             # Auto-installs npm deps on first run
 │   ├── hook-router.mjs           # Hook entrypoint (dispatches events)
-│   ├── policy-mcp.mjs            # MCP server (policy_update, policy_read)
+│   ├── policy-mcp.mjs            # MCP server (policy_update, policy_read, register_intent_plan)
 │   └── lib/
 │       ├── engine.mjs            # Main handlers for all hook events
 │       ├── config.mjs            # Configuration (env vars + userConfig)
-│       ├── planner.mjs           # Plan generation (plan file + LLM fallback)
+│       ├── planner.mjs           # Plan parsing (plan file + JSON block)
 │       ├── intent.mjs            # Intent token verification & CSRG proofs
 │       ├── iap-service.mjs       # IAP backend (verify-step, audit, CSRG)
 │       ├── crypto-policy.mjs     # Merkle tree policy binding (CSRG)
@@ -41,19 +87,7 @@ armorcowork/
 │       ├── hook-output.mjs       # Hook response formatters
 │       ├── fs-store.mjs          # JSON file I/O
 │       └── common.mjs            # Utilities (sanitize, HTTP, hashing)
-└── tests/                        # node:test test suite
-```
-
-## Install
-
-```bash
-cd armorcowork && npm install
-claude --plugin-dir ./armorcowork
-```
-
-Or validate:
-```bash
-claude plugin validate ./armorcowork
+└── tests/                        # node:test test suite (48 tests)
 ```
 
 ## Configuration
