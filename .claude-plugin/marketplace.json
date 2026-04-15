@@ -2,7 +2,7 @@
   "name": "armoriq",
   "owner": {
     "name": "ArmorIQ",
-    "email": "support@armoriq.ai",
+    "email": "license@armoriq.io",
     "url": "https://armoriq.ai"
   },
   "metadata": {
@@ -19,7 +19,7 @@
       "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp"],
       "homepage": "https://armoriq.ai",
       "license": "MIT",
-      "author": { "name": "ArmorIQ", "email": "support@armoriq.ai" }
+      "author": { "name": "ArmorIQ", "email": "license@armoriq.io" }
     }
   ]
 }

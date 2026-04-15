@@ -2,7 +2,7 @@
   "name": "armorclaude",
   "version": "0.2.0",
   "description": "ArmorIQ intent-based security enforcement for Claude Code: policy-based tool access control, intent verification, CSRG cryptographic proofs, and audit logging.",
-  "author": { "name": "ArmorIQ", "email": "support@armoriq.ai" },
+  "author": { "name": "ArmorIQ", "email": "license@armoriq.io" },
   "homepage": "https://armoriq.ai",
   "repository": "https://github.com/armoriq/armorClaude",
   "license": "MIT",
