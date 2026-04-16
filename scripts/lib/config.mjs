@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean, parseInteger, parseList } from "./common.mjs";
 
@@ -59,8 +60,19 @@ export function loadConfig(env = process.env) {
   const csrgEndpoint =
     pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") || iapEndpoint;
 
-  const apiKey =
-    pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
+  // API key resolution: plugin config → env var → ~/.armoriq/credentials.json
+  let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
+  if (!apiKey) {
+    try {
+      const credPath = path.join(homedir(), ".armoriq", "credentials.json");
+      const creds = JSON.parse(readFileSync(credPath, "utf-8"));
+      if (creds?.apiKey && typeof creds.apiKey === "string") {
+        apiKey = creds.apiKey;
+      }
+    } catch {
+      // no credentials file — local-only mode
+    }
+  }
 
   return {
     mode: mode === "monitor" ? "monitor" : "enforce",
