@@ -118,6 +118,64 @@ verify_install() {
   fi
 }
 
+is_promptable() {
+  [[ -e /dev/tty ]] || return 1
+  (: < /dev/tty) 2>/dev/null || return 1
+  return 0
+}
+
+prompt_yes_no() {
+  local question="$1" default="${2:-Y}"
+  local hint="(Y/n)"
+  [[ "$default" == "N" ]] && hint="(y/N)"
+  if ! is_promptable; then
+    [[ "$default" == "Y" ]]; return $?
+  fi
+  printf "${B}?${N} %s ${D}%s${N} " "$question" "$hint" >&2
+  local answer
+  read -r answer < /dev/tty || answer=""
+  [[ -z "$answer" ]] && { [[ "$default" == "Y" ]]; return $?; }
+  [[ "$answer" =~ ^[Yy] ]]
+}
+
+connect_to_armoriq() {
+  section "Connect to ArmorIQ"
+  cat <<EOF
+
+  Unlocks: signed JWT intent tokens, audit logs, CSRG proofs,
+  and dashboard visibility for all intent plans.
+
+EOF
+
+  if ! is_promptable; then
+    printf "  Run ${G}${B}armoriq login${N} to connect later.\n\n"
+    return 0
+  fi
+
+  if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
+    echo
+    printf "  No problem. Run ${G}${B}armoriq login${N} anytime to connect.\n\n"
+    return 0
+  fi
+
+  echo
+  # Run armoriq login inline — uses the globally installed CLI or npx fallback
+  if command -v armoriq >/dev/null 2>&1; then
+    armoriq login
+  elif command -v npx >/dev/null 2>&1; then
+    npx @armoriq/sdk-dev login
+  else
+    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk-dev login${N} manually."
+    return 0
+  fi
+
+  local login_status=$?
+  if [[ $login_status -eq 0 ]] && [[ -f "$HOME/.armoriq/credentials.json" ]]; then
+    echo
+    ok "ArmorIQ connected. Claude Code will auto-load the key."
+  fi
+}
+
 finale() {
   echo
   printf "${G}${B}ArmorClaude is installed.${N}\n"
@@ -135,21 +193,6 @@ finale() {
   Add policy rules from any prompt:
 
     ${D}> Policy new: deny WebFetch${N}
-
-EOF
-
-  section "Optional: connect to ArmorIQ"
-  cat <<EOF
-
-  Unlocks: signed JWT intent tokens, audit logs to IAP, CSRG proofs,
-  remote step verification, dashboard visibility.
-
-  ${G}${B}armoriq login${N}
-
-  Opens your browser, authenticates, and saves an API key locally.
-  Then restart Claude Code — the plugin picks up the key automatically.
-
-  ${D}Or manually: export ARMORIQ_API_KEY=ak_live_... (get one at ${DASHBOARD_URL})${N}
 
 EOF
 
@@ -181,6 +224,7 @@ main() {
 
   install_plugin
   verify_install
+  connect_to_armoriq
   finale
 }
 
