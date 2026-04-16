@@ -93,8 +93,12 @@ export function loadConfig(env = process.env) {
       pluginOpt(env, "INTENT_REQUIRED", "ARMORCOWORK_INTENT_REQUIRED") || undefined,
       true
     ),
-    requireCsrgProofs: parseBoolean(env.REQUIRE_CSRG_PROOFS, true),
-    csrgVerifyEnabled: parseBoolean(env.CSRG_VERIFY_ENABLED, true),
+    // CSRG verification disabled by default until tenant OPA policies are
+    // configured to allow Claude Code tools. The OPA default-deny behavior
+    // blocks all tools when no matching policy exists. Enable once your
+    // tenant has allow-rules for the tools Claude uses.
+    requireCsrgProofs: parseBoolean(env.REQUIRE_CSRG_PROOFS, false),
+    csrgVerifyEnabled: parseBoolean(env.CSRG_VERIFY_ENABLED, false),
 
     // Policy management
     policyUpdateEnabled: parseBoolean(env.ARMORCOWORK_POLICY_UPDATE_ENABLED, true),
