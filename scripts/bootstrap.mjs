@@ -8,9 +8,13 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.dirname(__dirname);
-const sentinel = path.join(pluginRoot, "node_modules", "@armoriq", "sdk", "package.json");
+const sentinels = [
+  path.join(pluginRoot, "node_modules", "@armoriq", "sdk", "package.json"),
+  path.join(pluginRoot, "node_modules", "zod", "index.js"),
+  path.join(pluginRoot, "node_modules", "@modelcontextprotocol", "sdk", "package.json"),
+];
 
-if (!existsSync(sentinel)) {
+if (!sentinels.every(existsSync)) {
   process.stderr.write("[armorclaude] installing dependencies (one-time)...\n");
   const result = spawnSync("npm", ["install", "--omit=dev", "--silent", "--no-audit", "--no-fund"], {
     cwd: pluginRoot,
