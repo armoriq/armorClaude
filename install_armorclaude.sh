@@ -96,6 +96,11 @@ install_plugin() {
   info "installing plugin ${B}${PLUGIN_REF}${N}"
   claude plugin install "${PLUGIN_REF}" >/dev/null
   ok "plugin installed"
+
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
+  npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
+    && ok "armoriq CLI ready" \
+    || warn "couldn't install globally — use ${B}npx @armoriq/sdk-dev${N} instead"
 }
 
 # ---------------------------------------------------------------------------
@@ -139,7 +144,7 @@ EOF
   Unlocks: signed JWT intent tokens, audit logs to IAP, CSRG proofs,
   remote step verification, dashboard visibility.
 
-  ${G}${B}npx @armoriq/sdk-dev login${N}
+  ${G}${B}armoriq login${N}
 
   Opens your browser, authenticates, and saves an API key locally.
   Then restart Claude Code — the plugin picks up the key automatically.
