@@ -187,10 +187,15 @@ export async function handleUserPromptSubmit(input, config) {
   }
 
   // --- Policy command handling ---
+  // Instead of blocking the prompt (which Desktop UI swallows silently),
+  // apply the command and inject the result as context so Claude can
+  // relay the outcome to the user.
   if (policyCommandLooksLikePrompt(prompt)) {
     const allowed = isPolicyUpdateAllowed(config, input);
     if (!allowed.allowed) {
-      return blockPrompt(allowed.reason || "ArmorClaude policy update denied");
+      return addPromptContext(
+        `[ArmorClaude] ${allowed.reason || "Policy update denied."}`
+      );
     }
     const policyState = await loadPolicyState(config.policyFile);
     const command = parsePolicyTextCommand(prompt, policyState);
@@ -201,7 +206,9 @@ export async function handleUserPromptSubmit(input, config) {
       command,
       actor
     });
-    return blockPrompt(result.message);
+    return addPromptContext(
+      `[ArmorClaude] ${result.message}\n\nTell the user the result above. Do not call any tools for this request.`
+    );
   }
 
   // --- Store prompt in session ---

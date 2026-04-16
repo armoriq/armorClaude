@@ -84,8 +84,8 @@ test("handleUserPromptSubmit applies policy command and blocks prompt", async ()
     config
   );
 
-  assert.equal(output?.decision, "block");
-  assert.match(output?.reason || "", /policy updated/i);
+  assert.ok(output?.hookSpecificOutput?.additionalContext);
+  assert.match(output.hookSpecificOutput.additionalContext, /policy updated/i);
 });
 
 test("handlePreToolUse denies when policy blocks tool", async () => {
