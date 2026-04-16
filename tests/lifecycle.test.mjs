@@ -64,7 +64,7 @@ test("handleSessionStart creates session and returns context", async () => {
     config
   );
   assert.ok(output?.hookSpecificOutput?.additionalContext);
-  assert.match(output.hookSpecificOutput.additionalContext, /ArmorCowork active/i);
+  assert.match(output.hookSpecificOutput.additionalContext, /ArmorClaude active/i);
 
   // Verify session was persisted
   const stateRaw = await readFile(config.runtimeFile, "utf8");

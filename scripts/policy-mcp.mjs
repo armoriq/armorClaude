@@ -79,7 +79,7 @@ async function run() {
     "policy_update",
     {
       title: "Policy Update",
-      description: "Manage ArmorCowork policy rules (update/list/delete/reset)",
+      description: "Manage ArmorClaude policy rules (update/list/delete/reset)",
       inputSchema: {
         text: z.string().optional(),
         update: POLICY_UPDATE_SCHEMA.optional()
@@ -88,7 +88,7 @@ async function run() {
     async (args) => {
       const { config, state } = await loadStateAndConfig();
       if (!config.policyUpdateEnabled) {
-        return toTextResult("ArmorCowork policy updates are disabled.");
+        return toTextResult("ArmorClaude policy updates are disabled.");
       }
 
       if (typeof args.text === "string" && args.text.trim()) {
@@ -132,7 +132,7 @@ async function run() {
     "policy_read",
     {
       title: "Policy Read",
-      description: "Read current ArmorCowork policy state",
+      description: "Read current ArmorClaude policy state",
       inputSchema: {
         id: z.string().optional()
       }
@@ -162,7 +162,7 @@ async function run() {
       title: "Register Intent Plan",
       description:
         "Declare the tools you intend to use for this task. " +
-        "Required by ArmorCowork before any other tool call. " +
+        "Required by ArmorClaude before any other tool call. " +
         "Without a registered plan, all tool calls will be blocked.",
       // Accept the canonical {goal, steps} shape AND the string-serialized
       // variants Claude sometimes emits (steps as a JSON string, or the

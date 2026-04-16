@@ -170,7 +170,7 @@ export function evaluatePolicy({ policy, toolName, toolParams }) {
     if (rule.action === "deny") {
       return {
         allowed: false,
-        reason: `ArmorCowork policy deny: ${rule.id}`,
+        reason: `ArmorClaude policy deny: ${rule.id}`,
         matchedRule: rule,
         dataClasses: Array.from(dataClasses)
       };
@@ -178,7 +178,7 @@ export function evaluatePolicy({ policy, toolName, toolParams }) {
     if (rule.action === "require_approval") {
       return {
         allowed: false,
-        reason: `ArmorCowork policy requires approval: ${rule.id}`,
+        reason: `ArmorClaude policy requires approval: ${rule.id}`,
         matchedRule: rule,
         dataClasses: Array.from(dataClasses)
       };

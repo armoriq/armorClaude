@@ -50,7 +50,7 @@ function getSdkClient(config) {
 }
 
 function buildFallbackPlan(payload) {
-  const goal = typeof payload.prompt === "string" ? payload.prompt : "ArmorCowork intent";
+  const goal = typeof payload.prompt === "string" ? payload.prompt : "ArmorClaude intent";
   const plan = { steps: [], metadata: { goal, source: "claude-code" } };
   if (typeof payload.toolName === "string" && payload.toolName.trim()) {
     plan.steps.push({
@@ -187,7 +187,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
   const normalizedTool = normalizeToolName(toolName);
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   if (!steps.length) {
-    return { allowed: false, reason: "ArmorCowork intent plan is empty" };
+    return { allowed: false, reason: "ArmorClaude intent plan is empty" };
   }
   const matches = [];
   for (const step of steps) {
@@ -205,7 +205,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
     }
   }
   if (!matches.length) {
-    return { allowed: false, reason: `ArmorCowork intent drift: tool not in plan (${toolName})` };
+    return { allowed: false, reason: `ArmorClaude intent drift: tool not in plan (${toolName})` };
   }
   if (!isPlainObject(toolInput)) {
     return { allowed: true };
@@ -224,7 +224,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
   if (sawConstrainedMatch) {
     return {
       allowed: false,
-      reason: `ArmorCowork intent mismatch: parameters not allowed for ${toolName}`
+      reason: `ArmorClaude intent mismatch: parameters not allowed for ${toolName}`
     };
   }
   return { allowed: true };

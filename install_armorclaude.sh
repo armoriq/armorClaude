@@ -139,12 +139,12 @@ EOF
   Unlocks: signed JWT intent tokens, audit logs to IAP, CSRG proofs,
   remote step verification, dashboard visibility.
 
-  ${C}1.${N} Get an API key at ${C}${B}${DASHBOARD_URL}${N}
-  ${C}2.${N} Add this line to your shell rc (~/.zshrc or ~/.bashrc):
+  ${G}${B}npx @armoriq/sdk-dev login${N}
 
-       ${D}export ARMORIQ_API_KEY=ak_live_...${N}
+  Opens your browser, authenticates, and saves an API key locally.
+  Then restart Claude Code — the plugin picks up the key automatically.
 
-  ${C}3.${N} Open a new terminal (or ${B}source${N} the rc file) and run ${B}claude${N}.
+  ${D}Or manually: export ARMORIQ_API_KEY=ak_live_... (get one at ${DASHBOARD_URL})${N}
 
 EOF
 

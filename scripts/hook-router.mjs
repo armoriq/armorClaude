@@ -83,6 +83,6 @@ main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   debugLog(config, `error=${message}`);
   if (config.mode === "enforce") {
-    emitJson(denyPreTool(`ArmorCowork internal error: ${message}`));
+    emitJson(denyPreTool(`ArmorClaude internal error: ${message}`));
   }
 });

@@ -48,7 +48,7 @@ function shouldDeny(config) {
 
 function buildPolicyContextHints() {
   return [
-    "ArmorCowork policy instructions:",
+    "ArmorClaude policy instructions:",
     "- If the user explicitly asks to change policy, call `policy_update` immediately.",
     "- Supported text commands: Policy list/get/delete/reset/update/new/prioritize.",
     "- Do not invent extra policy mechanisms outside `policy_update`."
@@ -72,7 +72,7 @@ function policyCommandLooksLikePrompt(prompt) {
 
 function isPolicyUpdateAllowed(config, input) {
   if (!config.policyUpdateEnabled) {
-    return { allowed: false, reason: "ArmorCowork policy updates disabled" };
+    return { allowed: false, reason: "ArmorClaude policy updates disabled" };
   }
   const allowList = config.policyUpdateAllowList;
   if (!Array.isArray(allowList) || allowList.length === 0 || allowList.includes("*")) {
@@ -84,7 +84,7 @@ function isPolicyUpdateAllowed(config, input) {
     ? { allowed: true }
     : {
         allowed: false,
-        reason: "ArmorCowork policy update denied",
+        reason: "ArmorClaude policy update denied",
         candidates
       };
 }
@@ -170,7 +170,7 @@ export async function handleSessionStart(input, config) {
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
   const intentLabel = config.intentRequired ? "required" : "optional";
   return addPromptContext(
-    `ArmorCowork active (${modeLabel}, intent=${intentLabel})`,
+    `ArmorClaude active (${modeLabel}, intent=${intentLabel})`,
     "SessionStart"
   );
 }
@@ -190,7 +190,7 @@ export async function handleUserPromptSubmit(input, config) {
   if (policyCommandLooksLikePrompt(prompt)) {
     const allowed = isPolicyUpdateAllowed(config, input);
     if (!allowed.allowed) {
-      return blockPrompt(allowed.reason || "ArmorCowork policy update denied");
+      return blockPrompt(allowed.reason || "ArmorClaude policy update denied");
     }
     const policyState = await loadPolicyState(config.policyFile);
     const command = parsePolicyTextCommand(prompt, policyState);
@@ -219,7 +219,7 @@ export async function handleUserPromptSubmit(input, config) {
   const parts = [];
   if (config.planningEnabled) {
     parts.push(
-      "ArmorCowork intent enforcement is active. Before using any tool, " +
+      "ArmorClaude intent enforcement is active. Before using any tool, " +
       "declare your plan in this exact JSON shape:\n\n" +
       INTENT_PLAN_FORMAT + "\n\n" +
       "How to submit:\n" +
@@ -311,7 +311,7 @@ export async function handlePreToolUse(input, config) {
       if (cachedState?.policyDigest) {
         const check = cryptoService.verifyPolicyDigest(currentDigest, cachedState.policyDigest);
         if (!check.valid) {
-          return denyOrAllow(config, `ArmorCowork crypto policy mismatch: ${check.reason}`);
+          return denyOrAllow(config, `ArmorClaude crypto policy mismatch: ${check.reason}`);
         }
       }
     } catch (error) {
@@ -325,7 +325,7 @@ export async function handlePreToolUse(input, config) {
     toolParams: toolInput
   });
   if (!policyDecision.allowed) {
-    return denyPreTool(policyDecision.reason || "ArmorCowork policy denied");
+    return denyPreTool(policyDecision.reason || "ArmorClaude policy denied");
   }
 
   // --- Intent token verification ---
@@ -371,7 +371,7 @@ export async function handlePreToolUse(input, config) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (config.intentRequired && shouldDeny(config)) {
-        return denyPreTool(`ArmorCowork intent planning failed: ${message}`);
+        return denyPreTool(`ArmorClaude intent planning failed: ${message}`);
       }
     }
   }
@@ -433,7 +433,7 @@ export async function handlePreToolUse(input, config) {
       if (verifyResult.allowed === false) {
         return denyOrAllow(
           config,
-          verifyResult.reason || `ArmorCowork intent verification denied for ${toolName}`
+          verifyResult.reason || `ArmorClaude intent verification denied for ${toolName}`
         );
       }
       const merged = mergeIntentIntoSession(session, verifyResult);
@@ -449,7 +449,7 @@ export async function handlePreToolUse(input, config) {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const deny = denyOrAllow(config, `ArmorCowork verify-step failed: ${message}`);
+      const deny = denyOrAllow(config, `ArmorClaude verify-step failed: ${message}`);
       if (deny) {
         return deny;
       }
@@ -458,7 +458,7 @@ export async function handlePreToolUse(input, config) {
 
   // --- Expiry check ---
   if (Number.isFinite(localExpiresAt) && nowEpochSeconds() > localExpiresAt) {
-    const deny = denyOrAllow(config, "ArmorCowork intent token expired");
+    const deny = denyOrAllow(config, "ArmorClaude intent token expired");
     if (deny) {
       return deny;
     }
@@ -478,7 +478,7 @@ export async function handlePreToolUse(input, config) {
     if (localCheck.allowed) {
       localPlanMatched = true;
     } else {
-      const deny = denyOrAllow(config, localCheck.reason || "ArmorCowork intent drift");
+      const deny = denyOrAllow(config, localCheck.reason || "ArmorClaude intent drift");
       if (deny) {
         return deny;
       }
@@ -487,7 +487,7 @@ export async function handlePreToolUse(input, config) {
 
   // --- Enforce intent requirement ---
   if (config.intentRequired && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
-    const deny = denyOrAllow(config, "ArmorCowork intent plan missing for this session");
+    const deny = denyOrAllow(config, "ArmorClaude intent plan missing for this session");
     if (deny) {
       return deny;
     }

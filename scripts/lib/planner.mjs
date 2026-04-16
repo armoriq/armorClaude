@@ -1,5 +1,5 @@
 /**
- * Plan parsing for ArmorCowork.
+ * Plan parsing for ArmorClaude.
  *
  * Two capture paths, one schema:
  *  1. Plan mode: parse the plan file for a fenced ```json block (preferred)
