@@ -90,7 +90,10 @@ export function loadConfig(env = process.env) {
     verifyStepEndpoint:
       env.ARMORCOWORK_VERIFY_STEP_URL?.trim() ||
       `${backendEndpoint}/iap/verify-step`,
-    validitySeconds: parseInteger(env.ARMORCOWORK_VALIDITY_SECONDS, 60),
+    // 5 minutes — Claude can take 60+ seconds to think before executing tools,
+    // so the original 60s TTL often expired between plan registration and the
+    // first tool call, especially on complex prompts.
+    validitySeconds: parseInteger(env.ARMORCOWORK_VALIDITY_SECONDS, 300),
     timeoutMs,
     maxRetries: parseInteger(env.ARMORCOWORK_MAX_RETRIES, 3),
     verifySsl: parseBoolean(env.ARMORCOWORK_VERIFY_SSL, true),
