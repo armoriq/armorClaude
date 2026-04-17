@@ -236,7 +236,12 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
     return { matched: false };
   }
   if (parsed.expiresAt && Date.now() / 1000 > parsed.expiresAt) {
-    return { matched: true, blockReason: "ArmorIQ intent token expired", plan: parsed.plan };
+    return {
+      matched: true,
+      blockReason:
+        "ArmorIQ intent token expired — call register_intent_plan to refresh, then retry",
+      plan: parsed.plan
+    };
   }
   const allowedActions = extractAllowedActions(parsed.plan);
   if (!allowedActions.has(normalizeToolName(toolName))) {
