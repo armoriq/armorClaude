@@ -204,7 +204,7 @@ EOF
   ${D}claude plugin enable  armorclaude${N}
   ${D}claude plugin update  armorclaude${N}
 
-  Docs: ${C}https://github.com/armoriq/armorClaude${N}
+  Docs: ${C}https://armorclaude-docs.armoriq.ai${N}
 
 EOF
 }
