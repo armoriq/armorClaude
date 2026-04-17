@@ -1,4 +1,4 @@
-import { normalizeToolName, nowEpochSeconds, sanitizeParams } from "./common.mjs";
+import { normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
 import { addPromptContext, blockPrompt, denyPreTool } from "./hook-output.mjs";
 import {
   checkIntentTokenPlan,
@@ -248,14 +248,24 @@ export async function handlePreToolUse(input, config) {
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
   if (!toolName) {
-    return null;
+    // Missing tool_name on a PreToolUse event means the payload shape is
+    // unexpected. Fail-closed in enforce mode instead of silently allowing.
+    return denyOrAllow(config, "ArmorClaude: missing tool_name on PreToolUse");
   }
 
   // --- Whitelist: ArmorClaude's own MCP tools must never be blocked,
-  //     otherwise the agent can't register a plan or read/update policy. ---
+  //     otherwise the agent can't register a plan or read/update policy.
+  //     Match the exact MCP prefix from .mcp.json (armorclaude-policy),
+  //     not any suffix — an evil server called evil__policy_update would
+  //     previously have been whitelisted. ---
   const norm = normalizeToolName(toolName);
   const armorTools = ["register_intent_plan", "policy_read", "policy_update"];
-  if (armorTools.some((t) => norm === t || norm.endsWith(`__${t}`))) {
+  const armorMcpPrefix = "mcp__armorclaude-policy__";
+  if (
+    armorTools.some(
+      (t) => norm === t || norm === `${armorMcpPrefix}${t}`
+    )
+  ) {
     return null;
   }
 
@@ -603,8 +613,8 @@ export async function handlePostToolUse(input, config) {
       step_index: stepIdx,
       action: toolName,
       tool: toolName,
-      input: inputs,
-      output: sanitizeParams(input.tool_response, config.sanitize),
+      input: redactSecrets(inputs),
+      output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
       status: "success",
       executed_at: new Date().toISOString(),
       duration_ms: 0
@@ -654,10 +664,10 @@ export async function handlePostToolUseFailure(input, config) {
       step_index: stepIdx,
       action: toolName,
       tool: toolName,
-      input: inputs,
+      input: redactSecrets(inputs),
       output: null,
       status: "failed",
-      error_message: typeof input.error === "string" ? input.error : "Unknown error",
+      error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error",
       executed_at: new Date().toISOString(),
       duration_ms: 0
     };

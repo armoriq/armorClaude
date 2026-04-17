@@ -118,6 +118,57 @@ export function sanitizeParams(params, limits) {
   return isPlainObject(sanitized) ? sanitized : {};
 }
 
+// ---------------------------------------------------------------------------
+// Secret redaction — applied to audit payloads before they leave the host.
+// Kept deliberately cheap: a handful of regexes run against strings only,
+// no deep rebuild when nothing matches.
+// ---------------------------------------------------------------------------
+
+const SECRET_PATTERNS = [
+  // Bearer / Authorization tokens in free text
+  /\b(Bearer\s+)[A-Za-z0-9._\-+/=]{12,}/gi,
+  // AWS access keys
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  // Generic long hex / base64 tokens prefixed by common secret field names
+  /\b((?:api[_-]?key|secret|token|password|passwd|pwd|authorization)\s*[:=]\s*)["']?[A-Za-z0-9._\-+/=]{12,}["']?/gi,
+  // GitHub personal access tokens
+  /\bghp_[A-Za-z0-9]{30,}\b/g,
+  // JWT-ish three-part tokens
+  /\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b/g,
+  // Private key blocks
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g
+];
+
+function redactString(text) {
+  let out = text;
+  for (const pattern of SECRET_PATTERNS) {
+    out = out.replace(pattern, (match, prefix) => `${prefix || ""}<redacted>`);
+  }
+  return out;
+}
+
+function redactValue(value, depth = 0) {
+  if (depth > 8) return value;
+  if (typeof value === "string") {
+    return redactString(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactValue(entry, depth + 1));
+  }
+  if (isPlainObject(value)) {
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) {
+      out[key] = redactValue(entry, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
+export function redactSecrets(value) {
+  return redactValue(value, 0);
+}
+
 export function nowEpochSeconds() {
   return Math.floor(Date.now() / 1000);
 }

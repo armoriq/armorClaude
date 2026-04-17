@@ -22,16 +22,33 @@ import { normalizeToolName } from "./common.mjs";
  * Extract a fenced ```json block from markdown content.
  * The UserPromptSubmit directive tells Claude to include the plan as a
  * fenced JSON block in plan mode.
+ *
+ * Strategy: scan all ```json blocks and return the LAST one that parses
+ * cleanly AND looks like an intent plan (has a `steps` array). This avoids
+ * picking up an example/illustration block earlier in the file.
  */
 export function extractPlanJsonBlock(markdown) {
   if (!markdown) return null;
-  const match = markdown.match(/```json\s*([\s\S]*?)```/);
-  if (!match) return null;
-  try {
-    return JSON.parse(match[1].trim());
-  } catch {
-    return null;
+  const matches = Array.from(markdown.matchAll(/```json\s*([\s\S]*?)```/g));
+  if (matches.length === 0) return null;
+  let fallback = null;
+  for (let i = matches.length - 1; i >= 0; i -= 1) {
+    const raw = matches[i][1]?.trim();
+    if (!raw) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (parsed && typeof parsed === "object" && Array.isArray(parsed.steps)) {
+      return parsed;
+    }
+    if (fallback === null) {
+      fallback = parsed;
+    }
   }
+  return fallback;
 }
 
 // ---------------------------------------------------------------------------

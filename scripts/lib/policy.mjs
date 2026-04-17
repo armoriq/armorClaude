@@ -247,22 +247,37 @@ function inferPolicyDataClass(text) {
   return undefined;
 }
 
+// A tool name must look like a real identifier — letters, digits, underscore,
+// hyphen, dot, colon — OR exactly "*". Anything else is rejected so free-text
+// like "all tools" or regex fragments can't become rule matchers.
+const VALID_TOOL_NAME = /^(?:\*|[A-Za-z][\w.:\-]{0,80})$/;
+
+function sanitizeToolName(candidate) {
+  if (typeof candidate !== "string") return null;
+  const trimmed = candidate.trim();
+  if (!trimmed) return null;
+  return VALID_TOOL_NAME.test(trimmed) ? trimmed : null;
+}
+
 function inferPolicyTool(text) {
   const lower = text.toLowerCase();
   if (/(all\s+tools|any\s+tool|\*\b)/i.test(lower)) {
     return "*";
   }
-  const backtickMatch = text.match(/`([a-z0-9_.:-]+)`/i);
-  if (backtickMatch && backtickMatch[1]) {
-    return backtickMatch[1];
+  const backtickMatch = text.match(/`([A-Za-z][\w.:\-]{0,80})`/);
+  const backtickName = sanitizeToolName(backtickMatch?.[1]);
+  if (backtickName) {
+    return backtickName;
   }
-  const toolMatch = text.match(/\btool\s*[:=]?\s*([a-z0-9_.:-]+)/i);
-  if (toolMatch && toolMatch[1]) {
-    return toolMatch[1];
+  const toolMatch = text.match(/\btool\s*[:=]?\s*([A-Za-z][\w.:\-]{0,80})/i);
+  const toolName = sanitizeToolName(toolMatch?.[1]);
+  if (toolName) {
+    return toolName;
   }
-  const actionMatch = text.match(/\b(block|deny|allow|disallow|permit|require)\s+([a-z0-9_.:-]+)/i);
-  if (actionMatch && actionMatch[2]) {
-    return actionMatch[2];
+  const actionMatch = text.match(/\b(?:block|deny|allow|disallow|permit|require)\s+([A-Za-z][\w.:\-]{0,80})/i);
+  const actionName = sanitizeToolName(actionMatch?.[1]);
+  if (actionName) {
+    return actionName;
   }
   return "*";
 }
