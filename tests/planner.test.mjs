@@ -35,6 +35,30 @@ test("extractPlanJsonBlock returns null for invalid JSON", () => {
   assert.equal(extractPlanJsonBlock(md), null);
 });
 
+test("extractPlanJsonBlock prefers last valid JSON block with steps", () => {
+  const md = `Intro
+\`\`\`json
+{"example": true}
+\`\`\`
+\`\`\`json
+{"goal":"Real plan","steps":[{"action":"Read","description":"read"}]}
+\`\`\``;
+  const result = extractPlanJsonBlock(md);
+  assert.ok(result);
+  assert.equal(result.goal, "Real plan");
+  assert.equal(result.steps.length, 1);
+});
+
+test("extractPlanJsonBlock returns null when no JSON block has steps", () => {
+  const md = `\`\`\`json
+{"example": true}
+\`\`\`
+\`\`\`json
+{"another":"object"}
+\`\`\``;
+  assert.equal(extractPlanJsonBlock(md), null);
+});
+
 test("parsePlanMarkdown extracts tools from backtick references", () => {
   const md = `# Deploy feature
 1. \`Read\` the config file

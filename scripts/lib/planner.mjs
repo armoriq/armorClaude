@@ -31,7 +31,6 @@ export function extractPlanJsonBlock(markdown) {
   if (!markdown) return null;
   const matches = Array.from(markdown.matchAll(/```json\s*([\s\S]*?)```/g));
   if (matches.length === 0) return null;
-  let fallback = null;
   for (let i = matches.length - 1; i >= 0; i -= 1) {
     const raw = matches[i][1]?.trim();
     if (!raw) continue;
@@ -44,11 +43,8 @@ export function extractPlanJsonBlock(markdown) {
     if (parsed && typeof parsed === "object" && Array.isArray(parsed.steps)) {
       return parsed;
     }
-    if (fallback === null) {
-      fallback = parsed;
-    }
   }
-  return fallback;
+  return null;
 }
 
 // ---------------------------------------------------------------------------
