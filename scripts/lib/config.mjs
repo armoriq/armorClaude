@@ -90,9 +90,17 @@ export function loadConfig(env = process.env) {
     verifyStepEndpoint:
       env.ARMORCOWORK_VERIFY_STEP_URL?.trim() ||
       `${backendEndpoint}/iap/verify-step`,
-    validitySeconds: parseInteger(env.ARMORCOWORK_VALIDITY_SECONDS, 60),
+    // 10 minutes is long enough for multi-step agentic work without forcing
+    // a replan mid-turn. Set ARMORCOWORK_VALIDITY_SECONDS to tighten.
+    validitySeconds: parseInteger(env.ARMORCOWORK_VALIDITY_SECONDS, 600),
+    // Proactively refresh the intent token when it has less than this many
+    // seconds of life left, so tool calls don't hit the expiry boundary.
+    refreshThresholdSeconds: parseInteger(env.ARMORCOWORK_REFRESH_THRESHOLD_SECONDS, 30),
     timeoutMs,
-    maxRetries: parseInteger(env.ARMORCOWORK_MAX_RETRIES, 3),
+    // One attempt per tool call is usually right — a hung backend shouldn't
+    // stall Claude for timeout * retries. Users who really want retries can
+    // opt in via ARMORCOWORK_MAX_RETRIES.
+    maxRetries: parseInteger(env.ARMORCOWORK_MAX_RETRIES, 1),
     verifySsl: parseBoolean(env.ARMORCOWORK_VERIFY_SSL, true),
     llmId: env.ARMORCOWORK_LLM_ID?.trim() || "claude-code",
     mcpName: env.ARMORCOWORK_MCP_NAME?.trim() || "claude-code",
