@@ -1,4 +1,4 @@
-import { normalizeToolName, nowEpochSeconds, sanitizeParams } from "./common.mjs";
+import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
 import { addPromptContext, blockPrompt, denyPreTool } from "./hook-output.mjs";
 import {
   checkIntentTokenPlan,
@@ -248,14 +248,24 @@ export async function handlePreToolUse(input, config) {
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
   if (!toolName) {
-    return null;
+    // Missing tool_name on a PreToolUse event means the payload shape is
+    // unexpected. Fail-closed in enforce mode instead of silently allowing.
+    return denyOrAllow(config, "ArmorClaude: missing tool_name on PreToolUse");
   }
 
   // --- Whitelist: ArmorClaude's own MCP tools must never be blocked,
-  //     otherwise the agent can't register a plan or read/update policy. ---
+  //     otherwise the agent can't register a plan or read/update policy.
+  //     Match the exact MCP prefix from .mcp.json (armorclaude-policy),
+  //     not any suffix — an evil server called evil__policy_update would
+  //     previously have been whitelisted. ---
   const norm = normalizeToolName(toolName);
   const armorTools = ["register_intent_plan", "policy_read", "policy_update"];
-  if (armorTools.some((t) => norm === t || norm.endsWith(`__${t}`))) {
+  const armorMcpPrefix = "mcp__armorclaude-policy__";
+  if (
+    armorTools.some(
+      (t) => norm === t || norm === `${armorMcpPrefix}${t}`
+    )
+  ) {
     return null;
   }
 
@@ -281,11 +291,13 @@ export async function handlePreToolUse(input, config) {
   // Always consume if a pending file exists — the MCP handler only writes
   // it when Claude has registered a NEW plan, and stale plans must be
   // overwritten so each prompt gets its own plan boundary.
-  const runtimeStateEarly = await loadRuntimeState(config.runtimeFile);
+  // This load is reused for the rest of the PreToolUse handler instead of
+  // reloading from disk below (fewer disk reads on the hot path).
+  const runtimeState = await loadRuntimeState(config.runtimeFile);
   const pendingPath = path.join(config.dataDir, "pending-plan.json");
   const pending = await readJson(pendingPath, null);
   if (pending && (pending.tokenRaw || pending.plan)) {
-    upsertSession(runtimeStateEarly, sessionId, {
+    upsertSession(runtimeState, sessionId, {
       intentTokenRaw: pending.tokenRaw || "",
       plan: pending.plan,
       allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
@@ -293,7 +305,7 @@ export async function handlePreToolUse(input, config) {
       // Reset per-token execution tracking when a new plan replaces the old.
       intentExecution: undefined
     });
-    await saveRuntimeState(config.runtimeFile, runtimeStateEarly);
+    await saveRuntimeState(config.runtimeFile, runtimeState);
     await unlink(pendingPath).catch(() => {});
     debugLog(config, "consumed pending plan from register_intent_plan");
   }
@@ -329,7 +341,7 @@ export async function handlePreToolUse(input, config) {
   }
 
   // --- Intent token verification ---
-  const runtimeState = await loadRuntimeState(config.runtimeFile);
+  // Reuse the runtimeState loaded above instead of re-reading from disk.
   const session = getSession(runtimeState, sessionId) || {};
   let intentTokenRaw = readIntentTokenRaw(input, session);
   let localPlan = session.plan;
@@ -340,6 +352,50 @@ export async function handlePreToolUse(input, config) {
     intentTokenRaw && localPlan
       ? getSessionTokenUsedStepIndices(session, intentTokenRaw)
       : undefined;
+
+  // Proactive refresh: if the token is about to expire and we still have the
+  // plan, re-issue silently so the user never sees a "token expired" deny in
+  // the middle of a multi-step turn. If the refresh fails, flow falls through
+  // to the existing expiry check below.
+  const refreshThreshold = Number.isFinite(config.refreshThresholdSeconds)
+    ? config.refreshThresholdSeconds
+    : 30;
+  if (
+    intentTokenRaw &&
+    isPlainObject(localPlan) &&
+    Number.isFinite(localExpiresAt) &&
+    localExpiresAt - nowEpochSeconds() < refreshThreshold &&
+    (config.intentEndpoint || (config.useSdkIntent && config.apiKey))
+  ) {
+    try {
+      const policyHash = computePolicyHash(policyState.policy);
+      const refreshed = await requestIntent(config, {
+        prompt: session.lastPrompt || `Refresh intent for ${toolName}`,
+        plan: localPlan,
+        session_id: sessionId,
+        toolName,
+        toolInput,
+        policy_hash: policyHash,
+        policy: policyState.policy,
+        validitySeconds: config.validitySeconds,
+        metadata: { source: "claude-code", trigger: "auto_refresh" }
+      });
+      if (!refreshed.skipped) {
+        const merged = mergeIntentIntoSession(session, refreshed);
+        upsertSession(runtimeState, sessionId, merged);
+        intentTokenRaw =
+          typeof merged.intentTokenRaw === "string"
+            ? merged.intentTokenRaw
+            : intentTokenRaw;
+        localPlan = merged.plan || localPlan;
+        localExpiresAt = merged.expiresAt || localExpiresAt;
+        debugLog(config, "intent token auto-refreshed near expiry");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      debugLog(config, `auto-refresh failed: ${message}`);
+    }
+  }
 
   // If no token, try to acquire one
   if (!intentTokenRaw && (config.intentEndpoint || (config.useSdkIntent && config.apiKey))) {
@@ -458,7 +514,10 @@ export async function handlePreToolUse(input, config) {
 
   // --- Expiry check ---
   if (Number.isFinite(localExpiresAt) && nowEpochSeconds() > localExpiresAt) {
-    const deny = denyOrAllow(config, "ArmorClaude intent token expired");
+    const deny = denyOrAllow(
+      config,
+      "ArmorClaude intent token expired — call register_intent_plan with your current plan to refresh, then retry the tool"
+    );
     if (deny) {
       return deny;
     }
@@ -603,8 +662,8 @@ export async function handlePostToolUse(input, config) {
       step_index: stepIdx,
       action: toolName,
       tool: toolName,
-      input: inputs,
-      output: sanitizeParams(input.tool_response, config.sanitize),
+      input: redactSecrets(inputs),
+      output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
       status: "success",
       executed_at: new Date().toISOString(),
       duration_ms: 0
@@ -654,10 +713,10 @@ export async function handlePostToolUseFailure(input, config) {
       step_index: stepIdx,
       action: toolName,
       tool: toolName,
-      input: inputs,
+      input: redactSecrets(inputs),
       output: null,
       status: "failed",
-      error_message: typeof input.error === "string" ? input.error : "Unknown error",
+      error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error",
       executed_at: new Date().toISOString(),
       duration_ms: 0
     };

@@ -39,6 +39,12 @@ async function main() {
   try {
     input = JSON.parse(rawInput);
   } catch {
+    // Fail-closed: a malformed hook payload on a PreToolUse looks like
+    // enforcement missed, so deny in enforce mode instead of silent allow.
+    // Other events just exit — they can't allow anything on their own.
+    if (config.mode === "enforce") {
+      emitJson(denyPreTool("ArmorClaude hook payload invalid JSON"));
+    }
     return;
   }
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
@@ -79,10 +85,21 @@ async function main() {
 }
 
 main().catch((error) => {
-  const config = loadConfig();
   const message = error instanceof Error ? error.message : String(error);
-  debugLog(config, `error=${message}`);
-  if (config.mode === "enforce") {
+  let mode = "enforce";
+  let debug = false;
+  try {
+    const config = loadConfig();
+    mode = config.mode;
+    debug = config.debug;
+  } catch {
+    // loadConfig itself threw (e.g. malformed credentials file). Stay
+    // fail-closed: default to enforce rather than a silent allow.
+  }
+  if (debug) {
+    process.stderr.write(`[armorcowork] error=${message}\n`);
+  }
+  if (mode === "enforce") {
     emitJson(denyPreTool(`ArmorClaude internal error: ${message}`));
   }
 });
