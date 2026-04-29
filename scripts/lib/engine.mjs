@@ -132,7 +132,7 @@ function denyOrAllow(config, reason) {
 
 function debugLog(config, message) {
   if (config.debug) {
-    process.stderr.write(`[armorcowork] ${message}\n`);
+    process.stderr.write(`[armorclaude] ${message}\n`);
   }
 }
 

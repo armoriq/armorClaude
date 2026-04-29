@@ -73,7 +73,7 @@ test("checkToolAgainstPlan rejects tool drift", () => {
 });
 
 test("handleUserPromptSubmit applies policy command and blocks prompt", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp);
   const output = await handleUserPromptSubmit(
     {
@@ -89,7 +89,7 @@ test("handleUserPromptSubmit applies policy command and blocks prompt", async ()
 });
 
 test("handlePreToolUse denies when policy blocks tool", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp);
   await handleUserPromptSubmit(
     {
@@ -113,7 +113,7 @@ test("handlePreToolUse denies when policy blocks tool", async () => {
 });
 
 test("handlePreToolUse denies missing intent when strict", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
   const output = await handlePreToolUse(
     {
@@ -129,7 +129,7 @@ test("handlePreToolUse denies missing intent when strict", async () => {
 });
 
 test("handlePreToolUse allows tool when local plan matches (no backend)", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
   // Seed a local plan as if register_intent_plan had been called
   const { writeFile } = await import("node:fs/promises");
@@ -159,7 +159,7 @@ test("handlePreToolUse allows tool when local plan matches (no backend)", async 
 });
 
 test("handlePreToolUse denies drift when local plan exists (no backend)", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
   const { writeFile } = await import("node:fs/promises");
   await writeFile(
@@ -189,7 +189,7 @@ test("handlePreToolUse denies drift when local plan exists (no backend)", async 
 });
 
 test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
   const { writeFile } = await import("node:fs/promises");
   // Seed an old "Read"-only plan in the session
@@ -230,7 +230,7 @@ test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", 
 });
 
 test("handleUserPromptSubmit adds context hints for normal prompts", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { contextHintsEnabled: true, policyUpdateEnabled: true });
   const output = await handleUserPromptSubmit(
     {

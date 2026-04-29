@@ -26,7 +26,7 @@ function debugLog(config, message) {
   if (!config.debug) {
     return;
   }
-  process.stderr.write(`[armorcowork] ${message}\n`);
+  process.stderr.write(`[armorclaude] ${message}\n`);
 }
 
 async function main() {
@@ -97,7 +97,7 @@ main().catch((error) => {
     // fail-closed: default to enforce rather than a silent allow.
   }
   if (debug) {
-    process.stderr.write(`[armorcowork] error=${message}\n`);
+    process.stderr.write(`[armorclaude] error=${message}\n`);
   }
   if (mode === "enforce") {
     emitJson(denyPreTool(`ArmorClaude internal error: ${message}`));
