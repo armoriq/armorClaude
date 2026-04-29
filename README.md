@@ -109,31 +109,31 @@ When installed as a Claude Code plugin, these values are prompted on enable:
 **Core:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARMORCOWORK_MODE` | `enforce` | `enforce` blocks on failure, `monitor` logs only |
-| `ARMORCOWORK_INTENT_REQUIRED` | `true` | Block tool calls with no intent token |
-| `ARMORCOWORK_DATA_DIR` | `$CLAUDE_PLUGIN_DATA` or `~/.claude/armorcowork` | Data storage directory |
-| `ARMORCOWORK_DEBUG` | `false` | Enable stderr debug logging |
+| `ARMORCLAUDE_MODE` | `enforce` | `enforce` blocks on failure, `monitor` logs only |
+| `ARMORCLAUDE_INTENT_REQUIRED` | `true` | Block tool calls with no intent token |
+| `ARMORCLAUDE_DATA_DIR` | `$CLAUDE_PLUGIN_DATA` or `~/.claude/armorclaude` | Data storage directory |
+| `ARMORCLAUDE_DEBUG` | `false` | Enable stderr debug logging |
 
 **ArmorIQ Integration:**
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ARMORIQ_API_KEY` | — | ArmorIQ SDK API key |
-| `ARMORCOWORK_USE_SDK_INTENT` | `true` | Use ArmorIQ SDK for intent capture |
-| `ARMORCOWORK_INTENT_URL` | — | Custom intent endpoint (overrides SDK) |
-| `ARMORCOWORK_VERIFY_STEP_URL` | `<backend>/iap/verify-step` | IAP verify endpoint |
-| `ARMORCOWORK_BACKEND_ENDPOINT` | production or localhost | IAP backend URL |
-| `ARMORCOWORK_IAP_ENDPOINT` | production or localhost | CSRG service URL |
-| `ARMORCOWORK_VALIDITY_SECONDS` | `60` | Intent token TTL |
+| `ARMORCLAUDE_USE_SDK_INTENT` | `true` | Use ArmorIQ SDK for intent capture |
+| `ARMORCLAUDE_INTENT_URL` | — | Custom intent endpoint (overrides SDK) |
+| `ARMORCLAUDE_VERIFY_STEP_URL` | `<backend>/iap/verify-step` | IAP verify endpoint |
+| `ARMORCLAUDE_BACKEND_ENDPOINT` | production or localhost | IAP backend URL |
+| `ARMORCLAUDE_IAP_ENDPOINT` | production or localhost | CSRG service URL |
+| `ARMORCLAUDE_VALIDITY_SECONDS` | `60` | Intent token TTL |
 
 **Plan Directive:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARMORCOWORK_PLANNING_ENABLED` | `true` | Inject directive telling Claude to register an intent plan |
+| `ARMORCLAUDE_PLANNING_ENABLED` | `true` | Inject directive telling Claude to register an intent plan |
 
 **Crypto Policy Binding:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARMORCOWORK_CRYPTO_POLICY_ENABLED` | `false` | Merkle tree policy binding |
+| `ARMORCLAUDE_CRYPTO_POLICY_ENABLED` | `false` | Merkle tree policy binding |
 | `CSRG_URL` | IAP endpoint | CSRG service URL |
 | `REQUIRE_CSRG_PROOFS` | `true` | Require cryptographic proofs |
 | `CSRG_VERIFY_ENABLED` | `true` | Enable CSRG verification |
@@ -141,13 +141,13 @@ When installed as a Claude Code plugin, these values are prompted on enable:
 **Audit Logging:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARMORCOWORK_AUDIT_ENABLED` | `true` (when API key set) | Send audit logs to IAP |
+| `ARMORCLAUDE_AUDIT_ENABLED` | `true` (when API key set) | Send audit logs to IAP |
 
 **Policy Management:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARMORCOWORK_POLICY_UPDATE_ENABLED` | `true` | Allow runtime policy updates |
-| `ARMORCOWORK_POLICY_UPDATE_ALLOWLIST` | `*` | CSV of allowed actors |
+| `ARMORCLAUDE_POLICY_UPDATE_ENABLED` | `true` | Allow runtime policy updates |
+| `ARMORCLAUDE_POLICY_UPDATE_ALLOWLIST` | `*` | CSV of allowed actors |
 
 ## Hook Events
 
@@ -163,10 +163,10 @@ When installed as a Claude Code plugin, these values are prompted on enable:
 
 ## Plan Generation
 
-ArmorCowork supports two plan generation strategies:
+ArmorClaude supports two plan generation strategies:
 
 ### 1. Claude's Built-in Plan Mode (primary)
-When Claude operates in plan mode, it writes a plan file and calls `ExitPlanMode`. ArmorCowork intercepts `ExitPlanMode` via the `PreToolUse` hook, parses the plan file, and sends it to ArmorIQ for intent token generation.
+When Claude operates in plan mode, it writes a plan file and calls `ExitPlanMode`. ArmorClaude intercepts `ExitPlanMode` via the `PreToolUse` hook, parses the plan file, and sends it to ArmorIQ for intent token generation.
 
 ### 2. MCP Tool (when plan mode is off)
 A directive injected via `UserPromptSubmit` instructs Claude to call `register_intent_plan` as its first tool call. Claude produces the plan as the tool's arguments — using its own LLM in the same turn, with no separate API key or extra LLM call. The MCP tool handler sends the plan to ArmorIQ for a signed intent token.

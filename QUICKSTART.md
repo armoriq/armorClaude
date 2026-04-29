@@ -50,7 +50,7 @@ Now try a prompt that goes off-plan:
 Claude will register a plan with `Read` only (or `Read` + `Bash` if it's smart). If it tries `Bash` without declaring it:
 
 ```
-✘ ArmorCowork intent drift: tool not in plan (Bash)
+✘ ArmorClaude intent drift: tool not in plan (Bash)
 ```
 
 That's intent enforcement, with no backend, no API key, no extra LLM call.
@@ -121,7 +121,7 @@ claude plugin disable armorclaude
 **Want monitor mode (log only, never block)?**
 
 ```bash
-ARMORCOWORK_MODE=monitor claude
+ARMORCLAUDE_MODE=monitor claude
 ```
 
 Or set it via `/plugin` → configure → `mode: monitor`.

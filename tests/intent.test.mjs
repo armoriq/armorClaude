@@ -97,7 +97,7 @@ test("resolveCsrgProofsFromToken selects param-matched step for duplicate tools"
 });
 
 test("iapService.verifyStep sends payload with jwt token and CSRG context", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, {
     verifyStepEndpoint: "https://example.test/iap/verify-step"
   });
@@ -196,7 +196,7 @@ test("checkIntentTokenPlan enforces parameter constraints", () => {
 });
 
 test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplicate tools", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, {
     verifyStepEndpoint: "https://example.test/iap/verify-step"
   });

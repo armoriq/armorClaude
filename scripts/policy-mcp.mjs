@@ -71,7 +71,7 @@ async function loadStateAndConfig() {
 
 async function run() {
   const server = new McpServer({
-    name: "armorcowork-policy",
+    name: "armorclaude-policy",
     version: "0.1.0"
   });
 
@@ -208,7 +208,7 @@ async function run() {
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          process.stderr.write(`[armorcowork] intent capture in register_intent_plan: ${msg}\n`);
+          process.stderr.write(`[armorclaude] intent capture in register_intent_plan: ${msg}\n`);
         }
       }
 
@@ -239,7 +239,7 @@ async function run() {
 
 run().catch((error) => {
   const message = error instanceof Error ? error.stack || error.message : String(error);
-  process.stderr.write(`[armorcowork-policy] ${message}\n`);
+  process.stderr.write(`[armorclaude-policy] ${message}\n`);
   process.exitCode = 1;
 });
 

@@ -31,7 +31,7 @@ test("computePolicyDigest handles empty rules", () => {
 });
 
 test("verifyPolicyDigest returns valid on match", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = {
     dataDir: tmp,
     csrgEndpoint: "http://localhost:8000",
@@ -48,7 +48,7 @@ test("verifyPolicyDigest returns valid on match", async () => {
 });
 
 test("verifyPolicyDigest returns invalid on mismatch", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = {
     dataDir: tmp,
     csrgEndpoint: "http://localhost:8000",
@@ -65,7 +65,7 @@ test("verifyPolicyDigest returns invalid on mismatch", async () => {
 });
 
 test("verifyPolicyDigest returns invalid when no token digest", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = {
     dataDir: tmp,
     csrgEndpoint: "http://localhost:8000",
@@ -79,7 +79,7 @@ test("verifyPolicyDigest returns invalid when no token digest", async () => {
 });
 
 test("loadCachedState returns null when no state file", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = {
     dataDir: tmp,
     csrgEndpoint: "http://localhost:8000",

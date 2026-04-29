@@ -57,7 +57,7 @@ function buildConfig(tmpDir, overrides = {}) {
 }
 
 test("handleSessionStart creates session and returns context", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp);
   const output = await handleSessionStart(
     { hook_event_name: "SessionStart", session_id: "sess-1", source: "startup" },
@@ -74,7 +74,7 @@ test("handleSessionStart creates session and returns context", async () => {
 });
 
 test("handleSessionEnd removes session", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp);
   // Create session first
   await handleSessionStart(
@@ -93,7 +93,7 @@ test("handleSessionEnd removes session", async () => {
 });
 
 test("handleStop returns null", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp);
   await handleSessionStart(
     { hook_event_name: "SessionStart", session_id: "sess-3" },
@@ -107,7 +107,7 @@ test("handleStop returns null", async () => {
 });
 
 test("handlePostToolUse returns null when audit disabled", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { auditEnabled: false });
   const output = await handlePostToolUse(
     {
@@ -123,7 +123,7 @@ test("handlePostToolUse returns null when audit disabled", async () => {
 });
 
 test("handlePostToolUse sends audit when enabled", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
   await handleSessionStart(
     { hook_event_name: "SessionStart", session_id: "sess-5" },
@@ -160,7 +160,7 @@ test("handlePostToolUse sends audit when enabled", async () => {
 });
 
 test("handlePostToolUseFailure logs failed status", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorcowork-test-"));
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
   await handleSessionStart(
     { hook_event_name: "SessionStart", session_id: "sess-6" },

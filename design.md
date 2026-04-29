@@ -1,8 +1,8 @@
-# ArmorCowork — Design Document
+# ArmorClaude — Design Document
 
 ## Overview
 
-ArmorCowork is a security plugin for Claude Code / Claude Cowork that enforces intent-based access control on tool calls. It is the Claude Code equivalent of ArmorClaw (for OpenClaw).
+ArmorClaude is a security plugin for Claude Code / Claude Cowork that enforces intent-based access control on tool calls. It is the Claude Code equivalent of ArmorClaw (for OpenClaw).
 
 Core idea: an AI agent declares what it intends to do before doing it, and every action is checked against that declared intent. This prevents prompt injection from causing unauthorized tool use, blocks data exfiltration, and provides an audit trail of every tool call decision.
 
@@ -111,7 +111,7 @@ If any of the following occurs in enforce mode, all tool calls are blocked:
 - IAP verify-step returns denied
 - Internal error in the hook
 
-Monitor mode (`ARMORCOWORK_MODE=monitor`) logs these events but allows tool calls to proceed.
+Monitor mode (`ARMORCLAUDE_MODE=monitor`) logs these events but allows tool calls to proceed.
 
 ## Module Responsibilities
 
@@ -161,7 +161,7 @@ Hooks are stateless short-lived processes (new Node process per event). All stat
 
 ## Comparison with ArmorClaw
 
-| Feature | ArmorClaw (OpenClaw) | ArmorCowork (Claude Code) |
+| Feature | ArmorClaw (OpenClaw) | ArmorClaude (Claude Code) |
 |---------|---------------------|--------------------------|
 | Plan generation | Separate LLM call via pi-ai | Claude's own LLM via MCP tool / plan mode |
 | Plan API key | Uses agent's runtime.modelAuth | None needed (session LLM) |
