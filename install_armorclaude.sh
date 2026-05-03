@@ -159,11 +159,22 @@ EOF
   fi
 
   echo
-  # Run armoriq login inline — uses the globally installed CLI or npx fallback
+  # Run armoriq login inline — uses the globally installed CLI or npx fallback.
+  # Pass --product so the browser approval page renders ArmorClaude branding.
+  # Older CLIs without --product fall back to a plain `armoriq login` invocation.
+  local product="armorclaude"
   if command -v armoriq >/dev/null 2>&1; then
-    armoriq login
+    if armoriq login --help 2>&1 | grep -q -- '--product'; then
+      armoriq login --product "${product}"
+    else
+      ARMORIQ_PRODUCT="${product}" armoriq login
+    fi
   elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk-dev login
+    if npx @armoriq/sdk-dev login --help 2>&1 | grep -q -- '--product'; then
+      npx @armoriq/sdk-dev login --product "${product}"
+    else
+      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk-dev login
+    fi
   else
     warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk-dev login${N} manually."
     return 0
