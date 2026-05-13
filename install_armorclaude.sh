@@ -20,7 +20,7 @@ N=$'\033[0m'
 
 MARKETPLACE_REPO="${ARMORCLAUDE_MARKETPLACE_REPO:-armoriq/armorClaude}"
 PLUGIN_REF="armorclaude@armoriq"
-DASHBOARD_URL="https://dev.armoriq.ai"
+DASHBOARD_URL="https://platform.armoriq.ai"
 
 # Recover if the caller launched the installer from a directory that was deleted.
 if ! pwd >/dev/null 2>&1; then
