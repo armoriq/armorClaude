@@ -97,10 +97,10 @@ install_plugin() {
   claude plugin install "${PLUGIN_REF}" >/dev/null
   ok "plugin installed"
 
-  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
-  npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
+  npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
     && ok "armoriq CLI ready" \
-    || warn "couldn't install globally — use ${B}npx @armoriq/sdk-dev${N} instead"
+    || warn "couldn't install globally — use ${B}npx @armoriq/sdk${N} instead"
 }
 
 # ---------------------------------------------------------------------------
@@ -159,13 +159,26 @@ EOF
   fi
 
   echo
-  # Run armoriq login inline — uses the globally installed CLI or npx fallback
+  # Pass --product so the browser approval page renders ArmorClaude branding
+  # and the resulting API key is attributed to ArmorClaude on the admin
+  # dashboard. Older CLIs without --product fall back to the ARMORIQ_PRODUCT
+  # env var, which newer CLIs (armoriq-sdk >= 0.3.6 / @armoriq/sdk >= 0.3.2)
+  # also honor — older ones simply ignore it.
+  local product="armorclaude"
   if command -v armoriq >/dev/null 2>&1; then
-    armoriq login
+    if armoriq login --help 2>&1 | grep -q -- '--product'; then
+      armoriq login --product "${product}"
+    else
+      ARMORIQ_PRODUCT="${product}" armoriq login
+    fi
   elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk-dev login
+    if npx @armoriq/sdk login --help 2>&1 | grep -q -- '--product'; then
+      npx @armoriq/sdk login --product "${product}"
+    else
+      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk login
+    fi
   else
-    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk-dev login${N} manually."
+    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk login${N} manually."
     return 0
   fi
 
