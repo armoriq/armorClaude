@@ -23,9 +23,7 @@ function installedOk() {
   if (!packageFiles.every(existsSync)) return false;
   try {
     const markerVersion = readFileSync(installedMarker, "utf8").trim();
-    const pkg = JSON.parse(
-      readFileSync(path.join(pluginRoot, "package.json"), "utf8")
-    );
+    const pkg = JSON.parse(readFileSync(path.join(pluginRoot, "package.json"), "utf8"));
     return markerVersion === pkg.version;
   } catch {
     return false;
@@ -34,18 +32,20 @@ function installedOk() {
 
 if (!installedOk()) {
   process.stderr.write("[armorclaude] installing dependencies (one-time)...\n");
-  const result = spawnSync("npm", ["install", "--omit=dev", "--silent", "--no-audit", "--no-fund"], {
-    cwd: pluginRoot,
-    stdio: ["ignore", "ignore", "inherit"]
-  });
+  const result = spawnSync(
+    "npm",
+    ["install", "--omit=dev", "--silent", "--no-audit", "--no-fund"],
+    {
+      cwd: pluginRoot,
+      stdio: ["ignore", "ignore", "inherit"],
+    }
+  );
   if (result.status !== 0) {
     process.stderr.write("[armorclaude] npm install failed (exit " + result.status + ")\n");
     process.exit(1);
   }
   try {
-    const pkg = JSON.parse(
-      readFileSync(path.join(pluginRoot, "package.json"), "utf8")
-    );
+    const pkg = JSON.parse(readFileSync(path.join(pluginRoot, "package.json"), "utf8"));
     writeFileSync(installedMarker, pkg.version || "ok", "utf8");
   } catch {
     // best-effort — if we can't write the marker the next run will reinstall

@@ -6,9 +6,10 @@ const MAX_SESSION_AGE_SECONDS = 60 * 60 * 24;
 export async function loadRuntimeState(runtimeFilePath) {
   const initial = { sessions: {} };
   const raw = await readJson(runtimeFilePath, initial);
-  const sessions = raw && typeof raw === "object" && raw.sessions && typeof raw.sessions === "object"
-    ? raw.sessions
-    : {};
+  const sessions =
+    raw && typeof raw === "object" && raw.sessions && typeof raw.sessions === "object"
+      ? raw.sessions
+      : {};
   return { sessions };
 }
 
@@ -24,7 +25,7 @@ export function upsertSession(runtimeState, sessionId, patch) {
   runtimeState.sessions[sessionId] = {
     ...prev,
     ...patch,
-    updatedAt: nowEpochSeconds()
+    updatedAt: nowEpochSeconds(),
   };
   return runtimeState.sessions[sessionId];
 }
@@ -63,8 +64,5 @@ export function upsertDiscoveredTool(runtimeState, toolName) {
 }
 
 export function getDiscoveredTools(runtimeState) {
-  return Array.isArray(runtimeState?.discoveredTools)
-    ? runtimeState.discoveredTools
-    : [];
+  return Array.isArray(runtimeState?.discoveredTools) ? runtimeState.discoveredTools : [];
 }
-

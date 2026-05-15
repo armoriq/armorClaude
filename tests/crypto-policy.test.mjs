@@ -1,9 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  computePolicyDigest,
-  createCryptoPolicyService
-} from "../scripts/lib/crypto-policy.mjs";
+import { computePolicyDigest, createCryptoPolicyService } from "../scripts/lib/crypto-policy.mjs";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,7 +8,7 @@ import path from "node:path";
 test("computePolicyDigest produces deterministic hash", () => {
   const rules = [
     { id: "p1", action: "deny", tool: "web_fetch", dataClass: "PCI" },
-    { id: "p2", action: "allow", tool: "*" }
+    { id: "p2", action: "allow", tool: "*" },
   ];
   const d1 = computePolicyDigest(rules);
   const d2 = computePolicyDigest(rules);
@@ -39,7 +36,7 @@ test("verifyPolicyDigest returns valid on match", async () => {
     timeoutMs: 5000,
     userId: "test",
     agentId: "test",
-    contextId: "default"
+    contextId: "default",
   };
   const service = createCryptoPolicyService(config);
   const digest = computePolicyDigest([{ id: "p1", action: "deny", tool: "bash" }]);
@@ -56,7 +53,7 @@ test("verifyPolicyDigest returns invalid on mismatch", async () => {
     timeoutMs: 5000,
     userId: "test",
     agentId: "test",
-    contextId: "default"
+    contextId: "default",
   };
   const service = createCryptoPolicyService(config);
   const result = service.verifyPolicyDigest("aaaa", "bbbb");
@@ -70,7 +67,7 @@ test("verifyPolicyDigest returns invalid when no token digest", async () => {
     dataDir: tmp,
     csrgEndpoint: "http://localhost:8000",
     iapEndpoint: "http://localhost:8000",
-    timeoutMs: 5000
+    timeoutMs: 5000,
   };
   const service = createCryptoPolicyService(config);
   const result = service.verifyPolicyDigest("abc123", undefined);
@@ -84,7 +81,7 @@ test("loadCachedState returns null when no state file", async () => {
     dataDir: tmp,
     csrgEndpoint: "http://localhost:8000",
     iapEndpoint: "http://localhost:8000",
-    timeoutMs: 5000
+    timeoutMs: 5000,
   };
   const service = createCryptoPolicyService(config);
   const state = await service.loadCachedState();

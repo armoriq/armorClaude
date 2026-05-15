@@ -1,4 +1,10 @@
-import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
+import {
+  isPlainObject,
+  normalizeToolName,
+  nowEpochSeconds,
+  redactSecrets,
+  sanitizeParams,
+} from "./common.mjs";
 import { addPromptContext, blockPrompt, denyPreTool } from "./hook-output.mjs";
 import {
   checkIntentTokenPlan,
@@ -10,7 +16,7 @@ import {
   recordSessionTokenUsedStepIndices,
   requestIntent,
   resolveCsrgProofsFromToken,
-  validateCsrgProofHeaders
+  validateCsrgProofHeaders,
 } from "./intent.mjs";
 import { createIapService } from "./iap-service.mjs";
 import {
@@ -18,24 +24,19 @@ import {
   computePolicyHash,
   evaluatePolicy,
   loadPolicyState,
-  parsePolicyTextCommand
+  parsePolicyTextCommand,
 } from "./policy.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
-import {
-  extractPlanJsonBlock,
-  parsePlanFile,
-  resolvePlanFilePath
-} from "./planner.mjs";
+import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
 import { readJson } from "./fs-store.mjs";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
 import {
-  getDiscoveredTools,
   getSession,
   loadRuntimeState,
   saveRuntimeState,
   upsertDiscoveredTool,
-  upsertSession
+  upsertSession,
 } from "./runtime-state.mjs";
 
 // ---------------------------------------------------------------------------
@@ -51,7 +52,7 @@ function buildPolicyContextHints() {
     "ArmorClaude policy instructions:",
     "- If the user explicitly asks to change policy, call `policy_update` immediately.",
     "- Supported text commands: Policy list/get/delete/reset/update/new/prioritize.",
-    "- Do not invent extra policy mechanisms outside `policy_update`."
+    "- Do not invent extra policy mechanisms outside `policy_update`.",
   ].join("\n");
 }
 
@@ -85,7 +86,7 @@ function isPolicyUpdateAllowed(config, input) {
     : {
         allowed: false,
         reason: "ArmorClaude policy update denied",
-        candidates
+        candidates,
       };
 }
 
@@ -113,7 +114,7 @@ function readIntentTokenRaw(input, session) {
     input.intent_token_raw,
     input.intent_token,
     input.intentToken,
-    session.intentTokenRaw
+    session.intentTokenRaw,
   ];
   for (const value of candidates) {
     if (typeof value === "string" && value.trim()) {
@@ -161,7 +162,7 @@ export async function handleSessionStart(input, config) {
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   upsertSession(runtimeState, sessionId, {
     startedAt: nowEpochSeconds(),
-    discoveredTools: []
+    discoveredTools: [],
   });
   await saveRuntimeState(config.runtimeFile, runtimeState);
 
@@ -199,7 +200,7 @@ export async function handleUserPromptSubmit(input, config) {
       policyFilePath: config.policyFile,
       state: policyState,
       command,
-      actor
+      actor,
     });
     return blockPrompt(result.message);
   }
@@ -208,7 +209,7 @@ export async function handleUserPromptSubmit(input, config) {
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   upsertSession(runtimeState, sessionId, {
     lastPrompt: prompt,
-    lastPromptAt: nowEpochSeconds()
+    lastPromptAt: nowEpochSeconds(),
   });
   await saveRuntimeState(config.runtimeFile, runtimeState);
 
@@ -220,14 +221,15 @@ export async function handleUserPromptSubmit(input, config) {
   if (config.planningEnabled) {
     parts.push(
       "ArmorClaude intent enforcement is active. Before using any tool, " +
-      "declare your plan in this exact JSON shape:\n\n" +
-      INTENT_PLAN_FORMAT + "\n\n" +
-      "How to submit:\n" +
-      "- If in plan mode: include the JSON block (fenced with ```json) " +
-      "at the end of your plan file.\n" +
-      "- Otherwise: call `register_intent_plan` with the JSON as the " +
-      "argument BEFORE any other tool call.\n" +
-      "Tool calls without a registered plan will be blocked."
+        "declare your plan in this exact JSON shape:\n\n" +
+        INTENT_PLAN_FORMAT +
+        "\n\n" +
+        "How to submit:\n" +
+        "- If in plan mode: include the JSON block (fenced with ```json) " +
+        "at the end of your plan file.\n" +
+        "- Otherwise: call `register_intent_plan` with the JSON as the " +
+        "argument BEFORE any other tool call.\n" +
+        "Tool calls without a registered plan will be blocked."
     );
   }
   if (config.contextHintsEnabled && config.policyUpdateEnabled) {
@@ -261,11 +263,7 @@ export async function handlePreToolUse(input, config) {
   const norm = normalizeToolName(toolName);
   const armorTools = ["register_intent_plan", "policy_read", "policy_update"];
   const armorMcpPrefix = "mcp__armorclaude-policy__";
-  if (
-    armorTools.some(
-      (t) => norm === t || norm === `${armorMcpPrefix}${t}`
-    )
-  ) {
+  if (armorTools.some((t) => norm === t || norm === `${armorMcpPrefix}${t}`)) {
     return null;
   }
 
@@ -278,11 +276,7 @@ export async function handlePreToolUse(input, config) {
   //     no side effects on user files or systems. Blocking these makes the
   //     agent fight itself (e.g. ToolSearch is needed to fetch deferred MCP
   //     tool schemas before they can be called). ---
-  const safeInternalTools = new Set([
-    "toolsearch",
-    "todowrite",
-    "listmcpresourcestool"
-  ]);
+  const safeInternalTools = new Set(["toolsearch", "todowrite", "listmcpresourcestool"]);
   if (safeInternalTools.has(norm)) {
     return null;
   }
@@ -303,7 +297,7 @@ export async function handlePreToolUse(input, config) {
       allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
       expiresAt: pending.expiresAt,
       // Reset per-token execution tracking when a new plan replaces the old.
-      intentExecution: undefined
+      intentExecution: undefined,
     });
     await saveRuntimeState(config.runtimeFile, runtimeState);
     await unlink(pendingPath).catch(() => {});
@@ -334,7 +328,7 @@ export async function handlePreToolUse(input, config) {
   const policyDecision = evaluatePolicy({
     policy: policyState.policy,
     toolName,
-    toolParams: toolInput
+    toolParams: toolInput,
   });
   if (!policyDecision.allowed) {
     return denyPreTool(policyDecision.reason || "ArmorClaude policy denied");
@@ -378,15 +372,13 @@ export async function handlePreToolUse(input, config) {
         policy_hash: policyHash,
         policy: policyState.policy,
         validitySeconds: config.validitySeconds,
-        metadata: { source: "claude-code", trigger: "auto_refresh" }
+        metadata: { source: "claude-code", trigger: "auto_refresh" },
       });
       if (!refreshed.skipped) {
         const merged = mergeIntentIntoSession(session, refreshed);
         upsertSession(runtimeState, sessionId, merged);
         intentTokenRaw =
-          typeof merged.intentTokenRaw === "string"
-            ? merged.intentTokenRaw
-            : intentTokenRaw;
+          typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : intentTokenRaw;
         localPlan = merged.plan || localPlan;
         localExpiresAt = merged.expiresAt || localExpiresAt;
         debugLog(config, "intent token auto-refreshed near expiry");
@@ -411,13 +403,12 @@ export async function handlePreToolUse(input, config) {
         validitySeconds: config.validitySeconds,
         metadata: {
           source: "claude-code",
-          trigger: "pre_tool_use"
-        }
+          trigger: "pre_tool_use",
+        },
       });
       const merged = mergeIntentIntoSession(session, intentResponse);
       upsertSession(runtimeState, sessionId, merged);
-      intentTokenRaw =
-        typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
+      intentTokenRaw = typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
       localPlan = merged.plan || localPlan;
       localExpiresAt = merged.expiresAt || localExpiresAt;
       usedStepIndices =
@@ -437,7 +428,7 @@ export async function handlePreToolUse(input, config) {
     const tokenCheck = checkIntentTokenPlan({
       intentTokenRaw,
       toolName,
-      toolParams: toolInput
+      toolParams: toolInput,
     });
     if (tokenCheck.matched) {
       tokenCheckMatched = true;
@@ -461,7 +452,7 @@ export async function handlePreToolUse(input, config) {
       plan: localPlan,
       toolName,
       toolParams: toolInput,
-      usedStepIndices
+      usedStepIndices,
     });
     if (resolved) {
       csrgProofs = resolved;
@@ -532,7 +523,7 @@ export async function handlePreToolUse(input, config) {
     const localCheck = checkToolAgainstPlan({
       plan: localPlan,
       toolName,
-      toolInput
+      toolInput,
     });
     if (localCheck.allowed) {
       localPlanMatched = true;
@@ -582,7 +573,9 @@ async function handleExitPlanModeCapture(input, sessionId, config) {
             plan.metadata.source = "plan-file-json";
           }
         }
-      } catch { /* fall through to heuristic */ }
+      } catch {
+        /* fall through to heuristic */
+      }
 
       // Fallback: heuristic markdown parsing
       if (!plan) {
@@ -590,7 +583,10 @@ async function handleExitPlanModeCapture(input, sessionId, config) {
       }
 
       if (plan && plan.steps.length > 0) {
-        debugLog(config, `captured plan from ExitPlanMode: ${plan.steps.length} steps (${plan.metadata?.source || "heuristic"})`);
+        debugLog(
+          config,
+          `captured plan from ExitPlanMode: ${plan.steps.length} steps (${plan.metadata?.source || "heuristic"})`
+        );
 
         // Send plan to ArmorIQ for intent token
         if (config.intentEndpoint || (config.useSdkIntent && config.apiKey)) {
@@ -602,7 +598,7 @@ async function handleExitPlanModeCapture(input, sessionId, config) {
             policy_hash: computePolicyHash(policyState.policy),
             policy: policyState.policy,
             validitySeconds: config.validitySeconds,
-            metadata: { source: "claude-code", planning: "plan-mode" }
+            metadata: { source: "claude-code", planning: "plan-mode" },
           });
           const merged = mergeIntentIntoSession(session, intentResponse);
           upsertSession(runtimeState, sessionId, merged);
@@ -649,7 +645,9 @@ export async function handlePostToolUse(input, config) {
       try {
         const parsed = JSON.parse(intentTokenRaw);
         token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch { /* use raw */ }
+      } catch {
+        /* use raw */
+      }
     }
 
     // Compute the real step index from the registered plan so the backend's
@@ -666,7 +664,7 @@ export async function handlePostToolUse(input, config) {
       output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
       status: "success",
       executed_at: new Date().toISOString(),
-      duration_ms: 0
+      duration_ms: 0,
     };
 
     await iapService.createAuditLog(dto);
@@ -703,7 +701,9 @@ export async function handlePostToolUseFailure(input, config) {
       try {
         const parsed = JSON.parse(intentTokenRaw);
         token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch { /* use raw */ }
+      } catch {
+        /* use raw */
+      }
     }
 
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
@@ -718,7 +718,7 @@ export async function handlePostToolUseFailure(input, config) {
       status: "failed",
       error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error",
       executed_at: new Date().toISOString(),
-      duration_ms: 0
+      duration_ms: 0,
     };
 
     await iapService.createAuditLog(dto);
@@ -748,7 +748,7 @@ export async function handleStop(input, config) {
   }
 
   upsertSession(runtimeState, sessionId, {
-    lastStopAt: nowEpochSeconds()
+    lastStopAt: nowEpochSeconds(),
   });
   await saveRuntimeState(config.runtimeFile, runtimeState);
   return null;
