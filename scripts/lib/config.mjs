@@ -40,7 +40,7 @@ export function loadConfig(env = process.env) {
     env.ARMORCLAUDE_BACKEND_ENDPOINT?.trim() ||
     env.BACKEND_ENDPOINT?.trim() ||
     (useProduction
-      ? "https://staging-api.armoriq.ai"
+      ? "https://api.armoriq.ai"
       : "http://127.0.0.1:3000");
 
   const iapEndpoint =
