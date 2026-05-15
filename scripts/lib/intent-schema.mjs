@@ -15,9 +15,9 @@ export const PLAN_STEP_SCHEMA = z.object({
       inputs: z
         .record(z.string(), z.unknown())
         .optional()
-        .describe("Expected tool parameters for enforcement")
+        .describe("Expected tool parameters for enforcement"),
     })
-    .optional()
+    .optional(),
 });
 
 export const INTENT_PLAN_ZOD = z.object({
@@ -25,7 +25,7 @@ export const INTENT_PLAN_ZOD = z.object({
   steps: z
     .array(PLAN_STEP_SCHEMA)
     .min(1)
-    .describe("Ordered list of tool calls the agent intends to make")
+    .describe("Ordered list of tool calls the agent intends to make"),
 });
 
 /**
@@ -58,11 +58,11 @@ export function normalizeIntentPlan(parsed) {
       tool: s.action,
       mcp: "claude-code",
       description: s.description || "",
-      metadata: s.metadata || {}
+      metadata: s.metadata || {},
     })),
     metadata: {
       goal: parsed.goal,
-      source: "claude-registered"
-    }
+      source: "claude-registered",
+    },
   };
 }

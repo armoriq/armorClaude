@@ -11,7 +11,7 @@ function buildConfig(overrides = {}) {
     requireCsrgProofs: true,
     apiKey: "test-key",
     timeoutMs: 5000,
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -40,10 +40,10 @@ test("verifyStep sends correct payload", async () => {
   globalThis.fetch = async (url, options) => {
     capturedUrl = url;
     capturedPayload = JSON.parse(options.body);
-    return new Response(
-      JSON.stringify({ allowed: true, reason: "ok", step: { step_index: 0 } }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ allowed: true, reason: "ok", step: { step_index: 0 } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   };
 
   try {
@@ -69,10 +69,10 @@ test("createAuditLog sends correct payload", async () => {
   globalThis.fetch = async (url, options) => {
     capturedUrl = url;
     capturedPayload = JSON.parse(options.body);
-    return new Response(
-      JSON.stringify({ audit_id: "audit-123", iap_sync_status: "synced" }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ audit_id: "audit-123", iap_sync_status: "synced" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   };
 
   try {
@@ -86,7 +86,7 @@ test("createAuditLog sends correct payload", async () => {
       output: { content: "hello" },
       status: "success",
       executed_at: "2026-04-10T00:00:00Z",
-      duration_ms: 100
+      duration_ms: 100,
     });
     assert.equal(capturedUrl, "http://127.0.0.1:3000/iap/audit");
     assert.equal(capturedPayload.token, "jwt-abc");
@@ -102,10 +102,10 @@ test("verifyWithCsrg sends Merkle proof payload", async () => {
   let capturedPayload;
   globalThis.fetch = async (_url, options) => {
     capturedPayload = JSON.parse(options.body);
-    return new Response(
-      JSON.stringify({ allowed: true, reason: "verified" }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ allowed: true, reason: "verified" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   };
 
   try {
@@ -126,6 +126,12 @@ test("verifyWithCsrg sends Merkle proof payload", async () => {
 });
 
 test("csrgProofsRequired reflects config", () => {
-  assert.equal(createIapService(buildConfig({ requireCsrgProofs: true })).csrgProofsRequired(), true);
-  assert.equal(createIapService(buildConfig({ requireCsrgProofs: false })).csrgProofsRequired(), false);
+  assert.equal(
+    createIapService(buildConfig({ requireCsrgProofs: true })).csrgProofsRequired(),
+    true
+  );
+  assert.equal(
+    createIapService(buildConfig({ requireCsrgProofs: false })).csrgProofsRequired(),
+    false
+  );
 });

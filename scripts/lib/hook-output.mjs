@@ -3,15 +3,15 @@ export function denyPreTool(reason) {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
-      permissionDecisionReason: reason
-    }
+      permissionDecisionReason: reason,
+    },
   };
 }
 
 export function blockPrompt(reason) {
   return {
     decision: "block",
-    reason
+    reason,
   };
 }
 
@@ -19,7 +19,7 @@ export function addPromptContext(context, hookEventName = "UserPromptSubmit") {
   return {
     hookSpecificOutput: {
       hookEventName,
-      additionalContext: context
-    }
+      additionalContext: context,
+    },
   };
 }

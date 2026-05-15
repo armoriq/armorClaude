@@ -8,7 +8,7 @@ import {
   handleSessionEnd,
   handleStop,
   handlePostToolUse,
-  handlePostToolUseFailure
+  handlePostToolUseFailure,
 } from "../scripts/lib/engine.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
@@ -50,9 +50,9 @@ function buildConfig(tmpDir, overrides = {}) {
       maxChars: 2000,
       maxDepth: 4,
       maxKeys: 50,
-      maxItems: 50
+      maxItems: 50,
     },
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -77,15 +77,9 @@ test("handleSessionEnd removes session", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp);
   // Create session first
-  await handleSessionStart(
-    { hook_event_name: "SessionStart", session_id: "sess-2" },
-    config
-  );
+  await handleSessionStart({ hook_event_name: "SessionStart", session_id: "sess-2" }, config);
   // End it
-  await handleSessionEnd(
-    { hook_event_name: "SessionEnd", session_id: "sess-2" },
-    config
-  );
+  await handleSessionEnd({ hook_event_name: "SessionEnd", session_id: "sess-2" }, config);
 
   const stateRaw = await readFile(config.runtimeFile, "utf8");
   const state = JSON.parse(stateRaw);
@@ -95,14 +89,8 @@ test("handleSessionEnd removes session", async () => {
 test("handleStop returns null", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp);
-  await handleSessionStart(
-    { hook_event_name: "SessionStart", session_id: "sess-3" },
-    config
-  );
-  const output = await handleStop(
-    { hook_event_name: "Stop", session_id: "sess-3" },
-    config
-  );
+  await handleSessionStart({ hook_event_name: "SessionStart", session_id: "sess-3" }, config);
+  const output = await handleStop({ hook_event_name: "Stop", session_id: "sess-3" }, config);
   assert.equal(output, null);
 });
 
@@ -115,7 +103,7 @@ test("handlePostToolUse returns null when audit disabled", async () => {
       session_id: "sess-4",
       tool_name: "Read",
       tool_input: { file_path: "test.txt" },
-      tool_response: { content: "hello" }
+      tool_response: { content: "hello" },
     },
     config
   );
@@ -125,19 +113,16 @@ test("handlePostToolUse returns null when audit disabled", async () => {
 test("handlePostToolUse sends audit when enabled", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
-  await handleSessionStart(
-    { hook_event_name: "SessionStart", session_id: "sess-5" },
-    config
-  );
+  await handleSessionStart({ hook_event_name: "SessionStart", session_id: "sess-5" }, config);
 
   const originalFetch = globalThis.fetch;
   let capturedPayload;
   globalThis.fetch = async (_url, options) => {
     capturedPayload = JSON.parse(options.body);
-    return new Response(
-      JSON.stringify({ audit_id: "a1", iap_sync_status: "ok" }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ audit_id: "a1", iap_sync_status: "ok" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   };
 
   try {
@@ -147,7 +132,7 @@ test("handlePostToolUse sends audit when enabled", async () => {
         session_id: "sess-5",
         tool_name: "Read",
         tool_input: { file_path: "test.txt" },
-        tool_response: { content: "hello" }
+        tool_response: { content: "hello" },
       },
       config
     );
@@ -162,19 +147,16 @@ test("handlePostToolUse sends audit when enabled", async () => {
 test("handlePostToolUseFailure logs failed status", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
-  await handleSessionStart(
-    { hook_event_name: "SessionStart", session_id: "sess-6" },
-    config
-  );
+  await handleSessionStart({ hook_event_name: "SessionStart", session_id: "sess-6" }, config);
 
   const originalFetch = globalThis.fetch;
   let capturedPayload;
   globalThis.fetch = async (_url, options) => {
     capturedPayload = JSON.parse(options.body);
-    return new Response(
-      JSON.stringify({ audit_id: "a2", iap_sync_status: "ok" }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ audit_id: "a2", iap_sync_status: "ok" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   };
 
   try {
@@ -184,7 +166,7 @@ test("handlePostToolUseFailure logs failed status", async () => {
         session_id: "sess-6",
         tool_name: "Bash",
         tool_input: { command: "exit 1" },
-        error: "Command failed with exit code 1"
+        error: "Command failed with exit code 1",
       },
       config
     );

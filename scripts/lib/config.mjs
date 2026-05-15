@@ -29,36 +29,27 @@ export function loadConfig(env = process.env) {
     env.ARMORCLAUDE_DATA_DIR?.trim() ||
     path.join(homedir(), ".claude", "armorclaude");
 
-  const policyFile =
-    env.ARMORCLAUDE_POLICY_FILE?.trim() || path.join(dataDir, "policy.json");
-  const runtimeFile =
-    env.ARMORCLAUDE_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
+  const policyFile = env.ARMORCLAUDE_POLICY_FILE?.trim() || path.join(dataDir, "policy.json");
+  const runtimeFile = env.ARMORCLAUDE_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
   const timeoutMs = parseInteger(env.ARMORCLAUDE_TIMEOUT_MS, 8000);
 
   const backendEndpoint =
     env.ARMORCLAUDE_BACKEND_ENDPOINT?.trim() ||
     env.BACKEND_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://api.armoriq.ai"
-      : "http://127.0.0.1:3000");
+    (useProduction ? "https://api.armoriq.ai" : "http://127.0.0.1:3000");
 
   const iapEndpoint =
     env.ARMORCLAUDE_IAP_ENDPOINT?.trim() ||
     env.IAP_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://iap.armoriq.ai"
-      : "http://127.0.0.1:8000");
+    (useProduction ? "https://iap.armoriq.ai" : "http://127.0.0.1:8000");
 
   const proxyEndpoint =
     env.ARMORCLAUDE_PROXY_ENDPOINT?.trim() ||
     env.PROXY_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://cloud-run-proxy.armoriq.io"
-      : "http://127.0.0.1:3001");
+    (useProduction ? "https://cloud-run-proxy.armoriq.io" : "http://127.0.0.1:3001");
 
-  const csrgEndpoint =
-    pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") || iapEndpoint;
+  const csrgEndpoint = pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") || iapEndpoint;
 
   // API key resolution: plugin config → env var → ~/.armoriq/credentials.json
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
@@ -88,8 +79,7 @@ export function loadConfig(env = process.env) {
     useSdkIntent: parseBoolean(env.ARMORCLAUDE_USE_SDK_INTENT, true),
     intentEndpoint: env.ARMORCLAUDE_INTENT_URL?.trim() || "",
     verifyStepEndpoint:
-      env.ARMORCLAUDE_VERIFY_STEP_URL?.trim() ||
-      `${backendEndpoint}/iap/verify-step`,
+      env.ARMORCLAUDE_VERIFY_STEP_URL?.trim() || `${backendEndpoint}/iap/verify-step`,
     // 10 minutes is long enough for multi-step agentic work without forcing
     // a replan mid-turn. Set ARMORCLAUDE_VALIDITY_SECONDS to tighten.
     validitySeconds: parseInteger(env.ARMORCLAUDE_VALIDITY_SECONDS, 600),
@@ -122,13 +112,8 @@ export function loadConfig(env = process.env) {
 
     // Policy management
     policyUpdateEnabled: parseBoolean(env.ARMORCLAUDE_POLICY_UPDATE_ENABLED, true),
-    policyUpdateAllowList: parseList(
-      env.ARMORCLAUDE_POLICY_UPDATE_ALLOWLIST || "*"
-    ),
-    contextHintsEnabled: parseBoolean(
-      env.ARMORCLAUDE_CONTEXT_HINTS_ENABLED,
-      true
-    ),
+    policyUpdateAllowList: parseList(env.ARMORCLAUDE_POLICY_UPDATE_ALLOWLIST || "*"),
+    contextHintsEnabled: parseBoolean(env.ARMORCLAUDE_CONTEXT_HINTS_ENABLED, true),
 
     // Crypto policy binding (Merkle tree)
     cryptoPolicyEnabled: parseBoolean(
@@ -137,10 +122,7 @@ export function loadConfig(env = process.env) {
     ),
 
     // Audit logging
-    auditEnabled: parseBoolean(
-      env.ARMORCLAUDE_AUDIT_ENABLED,
-      Boolean(apiKey)
-    ),
+    auditEnabled: parseBoolean(env.ARMORCLAUDE_AUDIT_ENABLED, Boolean(apiKey)),
 
     // Plan directive injection (tells Claude to register a plan via MCP tool)
     planningEnabled: parseBoolean(env.ARMORCLAUDE_PLANNING_ENABLED, true),
@@ -150,9 +132,9 @@ export function loadConfig(env = process.env) {
       maxChars: parseInteger(env.ARMORCLAUDE_MAX_PARAM_CHARS, 2000),
       maxDepth: parseInteger(env.ARMORCLAUDE_MAX_PARAM_DEPTH, 4),
       maxKeys: parseInteger(env.ARMORCLAUDE_MAX_PARAM_KEYS, 50),
-      maxItems: parseInteger(env.ARMORCLAUDE_MAX_PARAM_ITEMS, 50)
+      maxItems: parseInteger(env.ARMORCLAUDE_MAX_PARAM_ITEMS, 50),
     },
 
-    debug: parseBoolean(env.ARMORCLAUDE_DEBUG, false)
+    debug: parseBoolean(env.ARMORCLAUDE_DEBUG, false),
   };
 }
