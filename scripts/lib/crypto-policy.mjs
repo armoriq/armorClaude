@@ -50,7 +50,7 @@ export function computePolicyDigest(rules) {
  * Adapted for stateless hook execution with file-based persistence.
  */
 export function createCryptoPolicyService(config) {
-  const csrgEndpoint = config.csrgEndpoint || config.iapEndpoint || "";
+  const csrgEndpoint = config.csrgEndpoint || "";
   const timeoutMs = config.timeoutMs || 30000;
   const stateFilePath = path.join(config.dataDir, "crypto-policy-state.json");
 
