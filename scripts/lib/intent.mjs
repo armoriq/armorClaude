@@ -19,27 +19,32 @@ function buildSdkClientKey(config) {
     config.userId,
     config.agentId,
     config.contextId,
-    config.iapEndpoint,
-    config.proxyEndpoint,
     config.backendEndpoint,
+    config.csrgEndpoint,
     config.useProduction ? "prod" : "dev"
   ].join("|");
 }
 
-function getSdkClient(config) {
+export function getSdkClient(config) {
   const key = buildSdkClientKey(config);
   const cached = sdkClientCache.get(key);
   if (cached) {
     return cached;
   }
+  // SDK has separate iapEndpoint/proxyEndpoint params for legacy reasons
+  // (the SDK can also act as a tool dispatcher via invokeWithPolicy, which
+  // armorclaude never uses). We pass csrgEndpoint as iapEndpoint because
+  // the SDK's `/delegation/create` route lives on csrg-iap. We don't pass
+  // proxyEndpoint at all — armorclaude observes tool calls via hooks, the
+  // proxy is never hit. SDK falls back to its own default if a customer
+  // ever spawns an invokeWithPolicy path.
   const client = new ArmorIQClient({
     apiKey: config.apiKey,
     userId: config.userId,
     agentId: config.agentId,
     contextId: config.contextId,
     useProduction: config.useProduction,
-    iapEndpoint: config.iapEndpoint,
-    proxyEndpoint: config.proxyEndpoint,
+    iapEndpoint: config.csrgEndpoint,
     backendEndpoint: config.backendEndpoint,
     timeout: config.timeoutMs,
     maxRetries: config.maxRetries,
@@ -183,7 +188,7 @@ export function findPlanStepIndices(plan, toolName, toolParams) {
   return { matches, paramMatches };
 }
 
-export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
+export function checkToolAgainstPlan({ plan, toolName, toolInput, strict = false }) {
   const normalizedTool = normalizeToolName(toolName);
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   if (!steps.length) {
@@ -221,7 +226,12 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
       return { allowed: true };
     }
   }
-  if (sawConstrainedMatch) {
+  // Permissive by default: declared metadata.inputs are advisory, not contractual.
+  // LLM plans are predictions; treating exact param mismatch as a security
+  // violation produces too many false positives (see live screenshot from the
+  // user's other Claude Code session). Set strict=true (or
+  // ARMORCLAUDE_STRICT_PARAM_CHECK=true via the engine handler) to opt back in.
+  if (sawConstrainedMatch && strict) {
     return {
       allowed: false,
       reason: `ArmorClaude intent mismatch: parameters not allowed for ${toolName}`

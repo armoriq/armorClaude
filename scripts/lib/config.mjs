@@ -40,25 +40,17 @@ export function loadConfig(env = process.env) {
     env.ARMORCLAUDE_BACKEND_ENDPOINT?.trim() ||
     env.BACKEND_ENDPOINT?.trim() ||
     (useProduction
-      ? "https://api.armoriq.ai"
+      ? "https://staging-api.armoriq.ai"
       : "http://127.0.0.1:3000");
 
-  const iapEndpoint =
-    env.ARMORCLAUDE_IAP_ENDPOINT?.trim() ||
-    env.IAP_ENDPOINT?.trim() ||
+  // csrg-iap (Python crypto signer). In prod this lives at iap.armoriq.ai
+  // (named for the project, not for "the IAP API" — that's backendEndpoint).
+  // Used only when CSRG_VERIFY_ENABLED=true; otherwise unread.
+  const csrgEndpoint =
+    pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") ||
     (useProduction
       ? "https://iap.armoriq.ai"
-      : "http://127.0.0.1:8000");
-
-  const proxyEndpoint =
-    env.ARMORCLAUDE_PROXY_ENDPOINT?.trim() ||
-    env.PROXY_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://cloud-run-proxy.armoriq.io"
-      : "http://127.0.0.1:3001");
-
-  const csrgEndpoint =
-    pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") || iapEndpoint;
+      : "http://127.0.0.1:8080");
 
   // API key resolution: plugin config → env var → ~/.armoriq/credentials.json
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
@@ -81,8 +73,6 @@ export function loadConfig(env = process.env) {
     runtimeFile,
     useProduction,
     backendEndpoint,
-    iapEndpoint,
-    proxyEndpoint,
     csrgEndpoint,
     apiKey,
     useSdkIntent: parseBoolean(env.ARMORCLAUDE_USE_SDK_INTENT, true),
@@ -144,6 +134,42 @@ export function loadConfig(env = process.env) {
 
     // Plan directive injection (tells Claude to register a plan via MCP tool)
     planningEnabled: parseBoolean(env.ARMORCLAUDE_PLANNING_ENABLED, true),
+
+    // Trust Update primitives — auto-reanchor on plan growth.
+    // Always on as of 2026-05-13. The intermediate signing key (Change 1)
+    // dropped per-signature cost to <1 ms in-process, and the audit
+    // lineage value of recording every Commit → ReAnchor → ReAnchor
+    // outweighs the negligible cost. Flag removed; behavior is unconditional.
+    autoReanchor: true,
+    // When the Claude Code session ends, revoke the active intent token so
+    // the 15-min lifetime can't outlive the session. Default true; flip to
+    // false for sticky/flaky session environments where SessionEnd may fire
+    // on transient disconnects.
+    autoRevokeOnEnd: parseBoolean(env.ARMORCLAUDE_AUTO_REVOKE_ON_END, true),
+
+    // Strict parameter checking (Phase 3 hardening): when true, a tool call
+    // whose params don't satisfy the declared step.metadata.inputs subset is
+    // blocked. When false (the default), metadata.inputs is advisory only —
+    // tool-name drift still blocks. Default false because LLM plan inputs are
+    // predictions, not commitments, and false-positives stall real work.
+    strictParamCheck: parseBoolean(env.ARMORCLAUDE_STRICT_PARAM_CHECK, false),
+
+    // Phase 4 Tier B: daemon mode. Hooks dispatch via Unix socket to a
+    // long-lived `armorclaude-daemon` process instead of running in-process
+    // per fresh node spawn. ~80-95% latency reduction per hook. Always on as
+    // of 2026-05-17 post-soak — flag removed. The hook router falls back to
+    // in-process if the daemon is unreachable, so this stays safe.
+    daemonEnabled: true,
+
+    // Phase 4 WAL: persist audit rows to a local JSONL file on disk before
+    // acking the hook. Same shape OpenTelemetry Collector / Fluent Bit /
+    // Vector.dev use — append → ack → background batch → advance offset.
+    // Closes the ~5s loss window where a daemon SIGKILL between in-memory
+    // enqueue and HTTP flush dropped audit rows.
+    // Default true: disk write is +1-2 ms vs in-memory; loss window goes
+    // from 5s → 0 rows. Flip false to fall back to the legacy in-memory
+    // path for back-compat or constrained-disk environments.
+    auditWal: parseBoolean(env.ARMORCLAUDE_AUDIT_WAL, true),
 
     // Param sanitization limits
     sanitize: {

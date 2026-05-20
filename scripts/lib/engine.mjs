@@ -1,10 +1,11 @@
 import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
-import { addPromptContext, blockPrompt, denyPreTool } from "./hook-output.mjs";
+import { addPromptContext, blockPrompt, denyPreTool, denyPreToolWithHint } from "./hook-output.mjs";
 import {
   checkIntentTokenPlan,
   checkToolAgainstPlan,
   extractAllowedActions,
   findPlanStepIndices,
+  getSdkClient,
   getSessionTokenUsedStepIndices,
   parseCsrgProofHeaders,
   recordSessionTokenUsedStepIndices,
@@ -12,7 +13,11 @@ import {
   resolveCsrgProofsFromToken,
   validateCsrgProofHeaders
 } from "./intent.mjs";
-import { createIapService } from "./iap-service.mjs";
+import {
+  createIapService,
+  reanchorViaSdk,
+  revokeViaSdk
+} from "./iap-service.mjs";
 import {
   applyPolicyCommand,
   computePolicyHash,
@@ -30,6 +35,7 @@ import { readJson } from "./fs-store.mjs";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
 import {
+  appendTrustOp,
   getDiscoveredTools,
   getSession,
   loadRuntimeState,
@@ -37,6 +43,7 @@ import {
   upsertDiscoveredTool,
   upsertSession
 } from "./runtime-state.mjs";
+import { sha256Hex } from "./common.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -89,7 +96,7 @@ function isPolicyUpdateAllowed(config, input) {
       };
 }
 
-function mergeIntentIntoSession(session, intentResponse) {
+function mergeIntentIntoSession(session, intentResponse, config) {
   if (!intentResponse || intentResponse.skipped) {
     return session;
   }
@@ -104,7 +111,48 @@ function mergeIntentIntoSession(session, intentResponse) {
   if (Number.isFinite(intentResponse.expiresAt)) {
     next.expiresAt = intentResponse.expiresAt;
   }
+  // Stamp the API-key prefix on the session so the next hook can detect
+  // a key change and invalidate the cached token automatically. The
+  // prefix (first 16 chars) is the same value stored in api_keys.key_prefix
+  // and is safe to record — it's not the full secret.
+  if (typeof config?.apiKey === "string" && config.apiKey.length >= 16) {
+    next.apiKeyPrefix = config.apiKey.slice(0, 16);
+  }
   return next;
+}
+
+/**
+ * Auto-invalidate cached token when the API key has changed (different
+ * prefix). Triggered when the user edits ~/.armoriq/credentials.json or
+ * the launchctl ARMORIQ_API_KEY env. Without this, the plugin keeps
+ * reusing the old token even after the key changes — meaning audit rows
+ * land in the old org until the user manually clears runtime.json.
+ *
+ * Returns true if the cache was invalidated (caller should re-mint).
+ */
+function invalidateTokenOnKeyChange(session, config) {
+  if (!session?.intentTokenRaw) return false;
+  if (!session?.apiKeyPrefix) {
+    // Legacy session minted before this stamp existed; tolerate it once
+    // by stamping now and trusting the token.
+    if (typeof config?.apiKey === "string" && config.apiKey.length >= 16) {
+      session.apiKeyPrefix = config.apiKey.slice(0, 16);
+    }
+    return false;
+  }
+  const currentPrefix =
+    typeof config?.apiKey === "string" && config.apiKey.length >= 16
+      ? config.apiKey.slice(0, 16)
+      : "";
+  if (!currentPrefix || currentPrefix === session.apiKeyPrefix) return false;
+  // Drift detected — discard the cached token, plan, and expiry so the
+  // mint path runs fresh with the new key.
+  session.intentTokenRaw = "";
+  session.plan = undefined;
+  session.allowedActions = [];
+  session.expiresAt = 0;
+  delete session.apiKeyPrefix;
+  return true;
 }
 
 function readIntentTokenRaw(input, session) {
@@ -134,6 +182,53 @@ function debugLog(config, message) {
   if (config.debug) {
     process.stderr.write(`[armorclaude] ${message}\n`);
   }
+}
+
+const PLUGIN_PLUMBING_TOOLS = new Set([
+  "toolsearch",
+  "todowrite",
+  "listmcpresourcestool",
+  "readmcpresourcetool",
+  "exitplanmode",
+]);
+
+function isPluginPlumbingTool(toolName) {
+  if (typeof toolName !== "string" || !toolName) return false;
+  const norm = toolName.toLowerCase();
+  if (norm.startsWith("mcp__plugin_armorclaude_")) return true;
+  return PLUGIN_PLUMBING_TOOLS.has(norm);
+}
+
+/**
+ * Emit an audit row. Routing order:
+ *   1. daemon (if enabled and reachable) → fire-and-forget, daemon writes to WAL
+ *   2. WAL directly (if enabled, when daemon path fails) → durable, recoverable
+ *   3. synchronous HTTP POST (legacy fallback when both above are off/down)
+ *
+ * Returns a short label ("daemon" | "wal" | "http") for debug logging.
+ */
+async function emitAudit({ dto, config, iapService }) {
+  if (config.daemonEnabled) {
+    try {
+      const { enqueueAuditViaDaemon } = await import("./daemon-client.mjs");
+      const ok = await enqueueAuditViaDaemon({ dto, config });
+      if (ok) return "enqueued (daemon)";
+    } catch (err) {
+      debugLog(config, `audit daemon enqueue failed: ${err?.message ?? err}`);
+    }
+  }
+  if (config.auditWal) {
+    try {
+      const { createAuditWal } = await import("./audit-wal.mjs");
+      const wal = createAuditWal({ dataDir: config.dataDir });
+      await wal.appendLine(dto);
+      return "written (wal)";
+    } catch (err) {
+      debugLog(config, `audit WAL append failed: ${err?.message ?? err}`);
+    }
+  }
+  await iapService.createAuditLog(dto);
+  return "sent (http)";
 }
 
 /**
@@ -259,11 +354,32 @@ export async function handlePreToolUse(input, config) {
   //     not any suffix — an evil server called evil__policy_update would
   //     previously have been whitelisted. ---
   const norm = normalizeToolName(toolName);
-  const armorTools = ["register_intent_plan", "policy_read", "policy_update"];
-  const armorMcpPrefix = "mcp__armorclaude-policy__";
+  // ArmorClaude's own MCP tools — meta-tools for managing the plugin itself
+  // (declare a plan, inspect/update policy, drive Trust Update primitives).
+  // Blocking these creates a deadlock: the agent can't register a plan to
+  // unblock itself.
+  const armorTools = [
+    "register_intent_plan",
+    "policy_read",
+    "policy_update",
+    "trust_revoke",
+    "trust_reanchor",
+    "trust_delegate"
+  ];
+  // Claude Code surfaces MCP tools under different prefixes depending on how
+  // the server is loaded:
+  //   .mcp.json (top-level)       → mcp__<server>__<tool>
+  //   Claude Code plugin manifest → mcp__plugin_<plugin>_<server>__<tool>
+  // Match both. The deadlock the user hit ("intent drift: tool not in plan
+  // (mcp__plugin_armorclaude_armorclaude-policy__register_intent_plan)")
+  // was caused by the plugin-prefix variant being missed.
+  const armorMcpPrefixes = [
+    "mcp__armorclaude-policy__",
+    "mcp__plugin_armorclaude_armorclaude-policy__"
+  ];
   if (
     armorTools.some(
-      (t) => norm === t || norm === `${armorMcpPrefix}${t}`
+      (t) => norm === t || armorMcpPrefixes.some((pfx) => norm === `${pfx}${t}`)
     )
   ) {
     return null;
@@ -278,10 +394,27 @@ export async function handlePreToolUse(input, config) {
   //     no side effects on user files or systems. Blocking these makes the
   //     agent fight itself (e.g. ToolSearch is needed to fetch deferred MCP
   //     tool schemas before they can be called). ---
+  //
+  // Phase 4 A1 (2026-05-08): expanded with built-in read-only Claude Code
+  // tools that observe filesystem/network without mutating either. These get
+  // a hot-path return before any disk read, plan check, or backend HTTP —
+  // saves 30-350 ms per call. Bash is intentionally NOT here: it can do
+  // anything (rm -rf, curl, kill) and must continue through the full
+  // pipeline. Same for Edit/Write/NotebookEdit (mutating) and any MCP tool
+  // that isn't an ArmorClaude meta-tool (already handled above).
   const safeInternalTools = new Set([
+    // Claude Code coordination (no side effects)
     "toolsearch",
     "todowrite",
-    "listmcpresourcestool"
+    "listmcpresourcestool",
+    "readmcpresourcetool",
+    "exitplanmode",
+    // Built-in read-only filesystem/network tools
+    "read",
+    "grep",
+    "glob",
+    "websearch",
+    "webfetch"
   ]);
   if (safeInternalTools.has(norm)) {
     return null;
@@ -294,9 +427,70 @@ export async function handlePreToolUse(input, config) {
   // This load is reused for the rest of the PreToolUse handler instead of
   // reloading from disk below (fewer disk reads on the hot path).
   const runtimeState = await loadRuntimeState(config.runtimeFile);
-  const pendingPath = path.join(config.dataDir, "pending-plan.json");
-  const pending = await readJson(pendingPath, null);
+  const sessionPendingPath = sessionId
+    ? path.join(config.dataDir, `pending-plan.${sessionId}.json`)
+    : null;
+  const legacyPendingPath = path.join(config.dataDir, "pending-plan.json");
+  let pendingPath = sessionPendingPath;
+  let pending = sessionPendingPath ? await readJson(sessionPendingPath, null) : null;
+  if (!pending) {
+    pending = await readJson(legacyPendingPath, null);
+    pendingPath = legacyPendingPath;
+  }
   if (pending && (pending.tokenRaw || pending.plan)) {
+    // --- Auto-reanchor (Phase 3): if the previous plan + token exist for
+    // this session and the new plan hash differs, sign a ReAnchor delta
+    // *before* overwriting the cached plan. The audit log now reads
+    // Commit → ReAnchor → ... instead of orphan Commits.
+    if (config.autoReanchor && pending.plan) {
+      const priorSession = getSession(runtimeState, sessionId);
+      const priorTokenRaw = priorSession?.intentTokenRaw;
+      const priorPlan = priorSession?.plan;
+      if (priorTokenRaw && priorPlan) {
+        const localPriorHash = sha256Hex(JSON.stringify(priorPlan));
+        const localNextHash = sha256Hex(JSON.stringify(pending.plan));
+        if (localPriorHash !== localNextHash) {
+          let priorTokenObj;
+          try {
+            priorTokenObj = JSON.parse(priorTokenRaw);
+          } catch {
+            priorTokenObj = null;
+          }
+          if (priorTokenObj) {
+            const canonicalPriorHash =
+              priorTokenObj?.planHash ||
+              priorTokenObj?.rawToken?.token?.plan_hash ||
+              "";
+            const result = await reanchorViaSdk({
+              getClient: getSdkClient,
+              config,
+              intentToken: priorTokenObj,
+              updatedPlan: pending.plan,
+              reason: "armorclaude:plan-delta"
+            });
+            appendTrustOp(runtimeState, sessionId, {
+              operation: "ReAnchor",
+              trustId: result.trustId,
+              fromHash: result.fromHash || canonicalPriorHash || localPriorHash,
+              toHash: result.toHash || localNextHash,
+              reason: "plan delta detected at PreToolUse",
+              ok: result.ok
+            });
+            debugLog(
+              config,
+              `[trust] auto-reanchor ${result.ok ? "ok" : "failed"} prior=${localPriorHash.slice(0, 12)} new=${localNextHash.slice(0, 12)} trustId=${result.trustId || "n/a"}`
+            );
+            if (!result.ok) {
+              debugLog(
+                config,
+                `[trust] reanchor error: ${result.error || "unknown"}${result.status ? ` status=${result.status}` : ""}${result.body ? ` body=${JSON.stringify(result.body).slice(0, 300)}` : ""}`
+              );
+            }
+          }
+        }
+      }
+    }
+
     upsertSession(runtimeState, sessionId, {
       intentTokenRaw: pending.tokenRaw || "",
       plan: pending.plan,
@@ -343,6 +537,18 @@ export async function handlePreToolUse(input, config) {
   // --- Intent token verification ---
   // Reuse the runtimeState loaded above instead of re-reading from disk.
   const session = getSession(runtimeState, sessionId) || {};
+  // Auto-reload on credential change: if the cached token was minted with
+  // a different API key than the one currently configured, discard it so
+  // the mint path runs fresh below. Otherwise editing
+  // ~/.armoriq/credentials.json silently has no effect until the token
+  // expires.
+  if (invalidateTokenOnKeyChange(session, config)) {
+    debugLog(
+      config,
+      "API key changed (prefix differs); discarded cached token for fresh mint"
+    );
+    upsertSession(runtimeState, sessionId, session);
+  }
   let intentTokenRaw = readIntentTokenRaw(input, session);
   let localPlan = session.plan;
   let localExpiresAt = session.expiresAt;
@@ -381,7 +587,7 @@ export async function handlePreToolUse(input, config) {
         metadata: { source: "claude-code", trigger: "auto_refresh" }
       });
       if (!refreshed.skipped) {
-        const merged = mergeIntentIntoSession(session, refreshed);
+        const merged = mergeIntentIntoSession(session, refreshed, config);
         upsertSession(runtimeState, sessionId, merged);
         intentTokenRaw =
           typeof merged.intentTokenRaw === "string"
@@ -414,7 +620,7 @@ export async function handlePreToolUse(input, config) {
           trigger: "pre_tool_use"
         }
       });
-      const merged = mergeIntentIntoSession(session, intentResponse);
+      const merged = mergeIntentIntoSession(session, intentResponse, config);
       upsertSession(runtimeState, sessionId, merged);
       intentTokenRaw =
         typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
@@ -492,7 +698,7 @@ export async function handlePreToolUse(input, config) {
           verifyResult.reason || `ArmorClaude intent verification denied for ${toolName}`
         );
       }
-      const merged = mergeIntentIntoSession(session, verifyResult);
+      const merged = mergeIntentIntoSession(session, verifyResult, config);
       upsertSession(runtimeState, sessionId, merged);
       localPlan = merged.plan || localPlan;
       localExpiresAt = merged.expiresAt || localExpiresAt;
@@ -532,20 +738,31 @@ export async function handlePreToolUse(input, config) {
     const localCheck = checkToolAgainstPlan({
       plan: localPlan,
       toolName,
-      toolInput
+      toolInput,
+      strict: !!config.strictParamCheck
     });
     if (localCheck.allowed) {
       localPlanMatched = true;
     } else {
-      const deny = denyOrAllow(config, localCheck.reason || "ArmorClaude intent drift");
-      if (deny) {
-        return deny;
+      // Phase 4 A3: include the exact register_intent_plan JSON in the deny
+      // reason so the LLM auto-corrects in 1 follow-up turn.
+      if (shouldDeny(config)) {
+        return denyPreToolWithHint(
+          localCheck.reason || "ArmorClaude intent drift",
+          { toolName, toolInput, goal: session.lastPrompt, knownPlan: localPlan }
+        );
       }
     }
   }
 
   // --- Enforce intent requirement ---
   if (config.intentRequired && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
+    if (shouldDeny(config)) {
+      return denyPreToolWithHint(
+        "ArmorClaude intent plan missing for this session",
+        { toolName, toolInput, goal: session.lastPrompt }
+      );
+    }
     const deny = denyOrAllow(config, "ArmorClaude intent plan missing for this session");
     if (deny) {
       return deny;
@@ -604,7 +821,7 @@ async function handleExitPlanModeCapture(input, sessionId, config) {
             validitySeconds: config.validitySeconds,
             metadata: { source: "claude-code", planning: "plan-mode" }
           });
-          const merged = mergeIntentIntoSession(session, intentResponse);
+          const merged = mergeIntentIntoSession(session, intentResponse, config);
           upsertSession(runtimeState, sessionId, merged);
         } else {
           // Store plan locally without ArmorIQ token
@@ -637,12 +854,15 @@ export async function handlePostToolUse(input, config) {
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   if (!toolName) return null;
 
+  if (isPluginPlumbingTool(toolName)) return null;
+
   try {
     const runtimeState = await loadRuntimeState(config.runtimeFile);
     const session = getSession(runtimeState, sessionId) || {};
     const iapService = createIapService(config);
 
     const intentTokenRaw = session.intentTokenRaw || "";
+    if (!intentTokenRaw) return null;
     let token = intentTokenRaw;
     // Extract JWT if embedded in JSON envelope
     if (intentTokenRaw.startsWith("{")) {
@@ -669,8 +889,12 @@ export async function handlePostToolUse(input, config) {
       duration_ms: 0
     };
 
-    await iapService.createAuditLog(dto);
-    debugLog(config, `audit log sent for ${toolName} step=${stepIdx}`);
+    // Phase 4 A4 (via Tier B): if daemon is enabled, enqueue the audit DTO
+    // for fire-and-forget batched flush. This actually delivers the
+    // latency win — without daemon, we still need to await the POST because
+    // the hook process can't exit while a socket is open.
+    const target = await emitAudit({ dto, config, iapService });
+    debugLog(config, `audit log ${target} for ${toolName} step=${stepIdx}`);
   } catch (error) {
     // Audit is best-effort — don't block
     debugLog(config, `audit log failed: ${error}`);
@@ -692,12 +916,15 @@ export async function handlePostToolUseFailure(input, config) {
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   if (!toolName) return null;
 
+  if (isPluginPlumbingTool(toolName)) return null;
+
   try {
     const runtimeState = await loadRuntimeState(config.runtimeFile);
     const session = getSession(runtimeState, sessionId) || {};
     const iapService = createIapService(config);
 
     const intentTokenRaw = session.intentTokenRaw || "";
+    if (!intentTokenRaw) return null;
     let token = intentTokenRaw;
     if (intentTokenRaw.startsWith("{")) {
       try {
@@ -721,8 +948,8 @@ export async function handlePostToolUseFailure(input, config) {
       duration_ms: 0
     };
 
-    await iapService.createAuditLog(dto);
-    debugLog(config, `audit log (failure) sent for ${toolName}`);
+    const target = await emitAudit({ dto, config, iapService });
+    debugLog(config, `audit log (failure) ${target} for ${toolName}`);
   } catch (error) {
     debugLog(config, `audit log (failure) failed: ${error}`);
   }
@@ -747,6 +974,59 @@ export async function handleStop(input, config) {
     debugLog(config, "intent token expired during turn");
   }
 
+  // --- Phase 4 A2: proactive token refresh at turn boundary ---
+  // The original refresh fires INSIDE handlePreToolUse when a token is near
+  // expiry (engine.mjs:444-486). That's the worst place — Claude is mid-turn
+  // and every subsequent tool waits the 150-300 ms HTTP RTT.
+  //
+  // Move that refresh here, to Stop hook (between turns). The user is reading
+  // Claude's output; nothing is gated. Next turn starts with a fresh token,
+  // zero latency on the PreToolUse critical path. The PreToolUse refresh
+  // stays as a fallback for edge cases (very short turns, long pauses).
+  const refreshThresholdSec = Number.isFinite(config.refreshThresholdSeconds)
+    ? config.refreshThresholdSeconds
+    : 30;
+  // Refresh more aggressively at turn boundary than mid-turn — predict the
+  // user's next turn could fire a tool within ~2-3 minutes, so refresh if
+  // less than `refreshThresholdSec * 4` left.
+  const stopRefreshThresholdSec = refreshThresholdSec * 4;
+  const tokenLeft = Number.isFinite(session.expiresAt)
+    ? session.expiresAt - nowEpochSeconds()
+    : 0;
+  if (
+    session.intentTokenRaw &&
+    isPlainObject(session.plan) &&
+    tokenLeft > 0 &&
+    tokenLeft < stopRefreshThresholdSec &&
+    (config.intentEndpoint || (config.useSdkIntent && config.apiKey))
+  ) {
+    try {
+      const policyState = await loadPolicyState(config.policyFile);
+      const refreshed = await requestIntent(config, {
+        prompt: session.lastPrompt || "Stop-hook proactive refresh",
+        plan: session.plan,
+        session_id: sessionId,
+        policy_hash: computePolicyHash(policyState.policy),
+        policy: policyState.policy,
+        validitySeconds: config.validitySeconds,
+        metadata: { source: "claude-code", trigger: "stop_proactive_refresh" }
+      });
+      if (!refreshed.skipped) {
+        const merged = mergeIntentIntoSession(session, refreshed, config);
+        upsertSession(runtimeState, sessionId, merged);
+        debugLog(
+          config,
+          `[A2] token pre-refreshed at Stop, was ${tokenLeft}s left, threshold=${stopRefreshThresholdSec}s`
+        );
+      }
+    } catch (error) {
+      // Best-effort. If refresh fails, the in-line refresh in PreToolUse
+      // will fire on the next tool call as a safety net.
+      const msg = error instanceof Error ? error.message : String(error);
+      debugLog(config, `[A2] stop-refresh failed (will fall back to in-line): ${msg}`);
+    }
+  }
+
   upsertSession(runtimeState, sessionId, {
     lastStopAt: nowEpochSeconds()
   });
@@ -763,7 +1043,40 @@ export async function handleSessionEnd(input, config) {
   if (!sessionId) return null;
 
   const runtimeState = await loadRuntimeState(config.runtimeFile);
-  // Remove the session entirely
+  const session = runtimeState.sessions ? runtimeState.sessions[sessionId] : undefined;
+
+  // --- Auto-revoke (Phase 3): kill the active intent token at session end
+  // so the 15-minute lifetime can't outlive the Claude Code session. The
+  // SDK's revoke is best-effort; failure logs but doesn't block cleanup.
+  if (config.autoRevokeOnEnd && session?.intentTokenRaw) {
+    if (!Number.isFinite(session.expiresAt) || session.expiresAt > nowEpochSeconds()) {
+      let intentToken = null;
+      try {
+        intentToken = JSON.parse(session.intentTokenRaw);
+      } catch {
+        intentToken = null;
+      }
+      const result = await revokeViaSdk({
+        getClient: getSdkClient,
+        config,
+        intentToken,
+        reason: "armorclaude:session-ended",
+        cascade: false
+      });
+      appendTrustOp(runtimeState, sessionId, {
+        operation: "Revoke",
+        trustId: result.trustId,
+        reason: "session ended",
+        ok: result.ok
+      });
+      debugLog(
+        config,
+        `[trust] session-end revoke ${result.ok ? "ok" : "failed"} trustId=${result.trustId || "n/a"}`
+      );
+    }
+  }
+
+  // Remove the session entirely (after the trust op was logged + persisted)
   if (runtimeState.sessions && runtimeState.sessions[sessionId]) {
     delete runtimeState.sessions[sessionId];
   }
