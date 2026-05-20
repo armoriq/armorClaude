@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { parseBoolean, parseList } from "./common.mjs";
+import { parseBoolean } from "./common.mjs";
 
 /**
  * Read a config value from CLAUDE_PLUGIN_OPTION_* (injected by Claude Code
@@ -15,27 +15,31 @@ function pluginOpt(env, pluginKey, legacyKey) {
 }
 
 /**
- * The single env-knob philosophy:
+ * armorClaude config — after Phase 10's UI shift.
  *
- * Was ~38 env vars. After two prune passes this is down to 8 user-settable
- * knobs plus a handful of paths Claude Code injects. Everything else is a
- * hardcoded default; an operator who needs a different value can edit this
- * file (it IS the config).
+ *   userConfig (plugin UI)  → api_key only
+ *   env vars                → ARMORIQ_ENV switch + paths + debug
+ *   everything else         → hardcoded to the tested-good default
+ *
+ * The plugin used to expose ~38 env vars and 5 userConfig fields. Most of
+ * those were defaults nobody changed. Tests pinned down the right value
+ * for every behavior toggle, so the toggles themselves don't need to ship.
  *
  * Branch contract:
- *   - `main`  ships to production; useProduction=true default →
- *             staging-api.armoriq.ai (until prod cutover).
- *   - `dev`   local stacks via `ARMORCLAUDE_USE_PRODUCTION=false` →
- *             127.0.0.1:3000 + 127.0.0.1:8080.
+ *   - dev branch:  ARMORIQ_ENV=development → 127.0.0.1 stack
+ *                  anything else (default) → cloud (staging URLs pre-cutover)
+ *   - main branch: drops ARMORIQ_ENV entirely; backend + csrg hardcoded
+ *                  to api.armoriq.ai + iap.armoriq.ai
+ *
+ * Operators who really need a different value can edit this file —
+ * scripts/lib/config.mjs IS the config now.
  */
 export function loadConfig(env = process.env) {
-  // ── prod vs local switch ──
-  const useProduction = parseBoolean(
-    pluginOpt(env, "USE_PRODUCTION", "ARMORCLAUDE_USE_PRODUCTION") || undefined,
-    true
-  );
+  // ── ENV switch (deployment-time; dev branch only) ──
+  const useProduction =
+    (env.ARMORIQ_ENV || "production").trim().toLowerCase() === "production";
 
-  // ── data + state paths ──
+  // ── Paths ──
   const dataDir =
     env.CLAUDE_PLUGIN_DATA?.trim() ||
     env.ARMORCLAUDE_DATA_DIR?.trim() ||
@@ -45,11 +49,10 @@ export function loadConfig(env = process.env) {
   const runtimeFile =
     env.ARMORCLAUDE_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
-  // ── endpoints — derived purely from useProduction ──
+  // ── Endpoints (derived purely from useProduction) ──
   // Both URLs map to Cloud Run *-staging services in conmap-auto's
-  // us-central1 region while we're pre-cutover. When the cutover happens
-  // the staging-api / iap-staging hosts get swapped for api / iap and
-  // this block is the one line that changes.
+  // us-central1 region while we're pre-cutover. The main-branch PR
+  // swaps these for api.armoriq.ai + iap.armoriq.ai.
   const backendEndpoint = useProduction
     ? "https://staging-api.armoriq.ai"
     : "http://127.0.0.1:3000";
@@ -57,24 +60,20 @@ export function loadConfig(env = process.env) {
     ? "https://iap-staging.armoriq.ai"
     : "http://127.0.0.1:8080";
 
-  // ── auth ──
+  // ── The one userConfig field: api_key. UI primary, legacy env fallback. ──
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
   if (!apiKey) {
     try {
-      const credPath = path.join(homedir(), ".armoriq", "credentials.json");
-      const creds = JSON.parse(readFileSync(credPath, "utf-8"));
-      if (creds?.apiKey && typeof creds.apiKey === "string") {
-        apiKey = creds.apiKey;
-      }
+      const creds = JSON.parse(
+        readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
+      );
+      if (typeof creds?.apiKey === "string") apiKey = creds.apiKey;
     } catch {
       // no credentials file — local-only mode
     }
   }
 
   return {
-    // Behaviour mode — hardcoded enforce.
-    mode: "enforce",
-
     // Paths / endpoints
     dataDir,
     policyFile,
@@ -82,70 +81,46 @@ export function loadConfig(env = process.env) {
     useProduction,
     backendEndpoint,
     csrgEndpoint,
-    apiKey,
+    verifyStepEndpoint: `${backendEndpoint}/iap/verify-step`,
 
-    // Identity — hardcoded. Backend derives real identity from API key +
-    // Claude Code session.
+    // userConfig-driven (the only one)
+    apiKey,
+    auditEnabled: Boolean(apiKey),
+
+    // Hardcoded — every behaviour toggle uses the value we've tested into
+    // the right default. To change one, edit this file.
+    mode: "enforce",
+    intentRequired: true,
+    auditWal: true,
+    autoReanchor: true,
+    autoRevokeOnEnd: true,
+    daemonEnabled: true,
+    csrgVerifyEnabled: true,
+    requireCsrgProofs: true,
+    cryptoPolicyEnabled: false,
+    strictParamCheck: false,           // advisory — LLM params are predictions
+    policyUpdateEnabled: true,
+    policyUpdateAllowList: ["*"],
+
+    // Identity — backend derives real identity from API key.
     llmId: "claude-code",
     mcpName: "claude-code",
     userId: "claude-user",
     agentId: "claude-code",
     contextId: "default",
 
-    // Derived endpoint.
-    verifyStepEndpoint: `${backendEndpoint}/iap/verify-step`,
-
-    // Token lifetime — hardcoded. 10 minutes is long enough for multi-step
-    // agentic work without forcing a replan mid-turn. 30s refresh window
-    // ahead of expiry prevents tool calls from racing the boundary.
+    // Tuning — sane defaults nobody tunes.
     validitySeconds: 600,
     refreshThresholdSeconds: 30,
-
-    // HTTP tuning — hardcoded.
     timeoutMs: 8000,
     maxRetries: 1,
     verifySsl: true,
+    sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
 
-    // Core enforcement — always on. If you've installed armorClaude you
-    // want intent enforcement; toggling it off defeats the plugin.
-    intentRequired: true,
-
-    // CSRG verification — compulsory (it's the security primitive, not a toggle).
-    requireCsrgProofs: true,
-    csrgVerifyEnabled: true,
-
-    // Policy management — kept (operators may gate which keys MCP
-    // policy_update can write).
-    policyUpdateEnabled: parseBoolean(env.ARMORCLAUDE_POLICY_UPDATE_ENABLED, true),
-    // Empty allowlist disables policy_update entirely. Use ?? (not ||) so
-    // an explicit empty string survives — || coerces empty → "*" which
-    // makes "set to empty to disable" unreachable.
-    policyUpdateAllowList: parseList(
-      env.ARMORCLAUDE_POLICY_UPDATE_ALLOWLIST ?? "*"
-    ),
-
-    // Audit — derived from apiKey presence. WAL durability is always on
-    // (in-memory path was the pre-WAL fallback; no reason to ever choose it).
-    auditEnabled: Boolean(apiKey),
-    auditWal: true,
-
-    // Trust update lifecycle — all hardcoded after two cleanup passes.
-    autoReanchor: true,
-    autoRevokeOnEnd: true,
-    strictParamCheck: false,
-
-    // Phase 4 Tier B daemon — always on.
-    daemonEnabled: true,
-
-    // Always-on legacy flags (kept in the config object for compatibility
-    // with existing call sites that read them; the env vars are gone).
+    // Always-on legacy flags (kept for downstream call-site compatibility).
     useSdkIntent: true,
     planningEnabled: true,
     contextHintsEnabled: true,
-    cryptoPolicyEnabled: false,
-
-    // Param sanitization — hardcoded sane defaults.
-    sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
 
     debug: parseBoolean(env.ARMORCLAUDE_DEBUG, false)
   };
