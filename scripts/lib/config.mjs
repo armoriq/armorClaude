@@ -14,45 +14,54 @@ function pluginOpt(env, pluginKey, legacyKey) {
   return "";
 }
 
+/**
+ * The single env-knob philosophy:
+ *
+ * The plugin used to expose ~38 env vars. Most were either (a) hardcoded
+ * defaults nobody changed, (b) parallel ways to express the same thing, or
+ * (c) dead flags left over from removed features. This file is the result
+ * of paring that down to the 14 knobs that actually matter at runtime, plus
+ * a handful of paths the plugin runtime injects.
+ *
+ * Branch contract:
+ *   - `main`  ships to production, uses `useProduction=true` by default,
+ *             talks to staging-api.armoriq.ai (until prod cutover).
+ *   - `dev`   keeps `ARMORIQ_ENV=development` (or USE_PRODUCTION=false) so
+ *             local stacks point at 127.0.0.1.
+ *
+ * Everything else has a sane hardcoded default.
+ */
 export function loadConfig(env = process.env) {
-  const mode = (pluginOpt(env, "MODE", "ARMORCLAUDE_MODE") || "enforce").toLowerCase();
+  // ── env switch (dev branch only; main hardcodes prod via the default) ──
   const envMode = (env.ARMORIQ_ENV || "production").trim().toLowerCase();
   const useProduction = parseBoolean(
     pluginOpt(env, "USE_PRODUCTION", "ARMORCLAUDE_USE_PRODUCTION") || undefined,
     envMode === "production"
   );
 
-  // Data directory: prefer CLAUDE_PLUGIN_DATA (Claude Code injected), then
-  // ARMORCLAUDE_DATA_DIR, then default ~/.claude/armorclaude
+  // ── data + state paths ──
   const dataDir =
     env.CLAUDE_PLUGIN_DATA?.trim() ||
     env.ARMORCLAUDE_DATA_DIR?.trim() ||
     path.join(homedir(), ".claude", "armorclaude");
-
   const policyFile =
     env.ARMORCLAUDE_POLICY_FILE?.trim() || path.join(dataDir, "policy.json");
   const runtimeFile =
     env.ARMORCLAUDE_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
-  const timeoutMs = parseInteger(env.ARMORCLAUDE_TIMEOUT_MS, 8000);
-
+  // ── endpoints ──
   const backendEndpoint =
     env.ARMORCLAUDE_BACKEND_ENDPOINT?.trim() ||
-    env.BACKEND_ENDPOINT?.trim() ||
     (useProduction
       ? "https://staging-api.armoriq.ai"
       : "http://127.0.0.1:3000");
-
-  // csrg-iap (Python crypto signer). In prod this lives at iap.armoriq.ai
-  // (named for the project, not for "the IAP API" — that's backendEndpoint).
-  // Used only when CSRG_VERIFY_ENABLED=true; otherwise unread.
   const csrgEndpoint =
     pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") ||
     (useProduction
       ? "https://iap.armoriq.ai"
       : "http://127.0.0.1:8080");
 
-  // API key resolution: plugin config → env var → ~/.armoriq/credentials.json
+  // ── auth ──
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
   if (!apiKey) {
     try {
@@ -67,7 +76,11 @@ export function loadConfig(env = process.env) {
   }
 
   return {
-    mode: mode === "monitor" ? "monitor" : "enforce",
+    // Behaviour mode — hardcoded enforce. Was ARMORCLAUDE_MODE; the only
+    // other value was "monitor" which nobody ran in practice.
+    mode: "enforce",
+
+    // Paths / endpoints
     dataDir,
     policyFile,
     runtimeFile,
@@ -75,109 +88,87 @@ export function loadConfig(env = process.env) {
     backendEndpoint,
     csrgEndpoint,
     apiKey,
-    useSdkIntent: parseBoolean(env.ARMORCLAUDE_USE_SDK_INTENT, true),
-    intentEndpoint: env.ARMORCLAUDE_INTENT_URL?.trim() || "",
-    verifyStepEndpoint:
-      env.ARMORCLAUDE_VERIFY_STEP_URL?.trim() ||
-      `${backendEndpoint}/iap/verify-step`,
-    // 10 minutes is long enough for multi-step agentic work without forcing
-    // a replan mid-turn. Set ARMORCLAUDE_VALIDITY_SECONDS to tighten.
-    validitySeconds: parseInteger(env.ARMORCLAUDE_VALIDITY_SECONDS, 600),
-    // Proactively refresh the intent token when it has less than this many
-    // seconds of life left, so tool calls don't hit the expiry boundary.
-    refreshThresholdSeconds: parseInteger(env.ARMORCLAUDE_REFRESH_THRESHOLD_SECONDS, 30),
-    timeoutMs,
-    // One attempt per tool call is usually right — a hung backend shouldn't
-    // stall Claude for timeout * retries. Users who really want retries can
-    // opt in via ARMORCLAUDE_MAX_RETRIES.
-    maxRetries: parseInteger(env.ARMORCLAUDE_MAX_RETRIES, 1),
-    verifySsl: parseBoolean(env.ARMORCLAUDE_VERIFY_SSL, true),
-    llmId: env.ARMORCLAUDE_LLM_ID?.trim() || "claude-code",
-    mcpName: env.ARMORCLAUDE_MCP_NAME?.trim() || "claude-code",
-    userId: env.ARMORCLAUDE_USER_ID?.trim() || "claude-user",
-    agentId: env.ARMORCLAUDE_AGENT_ID?.trim() || "claude-code",
-    contextId: env.ARMORCLAUDE_CONTEXT_ID?.trim() || "default",
 
-    // Intent enforcement — default true (enforce plan mode)
+    // Identity — hardcoded. Was 5 env vars (LLM_ID, MCP_NAME, USER_ID,
+    // AGENT_ID, CONTEXT_ID); all defaulted to "claude-code" / "claude-user"
+    // / "default" and nobody overrode them. The backend derives real
+    // identity from the API key + Claude Code session.
+    llmId: "claude-code",
+    mcpName: "claude-code",
+    userId: "claude-user",
+    agentId: "claude-code",
+    contextId: "default",
+
+    // Derived endpoint — was ARMORCLAUDE_VERIFY_STEP_URL with the same fallback.
+    verifyStepEndpoint: `${backendEndpoint}/iap/verify-step`,
+
+    // Token lifetime tuning — kept (operators tune these).
+    validitySeconds: parseInteger(env.ARMORCLAUDE_VALIDITY_SECONDS, 600),
+    refreshThresholdSeconds: parseInteger(env.ARMORCLAUDE_REFRESH_THRESHOLD_SECONDS, 30),
+
+    // HTTP tuning — hardcoded. Was ARMORCLAUDE_TIMEOUT_MS / _MAX_RETRIES /
+    // _VERIFY_SSL. 8 s is fine; one retry is the only sane value (more
+    // stalls Claude on hung backends); SSL must be true in prod and the
+    // override was a footgun.
+    timeoutMs: 8000,
+    maxRetries: 1,
+    verifySsl: true,
+
+    // Core enforcement toggle — kept.
     intentRequired: parseBoolean(
       pluginOpt(env, "INTENT_REQUIRED", "ARMORCLAUDE_INTENT_REQUIRED") || undefined,
       true
     ),
-    // CSRG verification disabled by default until tenant OPA policies are
-    // configured to allow Claude Code tools. The OPA default-deny behavior
-    // blocks all tools when no matching policy exists. Enable once your
-    // tenant has allow-rules for the tools Claude uses.
-    requireCsrgProofs: parseBoolean(env.REQUIRE_CSRG_PROOFS, false),
-    csrgVerifyEnabled: parseBoolean(env.CSRG_VERIFY_ENABLED, false),
 
-    // Policy management
+    // CSRG verification — compulsory. Was CSRG_VERIFY_ENABLED + REQUIRE_CSRG_PROOFS,
+    // two flags for the same path; they're the security primitive, not a toggle.
+    requireCsrgProofs: true,
+    csrgVerifyEnabled: true,
+
+    // Policy management — kept (operators may want to gate which MCP tools
+    // can call policy_update; empty/missing allowlist disables it).
     policyUpdateEnabled: parseBoolean(env.ARMORCLAUDE_POLICY_UPDATE_ENABLED, true),
     policyUpdateAllowList: parseList(
       env.ARMORCLAUDE_POLICY_UPDATE_ALLOWLIST || "*"
     ),
-    contextHintsEnabled: parseBoolean(
-      env.ARMORCLAUDE_CONTEXT_HINTS_ENABLED,
-      true
-    ),
 
-    // Crypto policy binding (Merkle tree)
-    cryptoPolicyEnabled: parseBoolean(
-      pluginOpt(env, "CRYPTO_POLICY_ENABLED", "ARMORCLAUDE_CRYPTO_POLICY_ENABLED") || undefined,
-      false
-    ),
-
-    // Audit logging
-    auditEnabled: parseBoolean(
-      env.ARMORCLAUDE_AUDIT_ENABLED,
-      Boolean(apiKey)
-    ),
-
-    // Plan directive injection (tells Claude to register a plan via MCP tool)
-    planningEnabled: parseBoolean(env.ARMORCLAUDE_PLANNING_ENABLED, true),
-
-    // Trust Update primitives — auto-reanchor on plan growth.
-    // Always on as of 2026-05-13. The intermediate signing key (Change 1)
-    // dropped per-signature cost to <1 ms in-process, and the audit
-    // lineage value of recording every Commit → ReAnchor → ReAnchor
-    // outweighs the negligible cost. Flag removed; behavior is unconditional.
-    autoReanchor: true,
-    // When the Claude Code session ends, revoke the active intent token so
-    // the 15-min lifetime can't outlive the session. Default true; flip to
-    // false for sticky/flaky session environments where SessionEnd may fire
-    // on transient disconnects.
-    autoRevokeOnEnd: parseBoolean(env.ARMORCLAUDE_AUTO_REVOKE_ON_END, true),
-
-    // Strict parameter checking (Phase 3 hardening): when true, a tool call
-    // whose params don't satisfy the declared step.metadata.inputs subset is
-    // blocked. When false (the default), metadata.inputs is advisory only —
-    // tool-name drift still blocks. Default false because LLM plan inputs are
-    // predictions, not commitments, and false-positives stall real work.
-    strictParamCheck: parseBoolean(env.ARMORCLAUDE_STRICT_PARAM_CHECK, false),
-
-    // Phase 4 Tier B: daemon mode. Hooks dispatch via Unix socket to a
-    // long-lived `armorclaude-daemon` process instead of running in-process
-    // per fresh node spawn. ~80-95% latency reduction per hook. Always on as
-    // of 2026-05-17 post-soak — flag removed. The hook router falls back to
-    // in-process if the daemon is unreachable, so this stays safe.
-    daemonEnabled: true,
-
-    // Phase 4 WAL: persist audit rows to a local JSONL file on disk before
-    // acking the hook. Same shape OpenTelemetry Collector / Fluent Bit /
-    // Vector.dev use — append → ack → background batch → advance offset.
-    // Closes the ~5s loss window where a daemon SIGKILL between in-memory
-    // enqueue and HTTP flush dropped audit rows.
-    // Default true: disk write is +1-2 ms vs in-memory; loss window goes
-    // from 5s → 0 rows. Flip false to fall back to the legacy in-memory
-    // path for back-compat or constrained-disk environments.
+    // Audit — derived from apiKey presence. Was ARMORCLAUDE_AUDIT_ENABLED
+    // with the same derivation; no real reason to expose it.
+    auditEnabled: Boolean(apiKey),
     auditWal: parseBoolean(env.ARMORCLAUDE_AUDIT_WAL, true),
 
-    // Param sanitization limits
-    sanitize: {
-      maxChars: parseInteger(env.ARMORCLAUDE_MAX_PARAM_CHARS, 2000),
-      maxDepth: parseInteger(env.ARMORCLAUDE_MAX_PARAM_DEPTH, 4),
-      maxKeys: parseInteger(env.ARMORCLAUDE_MAX_PARAM_KEYS, 50),
-      maxItems: parseInteger(env.ARMORCLAUDE_MAX_PARAM_ITEMS, 50)
-    },
+    // Trust update lifecycle. autoReanchor + daemonEnabled hardcoded true
+    // post-Phase-4 (intermediate-key signing made the cost negligible and
+    // the daemon soak finished). autoRevokeOnEnd + strictParamCheck are
+    // real toggles operators may flip.
+    autoReanchor: true,
+    autoRevokeOnEnd: parseBoolean(env.ARMORCLAUDE_AUTO_REVOKE_ON_END, true),
+    strictParamCheck: parseBoolean(env.ARMORCLAUDE_STRICT_PARAM_CHECK, false),
+
+    // Phase 4 Tier B daemon — always on.
+    daemonEnabled: true,
+
+    // Always-on behaviours. Were:
+    //   ARMORCLAUDE_USE_SDK_INTENT  — only the SDK path is exercised now
+    //   ARMORCLAUDE_PLANNING_ENABLED  — disabling planning when intent is
+    //     required leaves Claude blind to what to declare; effectively useless
+    //   ARMORCLAUDE_CONTEXT_HINTS_ENABLED  — policy-update hints in deny
+    //     output, gated already by policyUpdateEnabled
+    //   ARMORCLAUDE_CRYPTO_POLICY_ENABLED  — Merkle proof inclusion; the
+    //     csrgVerify path already governs this end-to-end
+    useSdkIntent: true,
+    planningEnabled: true,
+    contextHintsEnabled: true,
+    cryptoPolicyEnabled: false,
+
+    // Intent endpoint override path — kept-but-deprecated. The SDK path
+    // covers every consumer today; this is the HTTP-direct escape hatch
+    // for tenants that don't have the SDK shape.
+    intentEndpoint: "",
+
+    // Param sanitization — hardcoded sane defaults. Was 4 env vars
+    // (MAX_PARAM_CHARS / _DEPTH / _KEYS / _ITEMS) that nobody touched.
+    sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
 
     debug: parseBoolean(env.ARMORCLAUDE_DEBUG, false)
   };
