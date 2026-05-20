@@ -46,11 +46,15 @@ export function loadConfig(env = process.env) {
     env.ARMORCLAUDE_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
   // ── endpoints — derived purely from useProduction ──
+  // Both URLs map to Cloud Run *-staging services in conmap-auto's
+  // us-central1 region while we're pre-cutover. When the cutover happens
+  // the staging-api / iap-staging hosts get swapped for api / iap and
+  // this block is the one line that changes.
   const backendEndpoint = useProduction
     ? "https://staging-api.armoriq.ai"
     : "http://127.0.0.1:3000";
   const csrgEndpoint = useProduction
-    ? "https://iap.armoriq.ai"
+    ? "https://iap-staging.armoriq.ai"
     : "http://127.0.0.1:8080";
 
   // ── auth ──
