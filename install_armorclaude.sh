@@ -291,7 +291,7 @@ EOF
   ${D}claude plugin enable  armorclaude${N}
   ${D}claude plugin update  armorclaude${N}
 
-  Docs: ${C}https://armorclaude-docs.armoriq.ai/docs${N}
+  Docs: ${C}https://docs.armoriq.ai/armorclaude${N}
 
 EOF
 }
