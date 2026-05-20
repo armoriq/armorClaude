@@ -589,7 +589,7 @@ export async function handlePreToolUse(input, config) {
     isPlainObject(localPlan) &&
     Number.isFinite(localExpiresAt) &&
     localExpiresAt - nowEpochSeconds() < refreshThreshold &&
-    (config.intentEndpoint || (config.useSdkIntent && config.apiKey))
+    config.apiKey
   ) {
     try {
       const policyHash = computePolicyHash(policyState.policy);
@@ -622,7 +622,7 @@ export async function handlePreToolUse(input, config) {
   }
 
   // If no token, try to acquire one
-  if (!intentTokenRaw && (config.intentEndpoint || (config.useSdkIntent && config.apiKey))) {
+  if (!intentTokenRaw && config.apiKey) {
     try {
       const policyHash = computePolicyHash(policyState.policy);
       const intentResponse = await requestIntent(config, {
@@ -828,7 +828,7 @@ async function handleExitPlanModeCapture(input, sessionId, config) {
         debugLog(config, `captured plan from ExitPlanMode: ${plan.steps.length} steps (${plan.metadata?.source || "heuristic"})`);
 
         // Send plan to ArmorIQ for intent token
-        if (config.intentEndpoint || (config.useSdkIntent && config.apiKey)) {
+        if (config.apiKey) {
           const policyState = await loadPolicyState(config.policyFile);
           const intentResponse = await requestIntent(config, {
             prompt: session.lastPrompt || plan.metadata?.goal || "Plan execution",
@@ -1016,7 +1016,7 @@ export async function handleStop(input, config) {
     isPlainObject(session.plan) &&
     tokenLeft > 0 &&
     tokenLeft < stopRefreshThresholdSec &&
-    (config.intentEndpoint || (config.useSdkIntent && config.apiKey))
+    config.apiKey
   ) {
     try {
       const policyState = await loadPolicyState(config.policyFile);

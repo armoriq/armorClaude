@@ -545,43 +545,9 @@ export function validateCsrgProofHeaders(proofs, required) {
 }
 
 export async function requestIntent(config, payload) {
-  if (config.intentEndpoint) {
-    const response = await postJson(
-      config.intentEndpoint,
-      payload,
-      buildAuthHeaders(config),
-      config.timeoutMs
-    );
-    if (!response.ok) {
-      throw new Error(response.text || `Intent request failed: ${response.status}`);
-    }
-    const data = isPlainObject(response.data) ? response.data : {};
-    const tokenRaw =
-      typeof data.intentTokenRaw === "string"
-        ? data.intentTokenRaw
-        : typeof data.tokenRaw === "string"
-          ? data.tokenRaw
-          : isPlainObject(data.token)
-            ? JSON.stringify(data.token)
-            : undefined;
-    const parsedFromToken = tokenRaw ? extractPlanFromIntentToken(tokenRaw) : null;
-    const plan = isPlainObject(data.plan) ? data.plan : parsedFromToken?.plan;
-    const expiresAt =
-      Number.isFinite(data.expiresAt)
-        ? data.expiresAt
-        : Number.isFinite(data.expires_at)
-          ? data.expires_at
-          : parsedFromToken?.expiresAt;
-    return {
-      skipped: false,
-      source: "custom-endpoint",
-      tokenRaw,
-      plan,
-      expiresAt
-    };
-  }
-
-  if (!config.useSdkIntent || !config.apiKey) {
+  // SDK is the only intent path. The HTTP-direct override (intentEndpoint)
+  // and the useSdkIntent toggle were both retired in the env cleanup.
+  if (!config.apiKey) {
     return { skipped: true };
   }
   const client = getSdkClient(config);
