@@ -196,7 +196,7 @@ async function run() {
 
       // Send to ArmorIQ for signed intent token (if SDK/endpoint configured)
       let intentResult = { skipped: true };
-      if (config.intentEndpoint || config.apiKey) {
+      if (config.apiKey) {
         try {
           const policyState = await loadPolicyState(config.policyFile);
           intentResult = await requestIntent(config, {

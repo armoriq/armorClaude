@@ -117,8 +117,11 @@ export function loadConfig(env = process.env) {
     // Policy management — kept (operators may gate which keys MCP
     // policy_update can write).
     policyUpdateEnabled: parseBoolean(env.ARMORCLAUDE_POLICY_UPDATE_ENABLED, true),
+    // Empty allowlist disables policy_update entirely. Use ?? (not ||) so
+    // an explicit empty string survives — || coerces empty → "*" which
+    // makes "set to empty to disable" unreachable.
     policyUpdateAllowList: parseList(
-      env.ARMORCLAUDE_POLICY_UPDATE_ALLOWLIST || "*"
+      env.ARMORCLAUDE_POLICY_UPDATE_ALLOWLIST ?? "*"
     ),
 
     // Audit — derived from apiKey presence. WAL durability is always on
@@ -140,7 +143,6 @@ export function loadConfig(env = process.env) {
     planningEnabled: true,
     contextHintsEnabled: true,
     cryptoPolicyEnabled: false,
-    intentEndpoint: "",
 
     // Param sanitization — hardcoded sane defaults.
     sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
