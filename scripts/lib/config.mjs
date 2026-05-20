@@ -15,30 +15,21 @@ function pluginOpt(env, pluginKey, legacyKey) {
 }
 
 /**
- * armorClaude config — after Phase 10's UI shift.
+ * armorClaude config — main branch (production).
  *
  *   userConfig (plugin UI)  → api_key only
- *   env vars                → ARMORIQ_ENV switch + paths + debug
+ *   env vars                → paths + debug
  *   everything else         → hardcoded to the tested-good default
  *
- * The plugin used to expose ~38 env vars and 5 userConfig fields. Most of
- * those were defaults nobody changed. Tests pinned down the right value
- * for every behavior toggle, so the toggles themselves don't need to ship.
- *
- * Branch contract:
- *   - dev branch:  ARMORIQ_ENV=development → 127.0.0.1 stack
- *                  anything else (default) → cloud (staging URLs pre-cutover)
- *   - main branch: drops ARMORIQ_ENV entirely; backend + csrg hardcoded
- *                  to api.armoriq.ai + iap.armoriq.ai
+ * Production-hardcoded. No staging/local switch — `main` ships against
+ * api.armoriq.ai + iap.armoriq.ai unconditionally. The dev branch keeps
+ * the ARMORIQ_ENV toggle for local development; main is the
+ * end-user-facing artifact and must be unambiguously production.
  *
  * Operators who really need a different value can edit this file —
  * scripts/lib/config.mjs IS the config now.
  */
 export function loadConfig(env = process.env) {
-  // ── ENV switch (deployment-time; dev branch only) ──
-  const useProduction =
-    (env.ARMORIQ_ENV || "production").trim().toLowerCase() === "production";
-
   // ── Paths ──
   const dataDir =
     env.CLAUDE_PLUGIN_DATA?.trim() ||
@@ -49,16 +40,12 @@ export function loadConfig(env = process.env) {
   const runtimeFile =
     env.ARMORCLAUDE_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
-  // ── Endpoints (derived purely from useProduction) ──
-  // Both URLs map to Cloud Run *-staging services in conmap-auto's
-  // us-central1 region while we're pre-cutover. The main-branch PR
-  // swaps these for api.armoriq.ai + iap.armoriq.ai.
-  const backendEndpoint = useProduction
-    ? "https://staging-api.armoriq.ai"
-    : "http://127.0.0.1:3000";
-  const csrgEndpoint = useProduction
-    ? "https://iap-staging.armoriq.ai"
-    : "http://127.0.0.1:8080";
+  // ── Endpoints — production, hardcoded. ──
+  // No staging/local toggle on this branch. The dev branch keeps
+  // ARMORIQ_ENV for those flows.
+  const backendEndpoint = "https://api.armoriq.ai";
+  const csrgEndpoint = "https://iap.armoriq.ai";
+  const useProduction = true;
 
   // ── The one userConfig field: api_key. UI primary, legacy env fallback. ──
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
