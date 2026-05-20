@@ -25,7 +25,6 @@ function buildEnv(dataDir) {
     ARMORCLAUDE_DATA_DIR: dataDir,
     ARMORCLAUDE_RUNTIME_FILE: path.join(dataDir, "runtime.json"),
     ARMORCLAUDE_POLICY_FILE: path.join(dataDir, "policy.json"),
-    ARMORCLAUDE_DAEMON: "true",
     ARMORCLAUDE_DEBUG: "false",
     ARMORCLAUDE_USE_SDK_INTENT: "false",
     ARMORIQ_API_KEY: "",

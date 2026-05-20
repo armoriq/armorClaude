@@ -317,12 +317,15 @@ async function handleLine(rawLine, socket) {
       return;
     }
     case "audit_enqueue": {
-      // Fire-and-forget — no reply, the hook client doesn't await. We DO
-      // await enqueueAudit internally so the disk write completes before
-      // the daemon moves on; the client doesn't see this.
-      enqueueAudit(msg.dto).catch((err) => {
+      // Fire-and-forget at the *protocol* level (no reply), but we await
+      // the WAL write so the disk record is durable before the daemon
+      // moves on. Without the await a crash between read and write loses
+      // the audit row even though the WAL exists for exactly this reason.
+      try {
+        await enqueueAudit(msg.dto);
+      } catch (err) {
         if (config.debug) process.stderr.write(`[daemon] enqueueAudit failed: ${err?.message ?? err}\n`);
-      });
+      }
       return;
     }
     case "shutdown": {
