@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { parseBoolean, parseInteger, parseList } from "./common.mjs";
+import { parseBoolean, parseList } from "./common.mjs";
 
 /**
  * Read a config value from CLAUDE_PLUGIN_OPTION_* (injected by Claude Code
@@ -17,26 +17,22 @@ function pluginOpt(env, pluginKey, legacyKey) {
 /**
  * The single env-knob philosophy:
  *
- * The plugin used to expose ~38 env vars. Most were either (a) hardcoded
- * defaults nobody changed, (b) parallel ways to express the same thing, or
- * (c) dead flags left over from removed features. This file is the result
- * of paring that down to the 14 knobs that actually matter at runtime, plus
- * a handful of paths the plugin runtime injects.
+ * Was ~38 env vars. After two prune passes this is down to 8 user-settable
+ * knobs plus a handful of paths Claude Code injects. Everything else is a
+ * hardcoded default; an operator who needs a different value can edit this
+ * file (it IS the config).
  *
  * Branch contract:
- *   - `main`  ships to production, uses `useProduction=true` by default,
- *             talks to staging-api.armoriq.ai (until prod cutover).
- *   - `dev`   keeps `ARMORIQ_ENV=development` (or USE_PRODUCTION=false) so
- *             local stacks point at 127.0.0.1.
- *
- * Everything else has a sane hardcoded default.
+ *   - `main`  ships to production; useProduction=true default →
+ *             staging-api.armoriq.ai (until prod cutover).
+ *   - `dev`   local stacks via `ARMORCLAUDE_USE_PRODUCTION=false` →
+ *             127.0.0.1:3000 + 127.0.0.1:8080.
  */
 export function loadConfig(env = process.env) {
-  // ── env switch (dev branch only; main hardcodes prod via the default) ──
-  const envMode = (env.ARMORIQ_ENV || "production").trim().toLowerCase();
+  // ── prod vs local switch ──
   const useProduction = parseBoolean(
     pluginOpt(env, "USE_PRODUCTION", "ARMORCLAUDE_USE_PRODUCTION") || undefined,
-    envMode === "production"
+    true
   );
 
   // ── data + state paths ──
@@ -49,17 +45,13 @@ export function loadConfig(env = process.env) {
   const runtimeFile =
     env.ARMORCLAUDE_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
-  // ── endpoints ──
-  const backendEndpoint =
-    env.ARMORCLAUDE_BACKEND_ENDPOINT?.trim() ||
-    (useProduction
-      ? "https://staging-api.armoriq.ai"
-      : "http://127.0.0.1:3000");
-  const csrgEndpoint =
-    pluginOpt(env, "CSRG_ENDPOINT", "CSRG_URL") ||
-    (useProduction
-      ? "https://iap.armoriq.ai"
-      : "http://127.0.0.1:8080");
+  // ── endpoints — derived purely from useProduction ──
+  const backendEndpoint = useProduction
+    ? "https://staging-api.armoriq.ai"
+    : "http://127.0.0.1:3000";
+  const csrgEndpoint = useProduction
+    ? "https://iap.armoriq.ai"
+    : "http://127.0.0.1:8080";
 
   // ── auth ──
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
@@ -76,8 +68,7 @@ export function loadConfig(env = process.env) {
   }
 
   return {
-    // Behaviour mode — hardcoded enforce. Was ARMORCLAUDE_MODE; the only
-    // other value was "monitor" which nobody ran in practice.
+    // Behaviour mode — hardcoded enforce.
     mode: "enforce",
 
     // Paths / endpoints
@@ -89,85 +80,65 @@ export function loadConfig(env = process.env) {
     csrgEndpoint,
     apiKey,
 
-    // Identity — hardcoded. Was 5 env vars (LLM_ID, MCP_NAME, USER_ID,
-    // AGENT_ID, CONTEXT_ID); all defaulted to "claude-code" / "claude-user"
-    // / "default" and nobody overrode them. The backend derives real
-    // identity from the API key + Claude Code session.
+    // Identity — hardcoded. Backend derives real identity from API key +
+    // Claude Code session.
     llmId: "claude-code",
     mcpName: "claude-code",
     userId: "claude-user",
     agentId: "claude-code",
     contextId: "default",
 
-    // Derived endpoint — was ARMORCLAUDE_VERIFY_STEP_URL with the same fallback.
+    // Derived endpoint.
     verifyStepEndpoint: `${backendEndpoint}/iap/verify-step`,
 
-    // Token lifetime tuning — kept (operators tune these).
-    validitySeconds: parseInteger(env.ARMORCLAUDE_VALIDITY_SECONDS, 600),
-    refreshThresholdSeconds: parseInteger(env.ARMORCLAUDE_REFRESH_THRESHOLD_SECONDS, 30),
+    // Token lifetime — hardcoded. 10 minutes is long enough for multi-step
+    // agentic work without forcing a replan mid-turn. 30s refresh window
+    // ahead of expiry prevents tool calls from racing the boundary.
+    validitySeconds: 600,
+    refreshThresholdSeconds: 30,
 
-    // HTTP tuning — hardcoded. Was ARMORCLAUDE_TIMEOUT_MS / _MAX_RETRIES /
-    // _VERIFY_SSL. 8 s is fine; one retry is the only sane value (more
-    // stalls Claude on hung backends); SSL must be true in prod and the
-    // override was a footgun.
+    // HTTP tuning — hardcoded.
     timeoutMs: 8000,
     maxRetries: 1,
     verifySsl: true,
 
-    // Core enforcement toggle — kept.
-    intentRequired: parseBoolean(
-      pluginOpt(env, "INTENT_REQUIRED", "ARMORCLAUDE_INTENT_REQUIRED") || undefined,
-      true
-    ),
+    // Core enforcement — always on. If you've installed armorClaude you
+    // want intent enforcement; toggling it off defeats the plugin.
+    intentRequired: true,
 
-    // CSRG verification — compulsory. Was CSRG_VERIFY_ENABLED + REQUIRE_CSRG_PROOFS,
-    // two flags for the same path; they're the security primitive, not a toggle.
+    // CSRG verification — compulsory (it's the security primitive, not a toggle).
     requireCsrgProofs: true,
     csrgVerifyEnabled: true,
 
-    // Policy management — kept (operators may want to gate which MCP tools
-    // can call policy_update; empty/missing allowlist disables it).
+    // Policy management — kept (operators may gate which keys MCP
+    // policy_update can write).
     policyUpdateEnabled: parseBoolean(env.ARMORCLAUDE_POLICY_UPDATE_ENABLED, true),
     policyUpdateAllowList: parseList(
       env.ARMORCLAUDE_POLICY_UPDATE_ALLOWLIST || "*"
     ),
 
-    // Audit — derived from apiKey presence. Was ARMORCLAUDE_AUDIT_ENABLED
-    // with the same derivation; no real reason to expose it.
+    // Audit — derived from apiKey presence. WAL durability is always on
+    // (in-memory path was the pre-WAL fallback; no reason to ever choose it).
     auditEnabled: Boolean(apiKey),
-    auditWal: parseBoolean(env.ARMORCLAUDE_AUDIT_WAL, true),
+    auditWal: true,
 
-    // Trust update lifecycle. autoReanchor + daemonEnabled hardcoded true
-    // post-Phase-4 (intermediate-key signing made the cost negligible and
-    // the daemon soak finished). autoRevokeOnEnd + strictParamCheck are
-    // real toggles operators may flip.
+    // Trust update lifecycle — all hardcoded after two cleanup passes.
     autoReanchor: true,
-    autoRevokeOnEnd: parseBoolean(env.ARMORCLAUDE_AUTO_REVOKE_ON_END, true),
-    strictParamCheck: parseBoolean(env.ARMORCLAUDE_STRICT_PARAM_CHECK, false),
+    autoRevokeOnEnd: true,
+    strictParamCheck: false,
 
     // Phase 4 Tier B daemon — always on.
     daemonEnabled: true,
 
-    // Always-on behaviours. Were:
-    //   ARMORCLAUDE_USE_SDK_INTENT  — only the SDK path is exercised now
-    //   ARMORCLAUDE_PLANNING_ENABLED  — disabling planning when intent is
-    //     required leaves Claude blind to what to declare; effectively useless
-    //   ARMORCLAUDE_CONTEXT_HINTS_ENABLED  — policy-update hints in deny
-    //     output, gated already by policyUpdateEnabled
-    //   ARMORCLAUDE_CRYPTO_POLICY_ENABLED  — Merkle proof inclusion; the
-    //     csrgVerify path already governs this end-to-end
+    // Always-on legacy flags (kept in the config object for compatibility
+    // with existing call sites that read them; the env vars are gone).
     useSdkIntent: true,
     planningEnabled: true,
     contextHintsEnabled: true,
     cryptoPolicyEnabled: false,
-
-    // Intent endpoint override path — kept-but-deprecated. The SDK path
-    // covers every consumer today; this is the HTTP-direct escape hatch
-    // for tenants that don't have the SDK shape.
     intentEndpoint: "",
 
-    // Param sanitization — hardcoded sane defaults. Was 4 env vars
-    // (MAX_PARAM_CHARS / _DEPTH / _KEYS / _ITEMS) that nobody touched.
+    // Param sanitization — hardcoded sane defaults.
     sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
 
     debug: parseBoolean(env.ARMORCLAUDE_DEBUG, false)
