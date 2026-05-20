@@ -251,6 +251,25 @@ async function run() {
     const config = loadConfig();
     const runtimeState = await loadRuntimeState(config.runtimeFile);
     const sessions = runtimeState.sessions || {};
+
+    // Prefer the current Claude Code window's session id when set. With
+    // multiple concurrent windows the "most-recent updatedAt" heuristic
+    // would route trust_revoke / trust_reanchor / trust_delegate against
+    // the wrong window's token. CLAUDE_CODE_SESSION_ID is stamped on the
+    // per-session pending-plan file (#43) and is reliable here.
+    const envSid = process.env.CLAUDE_CODE_SESSION_ID || "";
+    if (envSid && sessions[envSid]) {
+      return {
+        config,
+        runtimeState,
+        sessionId: envSid,
+        session: sessions[envSid],
+      };
+    }
+
+    // Fallback: pick the most-recently-updated session. Only reached when
+    // the env var is missing (single-window dev) or points at a session
+    // that's been GC'd from runtime.json.
     let chosen = null;
     let chosenId = null;
     for (const [sid, s] of Object.entries(sessions)) {
@@ -294,6 +313,12 @@ async function run() {
         return toTextResult("No active session — nothing to revoke.");
       }
       const intentToken = parseToken(session.intentTokenRaw);
+      if (!intentToken) {
+        return toTextResult(
+          "No parsed intent token on the active session — cannot revoke. " +
+          "Make sure a plan has been registered for this Claude Code session."
+        );
+      }
       const result = await revokeViaSdk({
         getClient: getSdkClient,
         config,

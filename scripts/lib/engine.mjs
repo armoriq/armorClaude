@@ -461,6 +461,24 @@ export async function handlePreToolUse(input, config) {
               priorTokenObj?.planHash ||
               priorTokenObj?.rawToken?.token?.plan_hash ||
               "";
+            // Prefer the canonical planHash from pending.tokenRaw (if a new
+            // token was minted alongside the new plan) so trustOpsLog hashes
+            // stay cross-referencable with backend trust_deltas rows even
+            // when the SDK reanchor call fails. sha256(JSON.stringify(plan))
+            // is a last-resort identifier — different from the CSRG canonical
+            // hash and therefore not auditable against TrustDelta.payload.
+            let canonicalNextHash = "";
+            if (pending.tokenRaw && typeof pending.tokenRaw === "string") {
+              try {
+                const pendingTokenObj = JSON.parse(pending.tokenRaw);
+                canonicalNextHash =
+                  pendingTokenObj?.planHash ||
+                  pendingTokenObj?.rawToken?.token?.plan_hash ||
+                  "";
+              } catch {
+                // ignore — fall through to localNextHash below
+              }
+            }
             const result = await reanchorViaSdk({
               getClient: getSdkClient,
               config,
@@ -472,7 +490,7 @@ export async function handlePreToolUse(input, config) {
               operation: "ReAnchor",
               trustId: result.trustId,
               fromHash: result.fromHash || canonicalPriorHash || localPriorHash,
-              toHash: result.toHash || localNextHash,
+              toHash: result.toHash || canonicalNextHash || localNextHash,
               reason: "plan delta detected at PreToolUse",
               ok: result.ok
             });
