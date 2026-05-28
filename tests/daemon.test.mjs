@@ -94,7 +94,7 @@ test("daemon: PreToolUse roundtrip returns null for fast-path tool", async () =>
   try {
     const config = await loadConfigFor(dataDir);
     const { dispatchViaDaemon } = await import("../scripts/lib/daemon-client.mjs");
-    // 'read' is in the Phase 4 A1 fast-path whitelist — should be allowed
+    // 'read' is in the Phase 4 A1 fast-path allowlist --- should be allowed
     // without any plan / token / backend, regardless of intentRequired.
     const output = await dispatchViaDaemon({
       event: "PreToolUse",

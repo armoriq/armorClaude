@@ -36,6 +36,7 @@ import { loadConfig } from "./lib/config.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
 import {
   handleSessionStart,
+  handleUserPromptExpansion,
   handleUserPromptSubmit,
   handlePreToolUse,
   handlePostToolUse,
@@ -44,7 +45,7 @@ import {
   handleSessionEnd,
 } from "./lib/engine.mjs";
 
-const DAEMON_VERSION = "0.1.0";
+const DAEMON_VERSION = "0.2.8";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 
@@ -274,6 +275,8 @@ async function dispatchHook(event, input) {
   switch (event) {
     case "SessionStart":
       return handleSessionStart(input, config);
+    case "UserPromptExpansion":
+      return handleUserPromptExpansion(input, config);
     case "UserPromptSubmit":
       return handleUserPromptSubmit(input, config);
     case "PreToolUse":

@@ -14,6 +14,7 @@
 
 import { postJson, sha256Hex } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
+import { canonicalPolicyHash, POLICY_IR_VERSION } from "./policy-ir.mjs";
 import path from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,14 @@ export function computePolicyDigest(rules) {
   return sha256Hex(`policy|${canonical}`);
 }
 
+export function computeCryptoPolicyDigest(policyState) {
+  const policy = policyState?.policy || policyState;
+  if (isPlainObject(policy) && policy.schemaVersion === POLICY_IR_VERSION) {
+    return canonicalPolicyHash(policy);
+  }
+  return computePolicyDigest(policy?.rules || []);
+}
+
 // ---------------------------------------------------------------------------
 // Service factory
 // ---------------------------------------------------------------------------
@@ -59,10 +68,12 @@ export function createCryptoPolicyService(config) {
      * Issue a new CSRG policy token with policy embedded in Merkle tree.
      */
     async issuePolicyToken(policyState, identity, validitySeconds = 3600) {
-      const digest = computePolicyDigest(policyState.policy?.rules || []);
+      const digest = computeCryptoPolicyDigest(policyState);
 
       const policyMetadata = {
         rules: policyState.policy?.rules || [],
+        schema_version: policyState.policy?.schemaVersion,
+        statements: policyState.policy?.statements || [],
         version: policyState.version || 0,
         updated_at: policyState.updatedAt || new Date().toISOString(),
         updated_by: policyState.updatedBy,

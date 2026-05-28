@@ -97,10 +97,17 @@ export function loadConfig(env = process.env) {
     //   activeSessions shows the real count on the dashboard.
     csrgVerifyEnabled: localMock,
     requireCsrgProofs: false,
-    cryptoPolicyEnabled: false,
+    cryptoPolicyEnabled: Boolean(apiKey),
     strictParamCheck: false, // advisory — LLM params are predictions
     policyUpdateEnabled: true,
     policyUpdateAllowList: ["*"],
+    mcpDenyByDefault: true,
+    enforcementEngine: env.ARMORCLAUDE_ENFORCEMENT_ENGINE?.trim() || "local",
+    opaPdpUrl: env.ARMORCLAUDE_OPA_PDP_URL?.trim() || "",
+    opaCacheTtlMs: 10000,
+    opaTimeoutMs: 3000,
+    opaCircuitBreakerThreshold: 15,
+    opaCircuitResetMs: 10000,
 
     // Identity — backend derives real identity from API key.
     llmId: "claude-code",
@@ -120,7 +127,6 @@ export function loadConfig(env = process.env) {
     // Always-on legacy flags (kept for downstream call-site compatibility).
     useSdkIntent: true,
     planningEnabled: true,
-    contextHintsEnabled: true,
 
     debug: parseBoolean(env.ARMORCLAUDE_DEBUG, false),
   };
