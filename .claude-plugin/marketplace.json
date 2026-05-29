@@ -7,16 +7,31 @@
   },
   "metadata": {
     "description": "Official ArmorIQ marketplace for Claude Code security plugins.",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "armorclaude",
       "source": "./",
-      "description": "Intent-based security enforcement for Claude Code: declared plans, policy rules, intent-drift blocking, CSRG cryptographic proofs, and audit logging.",
-      "version": "0.2.0",
+      "description": "Intent-based security enforcement for Claude Code: declared plans, policy rules, intent-drift blocking, CSRG cryptographic proofs, and audit logging. Production-hardcoded URLs (api.armoriq.ai + iap.armoriq.ai).",
+      "version": "0.2.2",
       "category": "security",
       "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp"],
+      "homepage": "https://armoriq.ai",
+      "license": "MIT",
+      "author": { "name": "ArmorIQ", "email": "license@armoriq.io" }
+    },
+    {
+      "name": "armorclaude-dev",
+      "source": {
+        "source": "github",
+        "repo": "armoriq/armorClaude",
+        "ref": "dev"
+      },
+      "description": "Intent-based security enforcement for Claude Code — dev variant. Staging/local toggleable via ARMORIQ_ENV (development → 127.0.0.1; default → staging-api.armoriq.ai). Tracks the dev branch HEAD; install only if you're contributing to armorClaude or running a local stack.",
+      "version": "0.2.2",
+      "category": "security",
+      "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp", "dev"],
       "homepage": "https://armoriq.ai",
       "license": "MIT",
       "author": { "name": "ArmorIQ", "email": "license@armoriq.io" }

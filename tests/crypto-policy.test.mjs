@@ -32,7 +32,6 @@ test("verifyPolicyDigest returns valid on match", async () => {
   const config = {
     dataDir: tmp,
     csrgEndpoint: "http://localhost:8000",
-    iapEndpoint: "http://localhost:8000",
     timeoutMs: 5000,
     userId: "test",
     agentId: "test",
@@ -49,7 +48,6 @@ test("verifyPolicyDigest returns invalid on mismatch", async () => {
   const config = {
     dataDir: tmp,
     csrgEndpoint: "http://localhost:8000",
-    iapEndpoint: "http://localhost:8000",
     timeoutMs: 5000,
     userId: "test",
     agentId: "test",
@@ -66,7 +64,6 @@ test("verifyPolicyDigest returns invalid when no token digest", async () => {
   const config = {
     dataDir: tmp,
     csrgEndpoint: "http://localhost:8000",
-    iapEndpoint: "http://localhost:8000",
     timeoutMs: 5000,
   };
   const service = createCryptoPolicyService(config);
@@ -80,7 +77,6 @@ test("loadCachedState returns null when no state file", async () => {
   const config = {
     dataDir: tmp,
     csrgEndpoint: "http://localhost:8000",
-    iapEndpoint: "http://localhost:8000",
     timeoutMs: 5000,
   };
   const service = createCryptoPolicyService(config);

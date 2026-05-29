@@ -19,8 +19,6 @@ function buildConfig(tmpDir, overrides = {}) {
     runtimeFile: path.join(tmpDir, "runtime.json"),
     useProduction: false,
     backendEndpoint: "http://127.0.0.1:3000",
-    iapEndpoint: "http://127.0.0.1:8000",
-    proxyEndpoint: "http://127.0.0.1:3001",
     csrgEndpoint: "http://127.0.0.1:8000",
     apiKey: "ak_test_12345678",
     useSdkIntent: false,
@@ -179,7 +177,10 @@ test("checkIntentTokenPlan detects expired token", () => {
   assert.match(result.blockReason, /expired/i);
 });
 
-test("checkIntentTokenPlan enforces parameter constraints", () => {
+test("checkIntentTokenPlan: parameter mismatch is advisory by default (Phase 3 hardening)", () => {
+  // Default behavior: metadata.inputs.file_path is a prediction, not a contract.
+  // The user's other Claude Code session showed this fired false-positives when
+  // the LLM couldn't guess exact bash commands. We now allow by default.
   const token = {
     plan: {
       steps: [{ action: "Write", metadata: { inputs: { file_path: "allowed.txt" } } }],
@@ -192,7 +193,32 @@ test("checkIntentTokenPlan enforces parameter constraints", () => {
     toolParams: { file_path: "forbidden.txt" },
   });
   assert.equal(result.matched, true);
-  assert.match(result.blockReason, /parameters not allowed/i);
+  assert.equal(result.blockReason, undefined);
+});
+
+test("checkToolAgainstPlan with strict=true blocks param mismatch (opt-in)", async () => {
+  const { checkToolAgainstPlan } = await import("../scripts/lib/intent.mjs");
+  const plan = {
+    steps: [{ action: "Bash", metadata: { inputs: { command: "npm test" } } }],
+  };
+  const lax = checkToolAgainstPlan({ plan, toolName: "Bash", toolInput: { command: "rm -rf /" } });
+  assert.equal(lax.allowed, true, "default lax mode allows mismatched params");
+  const strict = checkToolAgainstPlan({
+    plan,
+    toolName: "Bash",
+    toolInput: { command: "rm -rf /" },
+    strict: true,
+  });
+  assert.equal(strict.allowed, false, "strict=true blocks mismatched params");
+  assert.match(strict.reason, /parameters not allowed/i);
+});
+
+test("checkToolAgainstPlan still blocks tool-name drift even when permissive", async () => {
+  const { checkToolAgainstPlan } = await import("../scripts/lib/intent.mjs");
+  const plan = { steps: [{ action: "Read" }] };
+  const r = checkToolAgainstPlan({ plan, toolName: "Bash", toolInput: { command: "x" } });
+  assert.equal(r.allowed, false);
+  assert.match(r.reason, /tool not in plan/i);
 });
 
 test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplicate tools", async () => {

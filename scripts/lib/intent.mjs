@@ -1,11 +1,9 @@
 import armoriqSdk from "@armoriq/sdk";
 import {
-  buildAuthHeaders,
   isPlainObject,
   isSubsetValue,
   normalizeToolName,
   parseStepIndex,
-  postJson,
   readString,
   sha256Hex,
 } from "./common.mjs";
@@ -19,27 +17,32 @@ function buildSdkClientKey(config) {
     config.userId,
     config.agentId,
     config.contextId,
-    config.iapEndpoint,
-    config.proxyEndpoint,
     config.backendEndpoint,
+    config.csrgEndpoint,
     config.useProduction ? "prod" : "dev",
   ].join("|");
 }
 
-function getSdkClient(config) {
+export function getSdkClient(config) {
   const key = buildSdkClientKey(config);
   const cached = sdkClientCache.get(key);
   if (cached) {
     return cached;
   }
+  // SDK has separate iapEndpoint/proxyEndpoint params for legacy reasons
+  // (the SDK can also act as a tool dispatcher via invokeWithPolicy, which
+  // armorclaude never uses). We pass csrgEndpoint as iapEndpoint because
+  // the SDK's `/delegation/create` route lives on csrg-iap. We don't pass
+  // proxyEndpoint at all — armorclaude observes tool calls via hooks, the
+  // proxy is never hit. SDK falls back to its own default if a customer
+  // ever spawns an invokeWithPolicy path.
   const client = new ArmorIQClient({
     apiKey: config.apiKey,
     userId: config.userId,
     agentId: config.agentId,
     contextId: config.contextId,
     useProduction: config.useProduction,
-    iapEndpoint: config.iapEndpoint,
-    proxyEndpoint: config.proxyEndpoint,
+    iapEndpoint: config.csrgEndpoint,
     backendEndpoint: config.backendEndpoint,
     timeout: config.timeoutMs,
     maxRetries: config.maxRetries,
@@ -185,7 +188,7 @@ export function findPlanStepIndices(plan, toolName, toolParams) {
   return { matches, paramMatches };
 }
 
-export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
+export function checkToolAgainstPlan({ plan, toolName, toolInput, strict = false }) {
   const normalizedTool = normalizeToolName(toolName);
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   if (!steps.length) {
@@ -223,7 +226,12 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput }) {
       return { allowed: true };
     }
   }
-  if (sawConstrainedMatch) {
+  // Permissive by default: declared metadata.inputs are advisory, not contractual.
+  // LLM plans are predictions; treating exact param mismatch as a security
+  // violation produces too many false positives (see live screenshot from the
+  // user's other Claude Code session). Set strict=true (or
+  // ARMORCLAUDE_STRICT_PARAM_CHECK=true via the engine handler) to opt back in.
+  if (sawConstrainedMatch && strict) {
     return {
       allowed: false,
       reason: `ArmorClaude intent mismatch: parameters not allowed for ${toolName}`,
@@ -537,42 +545,9 @@ export function validateCsrgProofHeaders(proofs, required) {
 }
 
 export async function requestIntent(config, payload) {
-  if (config.intentEndpoint) {
-    const response = await postJson(
-      config.intentEndpoint,
-      payload,
-      buildAuthHeaders(config),
-      config.timeoutMs
-    );
-    if (!response.ok) {
-      throw new Error(response.text || `Intent request failed: ${response.status}`);
-    }
-    const data = isPlainObject(response.data) ? response.data : {};
-    const tokenRaw =
-      typeof data.intentTokenRaw === "string"
-        ? data.intentTokenRaw
-        : typeof data.tokenRaw === "string"
-          ? data.tokenRaw
-          : isPlainObject(data.token)
-            ? JSON.stringify(data.token)
-            : undefined;
-    const parsedFromToken = tokenRaw ? extractPlanFromIntentToken(tokenRaw) : null;
-    const plan = isPlainObject(data.plan) ? data.plan : parsedFromToken?.plan;
-    const expiresAt = Number.isFinite(data.expiresAt)
-      ? data.expiresAt
-      : Number.isFinite(data.expires_at)
-        ? data.expires_at
-        : parsedFromToken?.expiresAt;
-    return {
-      skipped: false,
-      source: "custom-endpoint",
-      tokenRaw,
-      plan,
-      expiresAt,
-    };
-  }
-
-  if (!config.useSdkIntent || !config.apiKey) {
+  // SDK is the only intent path. The HTTP-direct override (intentEndpoint)
+  // and the useSdkIntent toggle were both retired in the env cleanup.
+  if (!config.apiKey) {
     return { skipped: true };
   }
   const client = getSdkClient(config);

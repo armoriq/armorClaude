@@ -15,8 +15,7 @@ function buildConfig(tmpDir, overrides = {}) {
     runtimeFile: path.join(tmpDir, "runtime.json"),
     useProduction: false,
     backendEndpoint: "http://127.0.0.1:3000",
-    iapEndpoint: "http://127.0.0.1:8000",
-    proxyEndpoint: "http://127.0.0.1:3001",
+    csrgEndpoint: "http://127.0.0.1:8080",
     apiKey: "",
     useSdkIntent: false,
     intentEndpoint: "",
@@ -115,17 +114,99 @@ test("handlePreToolUse denies when policy blocks tool", async () => {
 test("handlePreToolUse denies missing intent when strict", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
+  // Use Edit (mutating, NOT in the Phase 4 A1 read-only fast-path) so the
+  // full intent-required pipeline runs. Read/Grep/Glob/WebSearch/etc are
+  // intentionally fast-pathed and bypass this check by design.
   const output = await handlePreToolUse(
     {
       hook_event_name: "PreToolUse",
       session_id: "session-3",
-      tool_name: "read",
-      tool_input: { file_path: "a.txt" },
+      tool_name: "edit",
+      tool_input: { file_path: "a.txt", old_string: "x", new_string: "y" },
     },
     config
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
   assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /intent plan missing/i);
+});
+
+test("Phase 4 A3: deny output for missing plan includes a register_intent_plan hint", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-a3-missing-"));
+  const config = buildConfig(tmp, { intentRequired: true });
+  const output = await handlePreToolUse(
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "session-a3-1",
+      tool_name: "edit",
+      tool_input: { file_path: "x.txt", old_string: "a", new_string: "b" },
+    },
+    config
+  );
+  const reason = output?.hookSpecificOutput?.permissionDecisionReason || "";
+  assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
+  assert.match(reason, /register_intent_plan/, "reason should reference register_intent_plan");
+  assert.match(reason, /```json/, "reason should include a JSON code block");
+  assert.match(
+    reason,
+    /"action":\s*"edit"/,
+    "reason should include the blocked tool in the suggestion"
+  );
+});
+
+test("Phase 4 A3: deny on drift extends the existing plan in the hint", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-a3-drift-"));
+  const config = buildConfig(tmp, { intentRequired: true });
+  const { writeFile } = await import("node:fs/promises");
+  // Local-plan-only path (no intentTokenRaw) so the local drift check fires
+  // and returns the actionable hint that extends the cached plan.
+  await writeFile(
+    config.runtimeFile,
+    JSON.stringify({
+      sessions: {
+        "drift-1": {
+          plan: { goal: "the original task", steps: [{ action: "Read" }] },
+          allowedActions: ["read"],
+          lastPrompt: "the original task",
+        },
+      },
+    })
+  );
+  const output = await handlePreToolUse(
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "drift-1",
+      tool_name: "edit",
+      tool_input: { file_path: "y.txt", old_string: "a", new_string: "b" },
+    },
+    config
+  );
+  const reason = output?.hookSpecificOutput?.permissionDecisionReason || "";
+  assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
+  assert.match(reason, /register_intent_plan/);
+  // The hint should preserve the existing Read step AND add the new edit step
+  assert.match(reason, /"action":\s*"Read"/);
+  assert.match(reason, /"action":\s*"edit"/);
+});
+
+test("handlePreToolUse fast-paths read-only tools without intent (Phase 4 A1)", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  const config = buildConfig(tmp, { intentRequired: true });
+  for (const tool of ["read", "grep", "glob", "websearch", "webfetch", "exitplanmode"]) {
+    const output = await handlePreToolUse(
+      {
+        hook_event_name: "PreToolUse",
+        session_id: "session-fastpath",
+        tool_name: tool,
+        tool_input: {},
+      },
+      config
+    );
+    assert.equal(
+      output,
+      null,
+      `${tool} should be fast-pathed (no plan check); got ${JSON.stringify(output)}`
+    );
+  }
 });
 
 test("handlePreToolUse allows tool when local plan matches (no backend)", async () => {

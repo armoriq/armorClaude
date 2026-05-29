@@ -9,6 +9,7 @@ import {
   handleStop,
   handleUserPromptSubmit,
 } from "./lib/engine.mjs";
+import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 
 async function readStdin() {
   const chunks = [];
@@ -49,6 +50,22 @@ async function main() {
   }
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   debugLog(config, `hook=${event}`);
+
+  // Phase 4 Tier B: try the daemon first if enabled. The daemon dispatches
+  // exactly the same handlers in-process (long-lived) and replies with the
+  // hook output. On any error — daemon down, socket missing, timeout — we
+  // fall back to the legacy in-process path so the plugin never fails just
+  // because of daemon trouble.
+  if (config.daemonEnabled) {
+    try {
+      const output = await dispatchViaDaemon({ event, input, config });
+      if (output) emitJson(output);
+      return;
+    } catch (err) {
+      debugLog(config, `daemon dispatch failed; falling back in-process: ${err?.message ?? err}`);
+      // Fall through to in-process below
+    }
+  }
 
   let output;
 

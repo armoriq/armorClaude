@@ -23,7 +23,7 @@ import {
 export function createIapService(config) {
   const backendEndpoint =
     config.backendEndpoint || config.verifyStepEndpoint?.replace(/\/iap\/verify-step$/, "") || "";
-  const csrgEndpoint = config.csrgEndpoint || config.iapEndpoint || "";
+  const csrgEndpoint = config.csrgEndpoint || "";
   const timeoutMs = config.timeoutMs || 8000;
   const headers = buildAuthHeaders(config);
 
@@ -155,6 +155,33 @@ export function createIapService(config) {
       return response.data;
     },
 
+    /**
+     * Phase 4 C2: send N audit DTOs in one HTTP roundtrip.
+     * Used by armorclaude-daemon's audit-buffer flush. The daemon batches
+     * up to 100 rows or 5s, whichever first, then ships them here.
+     *
+     * Returns { written, failures } so the daemon knows whether to
+     * re-queue any rows that failed.
+     */
+    async createAuditLogBatch(rows) {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return { written: 0, failures: [] };
+      }
+      const response = await postJson(
+        `${backendEndpoint}/iap/audit/batch`,
+        { rows },
+        headers,
+        timeoutMs
+      );
+      if (!response.ok || !response.data) {
+        const message = response.text
+          ? `IAP audit batch failed: ${response.text}`
+          : `IAP audit batch failed with status ${response.status}`;
+        throw new Error(message);
+      }
+      return response.data;
+    },
+
     csrgProofsRequired() {
       return Boolean(config.requireCsrgProofs);
     },
@@ -214,4 +241,133 @@ function parseStepIndexFromPath(path) {
   if (!match) return null;
   const index = Number.parseInt(match[1] || "", 10);
   return Number.isFinite(index) ? index : null;
+}
+
+// ---------------------------------------------------------------------------
+// Trust Update primitives (Phase 3) — thin wrappers over the SDK methods
+// already shipped in @armoriq/sdk's Client. All three are best-effort: a
+// failure logs and returns { ok: false }; it never throws to the caller.
+// The hook handlers must not block on Trust Update plumbing failures.
+// ---------------------------------------------------------------------------
+
+/**
+ * Sign a ReAnchor delta linking the previous plan hash to the new one.
+ * Returns { ok, trustId?, fromHash?, toHash? }.
+ *
+ * @param {object} args
+ * @param {(config:any)=>any} args.getClient — getSdkClient resolver (passed in
+ *   to avoid a circular import between iap-service.mjs and intent.mjs).
+ * @param {object} args.config
+ * @param {object} args.intentToken — current intent token (raw object, parsed)
+ * @param {object} args.updatedPlan — the new plan structure
+ * @param {string} [args.reason]
+ */
+export async function reanchorViaSdk({ getClient, config, intentToken, updatedPlan, reason }) {
+  if (!intentToken || !updatedPlan) {
+    return { ok: false, error: "missing intentToken or updatedPlan" };
+  }
+  if (!config?.apiKey || !config?.useSdkIntent) {
+    return { ok: false, error: "sdk-disabled" };
+  }
+  try {
+    const client = getClient(config);
+    if (typeof client?.reanchor !== "function") {
+      return { ok: false, error: "client.reanchor not available" };
+    }
+    const result = await client.reanchor(intentToken, updatedPlan, reason);
+    return {
+      ok: true,
+      trustId: result?.trustId,
+      fromHash: result?.delta?.payload?.from_hash,
+      toHash: result?.delta?.payload?.to_hash,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err?.message || String(err),
+      status: err?.response?.status,
+      body: err?.response?.data,
+    };
+  }
+}
+
+/**
+ * Sign a Revoke delta for the given token, propagating to PEPs. Accepts
+ * either a full intent token object OR a planId/tokenId for operator-driven
+ * revocation (the controller in conmap-auto handles either shape).
+ */
+export async function revokeViaSdk({
+  getClient,
+  config,
+  intentToken,
+  planId,
+  tokenId,
+  reason,
+  cascade,
+}) {
+  if (!config?.apiKey || !config?.useSdkIntent) {
+    return { ok: false, error: "sdk-disabled" };
+  }
+  try {
+    const client = getClient(config);
+    if (typeof client?.revoke !== "function") {
+      return { ok: false, error: "client.revoke not available" };
+    }
+    // The SDK's revoke signature takes an IntentToken; if only planId/tokenId
+    // is available (operator path), synthesize a minimal token shape that the
+    // backend's relaxed RevokeDto will accept.
+    const token = intentToken ?? {
+      tokenId: tokenId,
+      token_id: tokenId,
+      planHash: undefined,
+      signature: tokenId || planId || "unknown",
+      issuedAt: 0,
+      expiresAt: 0,
+      policy: {},
+      compositeIdentity: "",
+      stepProofs: [],
+      totalSteps: 0,
+      rawToken: { token: { token_id: tokenId, planId } },
+    };
+    const result = await client.revoke(token, reason || "armorclaude", {
+      cascade: !!cascade,
+      planId,
+    });
+    return {
+      ok: true,
+      trustId: result?.trustId,
+      cascadedRevocations: result?.cascadedRevocations,
+    };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+}
+
+/**
+ * Issue a subtree-bounded delegated token + Merkle inclusion proof.
+ */
+export async function delegateSubtreeViaSdk({ getClient, config, intentToken, opts }) {
+  if (!intentToken || !opts?.delegatePublicKey || !opts?.subtreePath) {
+    return { ok: false, error: "missing intentToken / delegatePublicKey / subtreePath" };
+  }
+  if (!config?.apiKey || !config?.useSdkIntent) {
+    return { ok: false, error: "sdk-disabled" };
+  }
+  try {
+    const client = getClient(config);
+    if (typeof client?.delegateSubtree !== "function") {
+      return { ok: false, error: "client.delegateSubtree not available" };
+    }
+    const result = await client.delegateSubtree(intentToken, opts);
+    return {
+      ok: true,
+      trustId: result?.trustId,
+      delegationId: result?.delegationId,
+      inclusionProof: result?.inclusionProof,
+      subtreeRoot: result?.subtreeRoot,
+      delegatedToken: result?.delegatedToken,
+    };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
 }
