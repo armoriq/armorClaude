@@ -48,7 +48,7 @@ function buildPerfConfig(tmpDir) {
     autoRevokeOnEnd: false,
     strictParamCheck: false,
     debug: false,
-    sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 }
+    sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
   };
 }
 
@@ -72,7 +72,16 @@ test("PERF: read-only fast-path tools p95 < 5ms (engine handler only)", async ()
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-perf-fastpath-"));
   const config = buildPerfConfig(tmp);
   const samples = [];
-  for (const tool of ["read", "grep", "glob", "websearch", "webfetch", "exitplanmode", "toolsearch", "todowrite"]) {
+  for (const tool of [
+    "read",
+    "grep",
+    "glob",
+    "websearch",
+    "webfetch",
+    "exitplanmode",
+    "toolsearch",
+    "todowrite",
+  ]) {
     // 20 iterations per tool to smooth noise
     for (let i = 0; i < 20; i++) {
       const { elapsedMs } = await timed(() =>
@@ -81,7 +90,7 @@ test("PERF: read-only fast-path tools p95 < 5ms (engine handler only)", async ()
             hook_event_name: "PreToolUse",
             session_id: "sess-perf",
             tool_name: tool,
-            tool_input: {}
+            tool_input: {},
           },
           config
         )
@@ -115,9 +124,9 @@ test("PERF: warm-path Bash with valid plan p95 < 100ms (engine handler only)", a
           allowedActions: ["bash"],
           lastPrompt: "warm-path test",
           updatedAt: Math.floor(Date.now() / 1000),
-          startedAt: Math.floor(Date.now() / 1000)
-        }
-      }
+          startedAt: Math.floor(Date.now() / 1000),
+        },
+      },
     })
   );
   const samples = [];
@@ -128,7 +137,7 @@ test("PERF: warm-path Bash with valid plan p95 < 100ms (engine handler only)", a
           hook_event_name: "PreToolUse",
           session_id: "sess-warm",
           tool_name: "bash",
-          tool_input: { command: `echo iter-${i}` }
+          tool_input: { command: `echo iter-${i}` },
         },
         config
       )

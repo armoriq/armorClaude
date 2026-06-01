@@ -18,7 +18,7 @@ function normalizeRule(rule) {
   const normalized = {
     id,
     action,
-    tool
+    tool,
   };
   if (typeof rule.dataClass === "string" && POLICY_DATA_CLASSES.has(rule.dataClass.trim())) {
     normalized.dataClass = rule.dataClass.trim();
@@ -41,7 +41,7 @@ export async function loadPolicyState(policyFilePath) {
     version: 0,
     updatedAt: new Date().toISOString(),
     policy: { rules: [] },
-    history: []
+    history: [],
   };
   const raw = await readJson(policyFilePath, initial);
   const state = isPlainObject(raw) ? raw : initial;
@@ -50,7 +50,7 @@ export async function loadPolicyState(policyFilePath) {
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : new Date().toISOString(),
     updatedBy: typeof state.updatedBy === "string" ? state.updatedBy : undefined,
     policy: normalizePolicy(state.policy || state),
-    history: Array.isArray(state.history) ? state.history : []
+    history: Array.isArray(state.history) ? state.history : [],
   };
 }
 
@@ -59,7 +59,9 @@ export async function savePolicyState(policyFilePath, state) {
 }
 
 export function computePolicyHash(policy) {
-  return createHash("sha256").update(JSON.stringify(normalizePolicy(policy))).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify(normalizePolicy(policy)))
+    .digest("hex");
 }
 
 function toolMatches(ruleTool, toolName) {
@@ -172,7 +174,7 @@ export function evaluatePolicy({ policy, toolName, toolParams }) {
         allowed: false,
         reason: `ArmorClaude policy deny: ${rule.id}`,
         matchedRule: rule,
-        dataClasses: Array.from(dataClasses)
+        dataClasses: Array.from(dataClasses),
       };
     }
     if (rule.action === "require_approval") {
@@ -180,7 +182,7 @@ export function evaluatePolicy({ policy, toolName, toolParams }) {
         allowed: false,
         reason: `ArmorClaude policy requires approval: ${rule.id}`,
         matchedRule: rule,
-        dataClasses: Array.from(dataClasses)
+        dataClasses: Array.from(dataClasses),
       };
     }
   }
@@ -250,7 +252,7 @@ function inferPolicyDataClass(text) {
 // A tool name must look like a real identifier — letters, digits, underscore,
 // hyphen, dot, colon — OR exactly "*". Anything else is rejected so free-text
 // like "all tools" or regex fragments can't become rule matchers.
-const VALID_TOOL_NAME = /^(?:\*|[A-Za-z][\w.:\-]{0,80})$/;
+const VALID_TOOL_NAME = /^(?:\*|[A-Za-z][\w.:-]{0,80})$/;
 
 function sanitizeToolName(candidate) {
   if (typeof candidate !== "string") return null;
@@ -264,17 +266,19 @@ function inferPolicyTool(text) {
   if (/(all\s+tools|any\s+tool|\*\b)/i.test(lower)) {
     return "*";
   }
-  const backtickMatch = text.match(/`([A-Za-z][\w.:\-]{0,80})`/);
+  const backtickMatch = text.match(/`([A-Za-z][\w.:-]{0,80})`/);
   const backtickName = sanitizeToolName(backtickMatch?.[1]);
   if (backtickName) {
     return backtickName;
   }
-  const toolMatch = text.match(/\btool\s*[:=]?\s*([A-Za-z][\w.:\-]{0,80})/i);
+  const toolMatch = text.match(/\btool\s*[:=]?\s*([A-Za-z][\w.:-]{0,80})/i);
   const toolName = sanitizeToolName(toolMatch?.[1]);
   if (toolName) {
     return toolName;
   }
-  const actionMatch = text.match(/\b(?:block|deny|allow|disallow|permit|require)\s+([A-Za-z][\w.:\-]{0,80})/i);
+  const actionMatch = text.match(
+    /\b(?:block|deny|allow|disallow|permit|require)\s+([A-Za-z][\w.:-]{0,80})/i
+  );
   const actionName = sanitizeToolName(actionMatch?.[1]);
   if (actionName) {
     return actionName;
@@ -294,9 +298,9 @@ function buildPolicyUpdateFromText(text, state, forceNewId = false) {
         id,
         action: inferPolicyAction(text),
         tool: inferPolicyTool(text),
-        dataClass: inferPolicyDataClass(text)
-      }
-    ]
+        dataClass: inferPolicyDataClass(text),
+      },
+    ],
   };
 }
 
@@ -325,7 +329,7 @@ export function parsePolicyTextCommand(text, state) {
       kind: "reorder",
       id: reorderMatch[1],
       position: Number.parseInt(reorderMatch[2], 10),
-      reason: truncateReason(`Policy reorder: ${trimmed}`)
+      reason: truncateReason(`Policy reorder: ${trimmed}`),
     };
   }
   const deleteMatch = trimmed.match(/\bpolicy\s+delete\s+([a-z0-9][\w.-]*)\b/i);
@@ -333,7 +337,7 @@ export function parsePolicyTextCommand(text, state) {
     return {
       kind: "delete",
       id: deleteMatch[1],
-      reason: truncateReason(`Policy delete: ${trimmed}`)
+      reason: truncateReason(`Policy delete: ${trimmed}`),
     };
   }
   const getMatch = trimmed.match(/\bpolicy\s+get\s+([a-z0-9][\w.-]*)\b/i);
@@ -346,9 +350,14 @@ export function parsePolicyTextCommand(text, state) {
   }
   const updateMatch = trimmed.match(/\bpolicy\s+update(?:\s+([a-z0-9][\w.-]*))?\s*:\s*(.+)$/i);
   if (updateMatch && updateMatch[2]) {
+    // eslint-disable-next-line no-unused-vars
     const [_, maybeId, body] = updateMatch;
     const full = maybeId ? `${maybeId} ${body}` : body;
-    return { kind: "update", update: buildPolicyUpdateFromText(full, state, false), hasId: Boolean(maybeId) };
+    return {
+      kind: "update",
+      update: buildPolicyUpdateFromText(full, state, false),
+      hasId: Boolean(maybeId),
+    };
   }
 
   return { kind: "help" };
@@ -378,14 +387,14 @@ async function persistNextState(policyFilePath, oldState, nextPolicy, actor, rea
     updatedAt,
     updatedBy: actor,
     reason,
-    policy: nextPolicy
+    policy: nextPolicy,
   };
   const nextState = {
     version,
     updatedAt,
     updatedBy: actor,
     policy: nextPolicy,
-    history: [...oldState.history, entry]
+    history: [...oldState.history, entry],
   };
   await savePolicyState(policyFilePath, nextState);
   return nextState;
@@ -400,7 +409,7 @@ function formatPolicyHelp() {
     "4. Policy reset",
     "5. Policy update policy1: block send_email for payment data",
     "6. Policy new: block web_fetch for PII",
-    "7. Policy prioritize policy2 1"
+    "7. Policy prioritize policy2 1",
   ].join("\n");
 }
 
@@ -422,7 +431,9 @@ export async function applyPolicyCommand({ policyFilePath, state, command, actor
     const rule = state.policy.rules.find((entry) => entry.id === command.id);
     return {
       state,
-      message: rule ? `Policy rule:\n- ${formatRule(rule)}` : `Policy rule not found: ${command.id}`
+      message: rule
+        ? `Policy rule:\n- ${formatRule(rule)}`
+        : `Policy rule not found: ${command.id}`,
     };
   }
   if (command.kind === "reset") {
@@ -449,7 +460,7 @@ export async function applyPolicyCommand({ policyFilePath, state, command, actor
       message:
         rules.length === state.policy.rules.length
           ? `No matching rule removed (${command.id}).`
-          : `Policy rule removed: ${command.id}. Version ${nextState.version}.`
+          : `Policy rule removed: ${command.id}. Version ${nextState.version}.`,
     };
   }
   if (command.kind === "reorder") {
@@ -493,4 +504,3 @@ export async function applyPolicyCommand({ policyFilePath, state, command, actor
   }
   return { state, message: "No policy changes applied." };
 }
-

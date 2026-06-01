@@ -43,19 +43,19 @@ function buildConfig(tmpDir, overrides = {}) {
       maxChars: 2000,
       maxDepth: 4,
       maxKeys: 50,
-      maxItems: 50
+      maxItems: 50,
     },
-    ...overrides
+    ...overrides,
   };
 }
 
 test("evaluatePolicy denies matching deny rule", () => {
   const decision = evaluatePolicy({
     policy: {
-      rules: [{ id: "policy1", action: "deny", tool: "web_fetch" }]
+      rules: [{ id: "policy1", action: "deny", tool: "web_fetch" }],
     },
     toolName: "web_fetch",
-    toolParams: { url: "https://example.com" }
+    toolParams: { url: "https://example.com" },
   });
   assert.equal(decision.allowed, false);
   assert.match(decision.reason, /policy deny/i);
@@ -65,7 +65,7 @@ test("checkToolAgainstPlan rejects tool drift", () => {
   const decision = checkToolAgainstPlan({
     plan: { steps: [{ action: "read_file" }] },
     toolName: "web_fetch",
-    toolInput: {}
+    toolInput: {},
   });
   assert.equal(decision.allowed, false);
   assert.match(decision.reason, /not in plan/i);
@@ -78,7 +78,7 @@ test("handleUserPromptSubmit applies policy command and blocks prompt", async ()
     {
       hook_event_name: "UserPromptSubmit",
       session_id: "session-1",
-      prompt: "Policy new: block web_fetch for payment data"
+      prompt: "Policy new: block web_fetch for payment data",
     },
     config
   );
@@ -94,7 +94,7 @@ test("handlePreToolUse denies when policy blocks tool", async () => {
     {
       hook_event_name: "UserPromptSubmit",
       session_id: "session-2",
-      prompt: "Policy new: block write"
+      prompt: "Policy new: block write",
     },
     config
   );
@@ -104,7 +104,7 @@ test("handlePreToolUse denies when policy blocks tool", async () => {
       hook_event_name: "PreToolUse",
       session_id: "session-2",
       tool_name: "write",
-      tool_input: { file_path: "a.txt" }
+      tool_input: { file_path: "a.txt" },
     },
     config
   );
@@ -122,7 +122,7 @@ test("handlePreToolUse denies missing intent when strict", async () => {
       hook_event_name: "PreToolUse",
       session_id: "session-3",
       tool_name: "edit",
-      tool_input: { file_path: "a.txt", old_string: "x", new_string: "y" }
+      tool_input: { file_path: "a.txt", old_string: "x", new_string: "y" },
     },
     config
   );
@@ -138,7 +138,7 @@ test("Phase 4 A3: deny output for missing plan includes a register_intent_plan h
       hook_event_name: "PreToolUse",
       session_id: "session-a3-1",
       tool_name: "edit",
-      tool_input: { file_path: "x.txt", old_string: "a", new_string: "b" }
+      tool_input: { file_path: "x.txt", old_string: "a", new_string: "b" },
     },
     config
   );
@@ -146,7 +146,11 @@ test("Phase 4 A3: deny output for missing plan includes a register_intent_plan h
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
   assert.match(reason, /register_intent_plan/, "reason should reference register_intent_plan");
   assert.match(reason, /```json/, "reason should include a JSON code block");
-  assert.match(reason, /"action":\s*"edit"/, "reason should include the blocked tool in the suggestion");
+  assert.match(
+    reason,
+    /"action":\s*"edit"/,
+    "reason should include the blocked tool in the suggestion"
+  );
 });
 
 test("Phase 4 A3: deny on drift extends the existing plan in the hint", async () => {
@@ -162,9 +166,9 @@ test("Phase 4 A3: deny on drift extends the existing plan in the hint", async ()
         "drift-1": {
           plan: { goal: "the original task", steps: [{ action: "Read" }] },
           allowedActions: ["read"],
-          lastPrompt: "the original task"
-        }
-      }
+          lastPrompt: "the original task",
+        },
+      },
     })
   );
   const output = await handlePreToolUse(
@@ -172,7 +176,7 @@ test("Phase 4 A3: deny on drift extends the existing plan in the hint", async ()
       hook_event_name: "PreToolUse",
       session_id: "drift-1",
       tool_name: "edit",
-      tool_input: { file_path: "y.txt", old_string: "a", new_string: "b" }
+      tool_input: { file_path: "y.txt", old_string: "a", new_string: "b" },
     },
     config
   );
@@ -193,7 +197,7 @@ test("handlePreToolUse fast-paths read-only tools without intent (Phase 4 A1)", 
         hook_event_name: "PreToolUse",
         session_id: "session-fastpath",
         tool_name: tool,
-        tool_input: {}
+        tool_input: {},
       },
       config
     );
@@ -217,9 +221,9 @@ test("handlePreToolUse allows tool when local plan matches (no backend)", async 
         "local-1": {
           plan: { steps: [{ action: "Read" }], metadata: { goal: "read x" } },
           allowedActions: ["read"],
-          updatedAt: Math.floor(Date.now() / 1000)
-        }
-      }
+          updatedAt: Math.floor(Date.now() / 1000),
+        },
+      },
     }),
     "utf8"
   );
@@ -228,7 +232,7 @@ test("handlePreToolUse allows tool when local plan matches (no backend)", async 
       hook_event_name: "PreToolUse",
       session_id: "local-1",
       tool_name: "Read",
-      tool_input: { file_path: "x.txt" }
+      tool_input: { file_path: "x.txt" },
     },
     config
   );
@@ -246,9 +250,9 @@ test("handlePreToolUse denies drift when local plan exists (no backend)", async 
         "local-2": {
           plan: { steps: [{ action: "Read" }], metadata: { goal: "read x" } },
           allowedActions: ["read"],
-          updatedAt: Math.floor(Date.now() / 1000)
-        }
-      }
+          updatedAt: Math.floor(Date.now() / 1000),
+        },
+      },
     }),
     "utf8"
   );
@@ -257,12 +261,15 @@ test("handlePreToolUse denies drift when local plan exists (no backend)", async 
       hook_event_name: "PreToolUse",
       session_id: "local-2",
       tool_name: "Bash",
-      tool_input: { command: "ls" }
+      tool_input: { command: "ls" },
     },
     config
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
-  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /intent drift|not in plan/i);
+  assert.match(
+    output?.hookSpecificOutput?.permissionDecisionReason || "",
+    /intent drift|not in plan/i
+  );
 });
 
 test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", async () => {
@@ -277,9 +284,9 @@ test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", 
         "multi-1": {
           plan: { steps: [{ action: "Read" }], metadata: { goal: "old read" } },
           allowedActions: ["read"],
-          updatedAt: Math.floor(Date.now() / 1000)
-        }
-      }
+          updatedAt: Math.floor(Date.now() / 1000),
+        },
+      },
     }),
     "utf8"
   );
@@ -290,7 +297,7 @@ test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", 
       plan: { steps: [{ action: "Bash" }], metadata: { goal: "list etc" } },
       tokenRaw: "",
       allowedActions: ["bash"],
-      registeredAt: Date.now()
+      registeredAt: Date.now(),
     }),
     "utf8"
   );
@@ -299,7 +306,7 @@ test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", 
       hook_event_name: "PreToolUse",
       session_id: "multi-1",
       tool_name: "Bash",
-      tool_input: { command: "ls /etc" }
+      tool_input: { command: "ls /etc" },
     },
     config
   );
@@ -313,7 +320,7 @@ test("handleUserPromptSubmit adds context hints for normal prompts", async () =>
     {
       hook_event_name: "UserPromptSubmit",
       session_id: "session-4",
-      prompt: "summarize this file"
+      prompt: "summarize this file",
     },
     config
   );

@@ -1,3 +1,4 @@
+/* eslint-disable */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
@@ -9,10 +10,15 @@ import {
   handleStop,
   handlePostToolUse,
   handlePostToolUseFailure,
-  handlePreToolUse
+  handlePreToolUse,
 } from "../scripts/lib/engine.mjs";
 import { writeFile, mkdir } from "node:fs/promises";
-import { upsertSession, loadRuntimeState, saveRuntimeState, getTrustOps } from "../scripts/lib/runtime-state.mjs";
+import {
+  upsertSession,
+  loadRuntimeState,
+  saveRuntimeState,
+  getTrustOps,
+} from "../scripts/lib/runtime-state.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
   return {
@@ -51,9 +57,9 @@ function buildConfig(tmpDir, overrides = {}) {
       maxChars: 2000,
       maxDepth: 4,
       maxKeys: 50,
-      maxItems: 50
+      maxItems: 50,
     },
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -78,15 +84,9 @@ test("handleSessionEnd removes session", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp);
   // Create session first
-  await handleSessionStart(
-    { hook_event_name: "SessionStart", session_id: "sess-2" },
-    config
-  );
+  await handleSessionStart({ hook_event_name: "SessionStart", session_id: "sess-2" }, config);
   // End it
-  await handleSessionEnd(
-    { hook_event_name: "SessionEnd", session_id: "sess-2" },
-    config
-  );
+  await handleSessionEnd({ hook_event_name: "SessionEnd", session_id: "sess-2" }, config);
 
   const stateRaw = await readFile(config.runtimeFile, "utf8");
   const state = JSON.parse(stateRaw);
@@ -96,14 +96,8 @@ test("handleSessionEnd removes session", async () => {
 test("handleStop returns null", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp);
-  await handleSessionStart(
-    { hook_event_name: "SessionStart", session_id: "sess-3" },
-    config
-  );
-  const output = await handleStop(
-    { hook_event_name: "Stop", session_id: "sess-3" },
-    config
-  );
+  await handleSessionStart({ hook_event_name: "SessionStart", session_id: "sess-3" }, config);
+  const output = await handleStop({ hook_event_name: "Stop", session_id: "sess-3" }, config);
   assert.equal(output, null);
 });
 
@@ -116,7 +110,7 @@ test("handlePostToolUse returns null when audit disabled", async () => {
       session_id: "sess-4",
       tool_name: "Read",
       tool_input: { file_path: "test.txt" },
-      tool_response: { content: "hello" }
+      tool_response: { content: "hello" },
     },
     config
   );
@@ -126,16 +120,16 @@ test("handlePostToolUse returns null when audit disabled", async () => {
 test("handlePostToolUse sends audit when enabled", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
-  await handleSessionStart(
-    { hook_event_name: "SessionStart", session_id: "sess-5" },
-    config
-  );
+  await handleSessionStart({ hook_event_name: "SessionStart", session_id: "sess-5" }, config);
   // Seed an intent token so the audit DTO carries a non-empty `token`. The
   // PostToolUse handler skips audit when no token is captured (armorclaude#41
   // — empty token previously crashed conmap-auto's Prisma upsert).
   {
     const rs = await loadRuntimeState(config.runtimeFile);
-    upsertSession(rs, "sess-5", { intentTokenRaw: "test.jwt.token", expiresAt: Date.now()/1000 + 600 });
+    upsertSession(rs, "sess-5", {
+      intentTokenRaw: "test.jwt.token",
+      expiresAt: Date.now() / 1000 + 600,
+    });
     await saveRuntimeState(config.runtimeFile, rs);
   }
 
@@ -143,10 +137,10 @@ test("handlePostToolUse sends audit when enabled", async () => {
   let capturedPayload;
   globalThis.fetch = async (_url, options) => {
     capturedPayload = JSON.parse(options.body);
-    return new Response(
-      JSON.stringify({ audit_id: "a1", iap_sync_status: "ok" }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ audit_id: "a1", iap_sync_status: "ok" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   };
 
   try {
@@ -156,7 +150,7 @@ test("handlePostToolUse sends audit when enabled", async () => {
         session_id: "sess-5",
         tool_name: "Read",
         tool_input: { file_path: "test.txt" },
-        tool_response: { content: "hello" }
+        tool_response: { content: "hello" },
       },
       config
     );
@@ -171,13 +165,13 @@ test("handlePostToolUse sends audit when enabled", async () => {
 test("handlePostToolUseFailure logs failed status", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
-  await handleSessionStart(
-    { hook_event_name: "SessionStart", session_id: "sess-6" },
-    config
-  );
+  await handleSessionStart({ hook_event_name: "SessionStart", session_id: "sess-6" }, config);
   {
     const rs = await loadRuntimeState(config.runtimeFile);
-    upsertSession(rs, "sess-6", { intentTokenRaw: "test.jwt.token", expiresAt: Date.now()/1000 + 600 });
+    upsertSession(rs, "sess-6", {
+      intentTokenRaw: "test.jwt.token",
+      expiresAt: Date.now() / 1000 + 600,
+    });
     await saveRuntimeState(config.runtimeFile, rs);
   }
 
@@ -185,10 +179,10 @@ test("handlePostToolUseFailure logs failed status", async () => {
   let capturedPayload;
   globalThis.fetch = async (_url, options) => {
     capturedPayload = JSON.parse(options.body);
-    return new Response(
-      JSON.stringify({ audit_id: "a2", iap_sync_status: "ok" }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ audit_id: "a2", iap_sync_status: "ok" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   };
 
   try {
@@ -198,7 +192,7 @@ test("handlePostToolUseFailure logs failed status", async () => {
         session_id: "sess-6",
         tool_name: "Bash",
         tool_input: { command: "exit 1" },
-        error: "Command failed with exit code 1"
+        error: "Command failed with exit code 1",
       },
       config
     );
@@ -226,7 +220,7 @@ test("PreToolUse appends ReAnchor trust op when pending plan differs from cached
   upsertSession(priorState, "sess-trust-1", {
     intentTokenRaw: JSON.stringify({ tokenId: "tok_abc", plan: { steps: [] } }),
     plan: { goal: "g", steps: [{ action: "echo" }] },
-    expiresAt: Math.floor(Date.now() / 1000) + 3600
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
@@ -238,7 +232,7 @@ test("PreToolUse appends ReAnchor trust op when pending plan differs from cached
       plan: { goal: "g2", steps: [{ action: "echo" }, { action: "add_step" }] },
       tokenRaw: JSON.stringify({ tokenId: "tok_new", plan: { steps: [] } }),
       allowedActions: ["echo", "add_step"],
-      expiresAt: Math.floor(Date.now() / 1000) + 3600
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
     })
   );
 
@@ -247,7 +241,7 @@ test("PreToolUse appends ReAnchor trust op when pending plan differs from cached
       hook_event_name: "PreToolUse",
       session_id: "sess-trust-1",
       tool_name: "echo",
-      tool_input: { text: "hi" }
+      tool_input: { text: "hi" },
     },
     config
   );
@@ -271,7 +265,7 @@ test("PreToolUse does NOT record ReAnchor when pending plan matches cached", asy
   upsertSession(priorState, "sess-trust-2", {
     intentTokenRaw: JSON.stringify({ tokenId: "tok_abc", plan: samePlan }),
     plan: samePlan,
-    expiresAt: Math.floor(Date.now() / 1000) + 3600
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
@@ -281,7 +275,7 @@ test("PreToolUse does NOT record ReAnchor when pending plan matches cached", asy
       plan: samePlan,
       tokenRaw: JSON.stringify({ tokenId: "tok_same" }),
       allowedActions: ["echo"],
-      expiresAt: Math.floor(Date.now() / 1000) + 3600
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
     })
   );
 
@@ -290,7 +284,7 @@ test("PreToolUse does NOT record ReAnchor when pending plan matches cached", asy
       hook_event_name: "PreToolUse",
       session_id: "sess-trust-2",
       tool_name: "echo",
-      tool_input: {}
+      tool_input: {},
     },
     config
   );
@@ -316,13 +310,13 @@ test("SessionEnd invokes client.revoke when autoRevokeOnEnd is true", async () =
     useSdkIntent: true,
     apiKey: "ak_test_revoke",
     userId: "test-user-revoke", // unique to dodge cache collisions
-    auditEnabled: false
+    auditEnabled: false,
   });
 
   const priorState = await loadRuntimeState(config.runtimeFile);
   upsertSession(priorState, "sess-trust-4", {
     intentTokenRaw: JSON.stringify({ tokenId: "tok_to_revoke" }),
-    expiresAt: Math.floor(Date.now() / 1000) + 3600
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
@@ -339,10 +333,7 @@ test("SessionEnd invokes client.revoke when autoRevokeOnEnd is true", async () =
   };
 
   try {
-    await handleSessionEnd(
-      { hook_event_name: "SessionEnd", session_id: "sess-trust-4" },
-      config
-    );
+    await handleSessionEnd({ hook_event_name: "SessionEnd", session_id: "sess-trust-4" }, config);
   } finally {
     if (originalRevoke) client.revoke = originalRevoke;
     else delete client.revoke;
@@ -360,12 +351,12 @@ test("SessionEnd does NOT call client.revoke when autoRevokeOnEnd is false", asy
     useSdkIntent: true,
     apiKey: "ak_test_norevoke",
     userId: "test-user-norevoke",
-    auditEnabled: false
+    auditEnabled: false,
   });
   const priorState = await loadRuntimeState(config.runtimeFile);
   upsertSession(priorState, "sess-trust-5", {
     intentTokenRaw: JSON.stringify({ tokenId: "tok_no_revoke" }),
-    expiresAt: Math.floor(Date.now() / 1000) + 3600
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
@@ -388,7 +379,6 @@ test("SessionEnd does NOT call client.revoke when autoRevokeOnEnd is false", asy
   assert.equal(calls.length, 0, "flag off → revoke must not fire");
 });
 
-
 test("Phase 4 A2: Stop hook proactively refreshes a near-expiry token", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-a2-"));
   // Setting useSdkIntent: true with a stub injected into the SDK cache so we
@@ -400,7 +390,7 @@ test("Phase 4 A2: Stop hook proactively refreshes a near-expiry token", async ()
     apiKey: "ak_test_a2",
     userId: "test-user-a2",
     refreshThresholdSeconds: 30,
-    validitySeconds: 600
+    validitySeconds: 600,
   });
 
   // Seed a session with a plan + a token that's ALMOST expired (< 4×30 = 120s).
@@ -410,7 +400,7 @@ test("Phase 4 A2: Stop hook proactively refreshes a near-expiry token", async ()
     intentTokenRaw: JSON.stringify({ tokenId: "tok_old", plan: { steps: [] } }),
     plan: { goal: "g", steps: [{ action: "Read" }] },
     expiresAt,
-    lastPrompt: "test prompt"
+    lastPrompt: "test prompt",
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
@@ -432,15 +422,12 @@ test("Phase 4 A2: Stop hook proactively refreshes a near-expiry token", async ()
       compositeIdentity: "",
       stepProofs: [],
       totalSteps: 0,
-      rawToken: { token: { token_id: "tok_refreshed" } }
+      rawToken: { token: { token_id: "tok_refreshed" } },
     };
   };
 
   try {
-    await handleStop(
-      { hook_event_name: "Stop", session_id: "sess-a2-1" },
-      config
-    );
+    await handleStop({ hook_event_name: "Stop", session_id: "sess-a2-1" }, config);
   } finally {
     client.capturePlan = originalCapture;
     if (originalIssue) client.getIntentToken = originalIssue;
@@ -460,14 +447,14 @@ test("Phase 4 A2: Stop hook does NOT refresh when token is fresh", async () => {
     apiKey: "ak_test_a2_fresh",
     userId: "test-user-a2-fresh",
     refreshThresholdSeconds: 30,
-    validitySeconds: 600
+    validitySeconds: 600,
   });
   const expiresAt = Math.floor(Date.now() / 1000) + 600; // 10 min left
   const priorState = await loadRuntimeState(config.runtimeFile);
   upsertSession(priorState, "sess-a2-2", {
     intentTokenRaw: JSON.stringify({ tokenId: "tok_fresh" }),
     plan: { goal: "g", steps: [{ action: "Read" }] },
-    expiresAt
+    expiresAt,
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
@@ -499,7 +486,7 @@ test("ArmorClaude's own MCP tools are never drift-blocked (deadlock prevention)"
   upsertSession(priorState, "sess-deadlock-1", {
     intentTokenRaw: JSON.stringify({ tokenId: "tok_x" }),
     plan: { goal: "narrow", steps: [{ action: "Read" }] },
-    expiresAt: Math.floor(Date.now() / 1000) + 3600
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
@@ -509,11 +496,11 @@ test("ArmorClaude's own MCP tools are never drift-blocked (deadlock prevention)"
     "mcp__plugin_armorclaude_armorclaude-policy__policy_update",
     "mcp__plugin_armorclaude_armorclaude-policy__trust_revoke",
     "mcp__plugin_armorclaude_armorclaude-policy__trust_reanchor",
-    "mcp__plugin_armorclaude_armorclaude-policy__trust_delegate"
+    "mcp__plugin_armorclaude_armorclaude-policy__trust_delegate",
   ];
   const directPrefixed = [
     "mcp__armorclaude-policy__register_intent_plan",
-    "mcp__armorclaude-policy__trust_revoke"
+    "mcp__armorclaude-policy__trust_revoke",
   ];
   const baseTools = [
     "register_intent_plan",
@@ -521,7 +508,7 @@ test("ArmorClaude's own MCP tools are never drift-blocked (deadlock prevention)"
     "policy_update",
     "trust_revoke",
     "trust_reanchor",
-    "trust_delegate"
+    "trust_delegate",
   ];
 
   for (const tool of [...pluginPrefixed, ...directPrefixed, ...baseTools]) {
@@ -530,16 +517,12 @@ test("ArmorClaude's own MCP tools are never drift-blocked (deadlock prevention)"
         hook_event_name: "PreToolUse",
         session_id: "sess-deadlock-1",
         tool_name: tool,
-        tool_input: { goal: "x", steps: [{ action: "Bash" }] }
+        tool_input: { goal: "x", steps: [{ action: "Bash" }] },
       },
       config
     );
     // Allow path returns null (no deny output). A deny would set
     // hookSpecificOutput.permissionDecision = "deny".
-    assert.equal(
-      out,
-      null,
-      `${tool} should pass the whitelist (got: ${JSON.stringify(out)})`
-    );
+    assert.equal(out, null, `${tool} should pass the whitelist (got: ${JSON.stringify(out)})`);
   }
 });

@@ -14,14 +14,15 @@ import {
   isPlainObject,
   parseStepIndex,
   postJson,
-  readString
+  readString,
 } from "./common.mjs";
 
 /**
  * Create an IAP service instance from config.
  */
 export function createIapService(config) {
-  const backendEndpoint = config.backendEndpoint || config.verifyStepEndpoint?.replace(/\/iap\/verify-step$/, "") || "";
+  const backendEndpoint =
+    config.backendEndpoint || config.verifyStepEndpoint?.replace(/\/iap\/verify-step$/, "") || "";
   const csrgEndpoint = config.csrgEndpoint || "";
   const timeoutMs = config.timeoutMs || 8000;
   const headers = buildAuthHeaders(config);
@@ -59,15 +60,13 @@ export function createIapService(config) {
       if (csrgProofs?.valueDigest) {
         payload.context = {
           csrg_value_digest: csrgProofs.valueDigest,
-          proof_source: "client"
+          proof_source: "client",
         };
       }
 
       const response = await postJson(endpoint, payload, headers, timeoutMs);
       if (!response.ok && !isPlainObject(response.data)) {
-        throw new Error(
-          response.text || `IAP verify-step failed with status ${response.status}`
-        );
+        throw new Error(response.text || `IAP verify-step failed with status ${response.status}`);
       }
 
       const data = isPlainObject(response.data) ? response.data : {};
@@ -98,7 +97,7 @@ export function createIapService(config) {
         tokenRaw,
         plan: isPlainObject(data.plan) ? data.plan : parsedFromResponse?.plan || fallbackPlan,
         expiresAt: Number.isFinite(data.expiresAt) ? data.expiresAt : parsedFromResponse?.expiresAt,
-        stepIndex
+        stepIndex,
       };
     },
 
@@ -127,8 +126,7 @@ export function createIapService(config) {
         return {
           allowed: false,
           reason:
-            response.data.reason ||
-            `CSRG verification failed: ${response.text || "unknown error"}`
+            response.data.reason || `CSRG verification failed: ${response.text || "unknown error"}`,
         };
       }
 
@@ -136,7 +134,7 @@ export function createIapService(config) {
         allowed: false,
         reason: response.text
           ? `CSRG verification failed: ${response.text}`
-          : `CSRG verification failed with status ${response.status}`
+          : `CSRG verification failed with status ${response.status}`,
       };
     },
 
@@ -145,12 +143,7 @@ export function createIapService(config) {
      * Equivalent to ArmorClaw IAPVerificationService.createAuditLog()
      */
     async createAuditLog(dto) {
-      const response = await postJson(
-        `${backendEndpoint}/iap/audit`,
-        dto,
-        headers,
-        timeoutMs
-      );
+      const response = await postJson(`${backendEndpoint}/iap/audit`, dto, headers, timeoutMs);
 
       if (!response.ok || !response.data) {
         const message = response.text
@@ -195,7 +188,7 @@ export function createIapService(config) {
 
     csrgVerifyIsEnabled() {
       return Boolean(config.csrgVerifyEnabled);
-    }
+    },
   };
 }
 
@@ -226,16 +219,16 @@ function extractPlanFromResponse(tokenRaw) {
   try {
     const parsed = JSON.parse(tokenRaw);
     if (!isPlainObject(parsed)) return null;
-    const plan =
-      isPlainObject(parsed.plan)
-        ? parsed.plan
-        : isPlainObject(parsed.rawToken?.plan)
-          ? parsed.rawToken.plan
-          : null;
-    const expiresAt =
-      Number.isFinite(parsed.expiresAt) ? parsed.expiresAt :
-      Number.isFinite(parsed.token?.expires_at) ? parsed.token.expires_at :
-      undefined;
+    const plan = isPlainObject(parsed.plan)
+      ? parsed.plan
+      : isPlainObject(parsed.rawToken?.plan)
+        ? parsed.rawToken.plan
+        : null;
+    const expiresAt = Number.isFinite(parsed.expiresAt)
+      ? parsed.expiresAt
+      : Number.isFinite(parsed.token?.expires_at)
+        ? parsed.token.expires_at
+        : undefined;
     return plan ? { plan, expiresAt } : null;
   } catch {
     return null;
@@ -286,14 +279,14 @@ export async function reanchorViaSdk({ getClient, config, intentToken, updatedPl
       ok: true,
       trustId: result?.trustId,
       fromHash: result?.delta?.payload?.from_hash,
-      toHash: result?.delta?.payload?.to_hash
+      toHash: result?.delta?.payload?.to_hash,
     };
   } catch (err) {
     return {
       ok: false,
       error: err?.message || String(err),
       status: err?.response?.status,
-      body: err?.response?.data
+      body: err?.response?.data,
     };
   }
 }
@@ -303,7 +296,15 @@ export async function reanchorViaSdk({ getClient, config, intentToken, updatedPl
  * either a full intent token object OR a planId/tokenId for operator-driven
  * revocation (the controller in conmap-auto handles either shape).
  */
-export async function revokeViaSdk({ getClient, config, intentToken, planId, tokenId, reason, cascade }) {
+export async function revokeViaSdk({
+  getClient,
+  config,
+  intentToken,
+  planId,
+  tokenId,
+  reason,
+  cascade,
+}) {
   if (!config?.apiKey || !config?.useSdkIntent) {
     return { ok: false, error: "sdk-disabled" };
   }
@@ -326,13 +327,16 @@ export async function revokeViaSdk({ getClient, config, intentToken, planId, tok
       compositeIdentity: "",
       stepProofs: [],
       totalSteps: 0,
-      rawToken: { token: { token_id: tokenId, planId } }
+      rawToken: { token: { token_id: tokenId, planId } },
     };
-    const result = await client.revoke(token, reason || "armorclaude", { cascade: !!cascade, planId });
+    const result = await client.revoke(token, reason || "armorclaude", {
+      cascade: !!cascade,
+      planId,
+    });
     return {
       ok: true,
       trustId: result?.trustId,
-      cascadedRevocations: result?.cascadedRevocations
+      cascadedRevocations: result?.cascadedRevocations,
     };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
@@ -361,7 +365,7 @@ export async function delegateSubtreeViaSdk({ getClient, config, intentToken, op
       delegationId: result?.delegationId,
       inclusionProof: result?.inclusionProof,
       subtreeRoot: result?.subtreeRoot,
-      delegatedToken: result?.delegatedToken
+      delegatedToken: result?.delegatedToken,
     };
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };

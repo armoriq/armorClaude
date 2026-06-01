@@ -1,13 +1,11 @@
 import armoriqSdk from "@armoriq/sdk";
 import {
-  buildAuthHeaders,
   isPlainObject,
   isSubsetValue,
   normalizeToolName,
   parseStepIndex,
-  postJson,
   readString,
-  sha256Hex
+  sha256Hex,
 } from "./common.mjs";
 
 const { ArmorIQClient } = armoriqSdk;
@@ -21,7 +19,7 @@ function buildSdkClientKey(config) {
     config.contextId,
     config.backendEndpoint,
     config.csrgEndpoint,
-    config.useProduction ? "prod" : "dev"
+    config.useProduction ? "prod" : "dev",
   ].join("|");
 }
 
@@ -48,7 +46,7 @@ export function getSdkClient(config) {
     backendEndpoint: config.backendEndpoint,
     timeout: config.timeoutMs,
     maxRetries: config.maxRetries,
-    verifySsl: config.verifySsl
+    verifySsl: config.verifySsl,
   });
   sdkClientCache.set(key, client);
   return client;
@@ -61,7 +59,7 @@ function buildFallbackPlan(payload) {
     plan.steps.push({
       action: payload.toolName.trim(),
       mcp: payload.mcpName || "claude-code",
-      metadata: isPlainObject(payload.toolInput) ? { inputs: payload.toolInput } : {}
+      metadata: isPlainObject(payload.toolInput) ? { inputs: payload.toolInput } : {},
     });
   }
   return plan;
@@ -91,16 +89,17 @@ export function extractPlanFromIntentToken(raw) {
   const planCandidate =
     (rawToken && isPlainObject(rawToken.plan) ? rawToken.plan : undefined) ||
     (isPlainObject(parsed.plan) ? parsed.plan : undefined) ||
-    (isPlainObject(parsed.token) && isPlainObject(parsed.token.plan) ? parsed.token.plan : undefined);
+    (isPlainObject(parsed.token) && isPlainObject(parsed.token.plan)
+      ? parsed.token.plan
+      : undefined);
   if (!planCandidate) {
     return null;
   }
-  const expiresAt =
-    Number.isFinite(parsed.expiresAt)
-      ? parsed.expiresAt
-      : isPlainObject(parsed.token) && Number.isFinite(parsed.token.expires_at)
-        ? parsed.token.expires_at
-        : undefined;
+  const expiresAt = Number.isFinite(parsed.expiresAt)
+    ? parsed.expiresAt
+    : isPlainObject(parsed.token) && Number.isFinite(parsed.token.expires_at)
+      ? parsed.token.expires_at
+      : undefined;
   return { plan: planCandidate, expiresAt };
 }
 
@@ -124,6 +123,7 @@ export function extractAllowedActions(plan) {
   return allowed;
 }
 
+// eslint-disable-next-line no-unused-vars
 function findPlanStep(plan, toolName) {
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   const normalizedTool = normalizeToolName(toolName);
@@ -234,7 +234,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput, strict = false
   if (sawConstrainedMatch && strict) {
     return {
       allowed: false,
-      reason: `ArmorClaude intent mismatch: parameters not allowed for ${toolName}`
+      reason: `ArmorClaude intent mismatch: parameters not allowed for ${toolName}`,
     };
   }
   return { allowed: true };
@@ -250,7 +250,7 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
       matched: true,
       blockReason:
         "ArmorIQ intent token expired — call register_intent_plan to refresh, then retry",
-      plan: parsed.plan
+      plan: parsed.plan,
     };
   }
   const allowedActions = extractAllowedActions(parsed.plan);
@@ -258,7 +258,7 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
     return {
       matched: true,
       blockReason: `ArmorIQ intent drift: tool not in plan (${toolName})`,
-      plan: parsed.plan
+      plan: parsed.plan,
     };
   }
 
@@ -267,13 +267,13 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
     const paramCheck = checkToolAgainstPlan({
       plan: parsed.plan,
       toolName,
-      toolInput: toolParams
+      toolInput: toolParams,
     });
     if (!paramCheck.allowed) {
       return {
         matched: true,
         blockReason: paramCheck.reason,
-        plan: parsed.plan
+        plan: parsed.plan,
       };
     }
   }
@@ -281,7 +281,7 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
   return {
     matched: true,
     params: isPlainObject(toolParams) ? toolParams : undefined,
-    plan: parsed.plan
+    plan: parsed.plan,
   };
 }
 
@@ -398,7 +398,7 @@ export function resolveCsrgProofsFromToken({
   plan,
   toolName,
   toolParams,
-  usedStepIndices
+  usedStepIndices,
 }) {
   let parsed;
   try {
@@ -454,7 +454,7 @@ export function resolveCsrgProofsFromToken({
     path: selected.path || `/steps/[${stepIndex}]/action`,
     proof: selected.proof,
     valueDigest: selected.valueDigest || sha256Hex(JSON.stringify(action)),
-    stepIndex
+    stepIndex,
   };
 }
 
@@ -507,7 +507,7 @@ export function parseCsrgProofHeaders(input) {
     input.csrgProofRaw ??
     input.csrg_proof ??
     input["x-csrg-proof"] ??
-    (headers ? headers["x-csrg-proof"] ?? headers["X-CSRG-Proof"] : undefined);
+    (headers ? (headers["x-csrg-proof"] ?? headers["X-CSRG-Proof"]) : undefined);
 
   if (!path && !valueDigest && proofRaw === undefined) {
     return {};
@@ -520,8 +520,8 @@ export function parseCsrgProofHeaders(input) {
     proofs: {
       path,
       valueDigest,
-      proof: parsedProof
-    }
+      proof: parsedProof,
+    },
   };
 }
 
@@ -556,7 +556,7 @@ export async function requestIntent(config, payload) {
     source: "claude-code",
     session_id: payload.session_id,
     policy_hash: payload.policy_hash,
-    ...payload.metadata
+    ...payload.metadata,
   };
   const capture = client.capturePlan(config.llmId, payload.prompt || "", plan, metadata);
   const token = await client.getIntentToken(capture, payload.policy, payload.validitySeconds);
@@ -567,7 +567,7 @@ export async function requestIntent(config, payload) {
     source: "armoriq-sdk",
     tokenRaw,
     plan: parsedFromToken?.plan || plan,
-    expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt
+    expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt,
   };
 }
 
@@ -595,6 +595,6 @@ export function recordSessionTokenUsedStepIndices(session, intentTokenRaw, usedS
   const tokenHash = sha256Hex(intentTokenRaw);
   session.intentExecution = {
     tokenHash,
-    usedStepIndices: Array.from(usedStepIndices || []).filter((value) => Number.isFinite(value))
+    usedStepIndices: Array.from(usedStepIndices || []).filter((value) => Number.isFinite(value)),
   };
 }

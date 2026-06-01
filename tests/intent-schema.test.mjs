@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   INTENT_PLAN_ZOD,
   INTENT_PLAN_FORMAT,
-  normalizeIntentPlan
+  normalizeIntentPlan,
 } from "../scripts/lib/intent-schema.mjs";
 
 test("INTENT_PLAN_ZOD accepts valid plan", () => {
@@ -11,8 +11,8 @@ test("INTENT_PLAN_ZOD accepts valid plan", () => {
     goal: "Read and summarize",
     steps: [
       { action: "Read", description: "Read the file" },
-      { action: "Edit", description: "Edit it", metadata: { inputs: { file_path: "a.txt" } } }
-    ]
+      { action: "Edit", description: "Edit it", metadata: { inputs: { file_path: "a.txt" } } },
+    ],
   });
   assert.ok(result.success);
 });
@@ -20,7 +20,7 @@ test("INTENT_PLAN_ZOD accepts valid plan", () => {
 test("INTENT_PLAN_ZOD rejects empty goal", () => {
   const result = INTENT_PLAN_ZOD.safeParse({
     goal: "",
-    steps: [{ action: "Read" }]
+    steps: [{ action: "Read" }],
   });
   assert.equal(result.success, false);
 });
@@ -28,7 +28,7 @@ test("INTENT_PLAN_ZOD rejects empty goal", () => {
 test("INTENT_PLAN_ZOD rejects empty steps", () => {
   const result = INTENT_PLAN_ZOD.safeParse({
     goal: "test",
-    steps: []
+    steps: [],
   });
   assert.equal(result.success, false);
 });
@@ -36,7 +36,7 @@ test("INTENT_PLAN_ZOD rejects empty steps", () => {
 test("INTENT_PLAN_ZOD rejects missing action", () => {
   const result = INTENT_PLAN_ZOD.safeParse({
     goal: "test",
-    steps: [{ description: "no action" }]
+    steps: [{ description: "no action" }],
   });
   assert.equal(result.success, false);
 });
@@ -44,10 +44,7 @@ test("INTENT_PLAN_ZOD rejects missing action", () => {
 test("normalizeIntentPlan produces correct shape", () => {
   const plan = normalizeIntentPlan({
     goal: "Deploy",
-    steps: [
-      { action: "Bash", description: "run deploy" },
-      { action: "Read" }
-    ]
+    steps: [{ action: "Bash", description: "run deploy" }, { action: "Read" }],
   });
   assert.equal(plan.metadata.goal, "Deploy");
   assert.equal(plan.steps.length, 2);

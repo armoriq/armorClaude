@@ -24,7 +24,9 @@ const SPAWN_RETRY_DELAY_MS = 150;
 const SPAWN_RETRIES = 3;
 
 let nextReqId = 1;
-function makeReqId() { return `r-${process.pid}-${nextReqId++}-${Date.now()}`; }
+function makeReqId() {
+  return `r-${process.pid}-${nextReqId++}-${Date.now()}`;
+}
 
 /**
  * Connect to the daemon socket. Returns a connected socket or rejects on
@@ -37,8 +39,14 @@ function connectOnce(socketPath) {
       sock.destroy();
       reject(new Error("daemon connect timeout"));
     }, CONNECT_TIMEOUT_MS);
-    sock.once("connect", () => { clearTimeout(timer); resolve(sock); });
-    sock.once("error", (err) => { clearTimeout(timer); reject(err); });
+    sock.once("connect", () => {
+      clearTimeout(timer);
+      resolve(sock);
+    });
+    sock.once("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 
@@ -72,7 +80,9 @@ async function spawnDaemon(socketPath, dataDir, config) {
       try {
         const sock = await connectOnce(socketPath);
         return sock;
-      } catch { /* try again */ }
+      } catch {
+        /* try again */
+      }
     }
   }
   throw new Error("daemon spawn did not become reachable");
@@ -89,11 +99,17 @@ function exchange(sock, payload) {
       const nl = buf.indexOf("\n");
       if (nl !== -1) {
         cleanup();
-        try { resolve(JSON.parse(buf.slice(0, nl))); }
-        catch (err) { reject(err); }
+        try {
+          resolve(JSON.parse(buf.slice(0, nl)));
+        } catch (err) {
+          reject(err);
+        }
       }
     };
-    const onError = (err) => { cleanup(); reject(err); };
+    const onError = (err) => {
+      cleanup();
+      reject(err);
+    };
     const cleanup = () => {
       sock.off("data", onData);
       sock.off("error", onError);
@@ -142,14 +158,22 @@ export async function dispatchViaDaemon({ event, input, config }) {
     if (debug) {
       const tDone = Date.now();
       process.stderr.write(
-        `[armorclaude] daemon dispatch event=${event} reqId=${reqId} connect=${tConnected - t0}ms total=${tDone - t0}ms\n`,
+        `[armorclaude] daemon dispatch event=${event} reqId=${reqId} connect=${tConnected - t0}ms total=${tDone - t0}ms\n`
       );
     }
     if (reply?.error) throw new Error(`daemon error: ${reply.error}`);
     return reply?.output ?? null;
   } finally {
-    try { sock.end(); } catch {}
-    try { sock.destroy(); } catch {}
+    try {
+      sock.end();
+    } catch {
+      /* empty */
+    }
+    try {
+      sock.destroy();
+    } catch {
+      /* empty */
+    }
   }
 }
 
@@ -173,8 +197,16 @@ export async function enqueueAuditViaDaemon({ dto, config }) {
   } catch {
     return false;
   } finally {
-    try { sock.end(); } catch {}
-    try { sock.destroy(); } catch {}
+    try {
+      sock.end();
+    } catch {
+      /* empty */
+    }
+    try {
+      sock.destroy();
+    } catch {
+      /* empty */
+    }
   }
 }
 
@@ -182,13 +214,24 @@ export async function enqueueAuditViaDaemon({ dto, config }) {
 export async function pingDaemon(config) {
   const socketPath = path.join(config.dataDir, "daemon.sock");
   let sock;
-  try { sock = await connectOnce(socketPath); }
-  catch { return null; }
+  try {
+    sock = await connectOnce(socketPath);
+  } catch {
+    return null;
+  }
   try {
     const reply = await exchange(sock, { type: "ping", reqId: makeReqId() });
     return reply;
   } finally {
-    try { sock.end(); } catch {}
-    try { sock.destroy(); } catch {}
+    try {
+      sock.end();
+    } catch {
+      /* empty */
+    }
+    try {
+      sock.destroy();
+    } catch {
+      /* empty */
+    }
   }
 }
