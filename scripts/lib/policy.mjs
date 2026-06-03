@@ -1,12 +1,11 @@
 import { createHash } from "node:crypto";
-import { isPlainObject, isSubsetValue, normalizeToolName } from "./common.mjs";
+import { isPlainObject } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 import {
   canonicalPolicyHash,
   evaluatePolicyIr,
   legacyRulesToPolicyIr,
-  normalizePolicyIr,
-  policyIrToLegacyRules
+  normalizePolicyIr
 } from "./policy-ir.mjs";
 
 const POLICY_ACTIONS = new Set(["allow", "deny", "require_approval"]);
@@ -38,27 +37,22 @@ function normalizeRule(rule) {
 
 function normalizePolicy(policyLike) {
   const input = isPlainObject(policyLike) ? policyLike : {};
+  let policy;
   if (input.schemaVersion === "armor.policy.v1") {
-    const ir = normalizePolicyIr(input);
-    return {
-      ...ir,
-      rules: policyIrToLegacyRules(ir)
-    };
+    policy = normalizePolicyIr(input);
+  } else {
+    const rulesInput = Array.isArray(input.rules) ? input.rules : [];
+    const rules = rulesInput.map((rule) => normalizeRule(rule)).filter(Boolean);
+    policy = legacyRulesToPolicyIr(rules, {}, { decision: "allow" });
   }
-  const rulesInput = Array.isArray(input.rules) ? input.rules : [];
-  const rules = rulesInput.map((rule) => normalizeRule(rule)).filter(Boolean);
-  const ir = legacyRulesToPolicyIr(rules, {}, { decision: "allow" });
-  return {
-    ...ir,
-    rules
-  };
+  return policy;
 }
 
 export async function loadPolicyState(policyFilePath) {
   const initial = {
     version: 0,
     updatedAt: new Date().toISOString(),
-    policy: { rules: [] },
+    policy: normalizePolicyIr({ statements: [] }),
     history: []
   };
   const raw = await readJson(policyFilePath, initial);
@@ -82,13 +76,6 @@ export function computePolicyHash(policy) {
     return canonicalPolicyHash(policy);
   }
   return createHash("sha256").update(JSON.stringify(normalizePolicy(policy))).digest("hex");
-}
-
-function toolMatches(ruleTool, toolName) {
-  if (ruleTool === "*") {
-    return true;
-  }
-  return normalizeToolName(ruleTool) === normalizeToolName(toolName);
 }
 
 function extractStrings(value, depth, texts, keys) {
@@ -173,44 +160,8 @@ export function detectDataClasses(toolName, toolParams) {
 }
 
 export function evaluatePolicy({ policy, toolName, toolParams }) {
-  if (isPlainObject(policy) && policy.schemaVersion === "armor.policy.v1") {
-    const decision = evaluatePolicyIr({ policy, toolName, toolParams });
-    return { ...decision, dataClasses: Array.from(detectDataClasses(toolName, toolParams)) };
-  }
-  const rules = normalizePolicy(policy).rules;
+  const normalizedPolicy = normalizePolicy(policy);
   const dataClasses = detectDataClasses(toolName, toolParams);
-
-  for (const rule of rules) {
-    if (!toolMatches(rule.tool, toolName)) {
-      continue;
-    }
-    if (rule.dataClass && !dataClasses.has(rule.dataClass)) {
-      continue;
-    }
-    if (rule.params && !isSubsetValue(rule.params, toolParams || {})) {
-      continue;
-    }
-    if (rule.action === "allow") {
-      return { allowed: true, matchedRule: rule, dataClasses: Array.from(dataClasses) };
-    }
-    if (rule.action === "deny") {
-      return {
-        allowed: false,
-        reason: `ArmorClaude policy deny: ${rule.id}`,
-        matchedRule: rule,
-        dataClasses: Array.from(dataClasses)
-      };
-    }
-    if (rule.action === "require_approval") {
-      return {
-        allowed: false,
-        reason: `ArmorClaude policy requires approval: ${rule.id}`,
-        matchedRule: rule,
-        dataClasses: Array.from(dataClasses)
-      };
-    }
-  }
-
-  return { allowed: true, dataClasses: Array.from(dataClasses) };
+  const decision = evaluatePolicyIr({ policy: normalizedPolicy, toolName, toolParams });
+  return { ...decision, dataClasses: Array.from(dataClasses) };
 }
-

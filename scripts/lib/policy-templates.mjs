@@ -1,40 +1,67 @@
+function statement(id, effect, action, conditions = []) {
+  return {
+    id,
+    effect,
+    principal: { type: "agent", id: "claude-code" },
+    action,
+    resource: { type: "workspace", scope: "current" },
+    conditions
+  };
+}
+
+function policy(name, description, defaults, statements) {
+  return {
+    schemaVersion: "armor.policy.v1",
+    kind: "PolicyProfile",
+    metadata: { name, description },
+    defaults: { decision: defaults.decision, conflictResolution: "deny_overrides" },
+    statements
+  };
+}
+
 export const POLICY_TEMPLATES = {
   "all-allow": {
     name: "All Allow",
     description: "Everything permitted — intent planning still enforced",
-    rules: [
-      { id: "allow-all", action: "allow", tool: "*" }
-    ]
+    policy: policy(
+      "all-allow",
+      "Everything permitted — intent planning still enforced",
+      { decision: "allow" },
+      [statement("allow-all", "permit", { type: "tool", eq: "*" })]
+    )
   },
   "strict-read-only": {
     name: "Strict Read-Only",
     description: "Only Read/Grep/Glob allowed. Bash/Write/Edit denied.",
-    rules: [
-      { id: "allow-read", action: "allow", tool: "Read" },
-      { id: "allow-grep", action: "allow", tool: "Grep" },
-      { id: "allow-glob", action: "allow", tool: "Glob" },
-      { id: "deny-all", action: "deny", tool: "*" }
-    ]
+    policy: policy(
+      "strict-read-only",
+      "Only Read/Grep/Glob allowed. Bash/Write/Edit denied.",
+      { decision: "deny" },
+      [statement("allow-read-tools", "permit", { type: "tool", in: ["Read", "Grep", "Glob"] })]
+    )
   },
-  "balanced": {
+  balanced: {
     name: "Balanced",
     description: "Read allowed. Bash/Write/Edit require approval.",
-    rules: [
-      { id: "allow-read", action: "allow", tool: "Read" },
-      { id: "allow-grep", action: "allow", tool: "Grep" },
-      { id: "allow-glob", action: "allow", tool: "Glob" },
-      { id: "hold-bash", action: "require_approval", tool: "Bash" },
-      { id: "hold-write", action: "require_approval", tool: "Write" },
-      { id: "hold-edit", action: "require_approval", tool: "Edit" },
-      { id: "allow-rest", action: "allow", tool: "*" }
-    ]
+    policy: policy(
+      "balanced",
+      "Read allowed. Bash/Write/Edit require approval.",
+      { decision: "allow" },
+      [
+        statement("allow-read-tools", "permit", { type: "tool", in: ["Read", "Grep", "Glob"] }),
+        statement("hold-bash-write-edit", "require_approval", { type: "tool", in: ["Bash", "Write", "Edit", "MultiEdit"] })
+      ]
+    )
   },
-  "lockdown": {
+  lockdown: {
     name: "Lockdown",
     description: "All tools require approval. Nothing auto-allowed.",
-    rules: [
-      { id: "hold-all", action: "require_approval", tool: "*" }
-    ]
+    policy: policy(
+      "lockdown",
+      "All tools require approval. Nothing auto-allowed.",
+      { decision: "deny" },
+      [statement("hold-all", "require_approval", { type: "tool", eq: "*" })]
+    )
   }
 };
 

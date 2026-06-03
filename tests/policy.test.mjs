@@ -6,7 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import { handlePreToolUse, handleUserPromptSubmit } from "../scripts/lib/engine.mjs";
 import { checkToolAgainstPlan } from "../scripts/lib/intent.mjs";
-import { computePolicyHash, evaluatePolicy } from "../scripts/lib/policy.mjs";
+import { computePolicyHash, evaluatePolicy, loadPolicyState, savePolicyState } from "../scripts/lib/policy.mjs";
 import { readJson, writeJson } from "../scripts/lib/fs-store.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
@@ -66,7 +66,40 @@ test("evaluatePolicy denies matching deny rule", () => {
     toolParams: { url: "https://example.com" },
   });
   assert.equal(decision.allowed, false);
-  assert.match(decision.reason, /policy deny/i);
+  assert.match(decision.reason, /policy forbid/i);
+});
+
+test("savePolicyState persists canonical IR without legacy rules mirror", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  const policyFile = path.join(tmp, "policy.json");
+  await savePolicyState(policyFile, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    updatedBy: "test",
+    policy: {
+      schemaVersion: "armor.policy.v1",
+      kind: "PolicyProfile",
+      metadata: { name: "grouped", description: "" },
+      defaults: { decision: "deny", conflictResolution: "deny_overrides" },
+      statements: [
+        {
+          id: "allow-read-tools",
+          effect: "permit",
+          principal: { type: "agent", id: "claude-code" },
+          action: { type: "tool", in: ["Read", "Grep", "Glob"] },
+          resource: { type: "workspace", scope: "current" },
+          conditions: []
+        }
+      ]
+    },
+    history: []
+  });
+  const raw = await readJson(policyFile, null);
+  assert.equal(raw.policy.rules, undefined);
+  assert.deepEqual(raw.policy.statements[0].action, { type: "tool", in: ["Read", "Grep", "Glob"] });
+  const loaded = await loadPolicyState(policyFile);
+  assert.equal(loaded.policy.rules, undefined);
+  assert.deepEqual(loaded.policy.statements[0].action, { type: "tool", in: ["Read", "Grep", "Glob"] });
 });
 
 test("checkToolAgainstPlan rejects tool drift", () => {
@@ -119,6 +152,98 @@ test("handlePreToolUse denies when policy blocks tool", async () => {
     config
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
+});
+
+test("handlePreToolUse asks with Claude Code native UI when policy requires approval", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  const config = buildConfig(tmp);
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(
+    config.policyFile,
+    JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      updatedBy: "test",
+      policy: { rules: [{ id: "hold-bash", action: "require_approval", tool: "Bash" }] },
+      history: []
+    }),
+    "utf8"
+  );
+
+  const output = await handlePreToolUse(
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "session-hold-bash",
+      tool_name: "Bash",
+      tool_input: { command: "ls" }
+    },
+    config
+  );
+  assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
+  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /requires approval: hold-bash/);
+});
+
+test("handlePreToolUse asks for held read-only tools instead of bypassing policy fast-path", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  const config = buildConfig(tmp);
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(
+    config.policyFile,
+    JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      updatedBy: "test",
+      policy: { rules: [{ id: "hold-read", action: "require_approval", tool: "Read" }] },
+      history: []
+    }),
+    "utf8"
+  );
+
+  const output = await handlePreToolUse(
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "session-hold-read",
+      tool_name: "Read",
+      tool_input: { file_path: "README.md" }
+    },
+    config
+  );
+  assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
+  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /requires approval: hold-read/);
+});
+
+test("handlePreToolUse lets Claude coordination tools bypass user policy default deny", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  const config = buildConfig(tmp);
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(
+    config.policyFile,
+    JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      updatedBy: "test",
+      policy: {
+        schemaVersion: "armor.policy.v1",
+        kind: "PolicyProfile",
+        metadata: { name: "default-deny", description: "" },
+        defaults: { decision: "deny", conflictResolution: "deny_overrides" },
+        statements: []
+      },
+      history: []
+    }),
+    "utf8"
+  );
+
+  const output = await handlePreToolUse(
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "session-toolsearch-default-deny",
+      tool_name: "ToolSearch",
+      tool_input: { query: "anything" }
+    },
+    config
+  );
+  assert.equal(output, null);
 });
 
 test("handlePreToolUse blocks direct policy file writes before policy/intent checks", async () => {

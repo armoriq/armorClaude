@@ -45,7 +45,7 @@ import {
   handleSessionEnd,
 } from "./lib/engine.mjs";
 
-const DAEMON_VERSION = "0.2.8";
+const DAEMON_VERSION = "0.2.12";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 

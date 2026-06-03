@@ -5,9 +5,7 @@ import { readJson, writeJson } from "./fs-store.mjs";
 import { loadPolicyState, savePolicyState } from "./policy.mjs";
 import {
   canonicalPolicyHash,
-  legacyRulesToPolicyIr,
   normalizePolicyIr,
-  policyIrToLegacyRules,
   validatePolicyIr
 } from "./policy-ir.mjs";
 import { getTemplate, getTemplateNames } from "./policy-templates.mjs";
@@ -19,6 +17,61 @@ import { pushProfile as pushProfileToBackend, pullProfiles as pullProfilesFromBa
 const PENDING_FILE = "policy-pending.json";
 const DRAFTS_FILE = "policy-drafts.json";
 const PROPOSAL_TTL_MS = 30 * 60 * 1000;
+const KNOWN_CLAUDE_TOOLS = new Set([
+  "*",
+  "Bash",
+  "Explore",
+  "Read",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "Grep",
+  "Glob",
+  "NotebookRead",
+  "NotebookEdit",
+  "WebFetch",
+  "WebSearch",
+  "Skill",
+  "Task",
+  "TodoWrite",
+  "ExitPlanMode"
+]);
+const KNOWN_BASH_PROGRAMS = new Set([
+  "awk",
+  "cat",
+  "curl",
+  "find",
+  "grep",
+  "head",
+  "jq",
+  "less",
+  "lf",
+  "ls",
+  "lsof",
+  "nc",
+  "netstat",
+  "nmap",
+  "sed",
+  "ss",
+  "tail",
+  "tree",
+  "psql",
+  "gcloud",
+  "kubectl",
+  "aws",
+  "az"
+]);
+const ADMIN_PROGRAMS = new Set(["psql", "gcloud", "kubectl", "aws", "az"]);
+const NETWORK_PROGRAMS = new Set(["curl", "nc", "nmap"]);
+const DRAFT_LIFECYCLE_FIELDS = new Set([
+  "proposalId",
+  "baseVersion",
+  "proposalHash",
+  "expiresAt",
+  "proposedPolicy",
+  "patch",
+  "stagedAt"
+]);
 
 function pendingPath(config) {
   return path.join(config.dataDir, PENDING_FILE);
@@ -36,109 +89,215 @@ function proposalId() {
   return `pol_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
 }
 
-function formatRule(rule) {
-  const parts = [`${rule.id}: ${rule.action} ${rule.tool}`];
-  if (rule.dataClass) parts.push(`(${rule.dataClass})`);
-  return parts.join(" ");
+function conditionText(condition) {
+  if (!isPlainObject(condition)) return "";
+  const value = Array.isArray(condition.value)
+    ? `[${condition.value.join(", ")}]`
+    : JSON.stringify(condition.value);
+  return `${condition.field} ${condition.op} ${value}`;
 }
 
-function formatRulesList(rules, label) {
-  if (!rules.length) return `${label}: (empty)`;
-  const lines = rules.map((r, i) => `  ${i + 1}. ${formatRule(r)}`);
-  return `${label} (${rules.length}):\n${lines.join("\n")}`;
-}
-
-function diffRules(current, proposed) {
-  const currentIds = new Set(current.map(r => r.id));
-  const proposedIds = new Set(proposed.map(r => r.id));
-  const added = proposed.filter(r => !currentIds.has(r.id));
-  const removed = current.filter(r => !proposedIds.has(r.id));
-  const kept = proposed.filter(r => currentIds.has(r.id));
-  return { added, removed, kept };
-}
-
-function formatDiff(current, proposed) {
-  const { added, removed } = diffRules(current, proposed);
+function summarizePolicyReview(policy) {
+  const normalized = normalizePolicyIr(policy);
   const lines = [];
-  for (const r of removed) lines.push(`- ${formatRule(r)}`);
-  for (const r of added) lines.push(`+ ${formatRule(r)}`);
-  if (!lines.length) lines.push("(no changes)");
-  return lines.join("\n");
-}
-
-function summarizeRules(rules, prefix = "+") {
-  return rules.map((rule) => `${prefix} ${rule.action === "deny" ? "forbid" : rule.action === "allow" ? "permit" : "require approval"} tool ${rule.tool}`);
-}
-
-function jsonPatchForRules(currentRules, proposedRules) {
-  const currentIds = new Set(currentRules.map((rule) => rule.id));
-  const proposedIds = new Set(proposedRules.map((rule) => rule.id));
-  const patch = [];
-  for (const rule of currentRules) {
-    if (!proposedIds.has(rule.id)) patch.push({ op: "remove", path: `/rules/${rule.id}` });
+  for (const statement of normalized.statements) {
+    const action = statement.action?.eq || (Array.isArray(statement.action?.in) ? statement.action.in.join(", ") : "*");
+    const effect =
+      statement.effect === "forbid" ? "BLOCK" :
+      statement.effect === "require_approval" ? "ASK" :
+      "ALLOW";
+    const conditions = statement.conditions.length
+      ? ` when ${statement.conditions.map(conditionText).filter(Boolean).join(" and ")}`
+      : "";
+    lines.push(`${effect.padEnd(5)} ${statement.id}: ${action}${conditions}`);
   }
-  for (const rule of proposedRules) {
-    if (!currentIds.has(rule.id)) patch.push({ op: "add", path: "/statements/-", value: rule });
+  return lines.length ? lines.join("\n") : "(no statements)";
+}
+
+function policyReviewLines(policy) {
+  const summary = summarizePolicyReview(policy);
+  return summary === "(no statements)" ? [] : summary.split("\n");
+}
+
+function formatPolicyReviewDiff(currentPolicy, proposedPolicy) {
+  const current = policyReviewLines(currentPolicy);
+  const proposed = policyReviewLines(proposedPolicy);
+  const currentSet = new Set(current);
+  const proposedSet = new Set(proposed);
+  const lines = [
+    ...current.filter((line) => !proposedSet.has(line)).map((line) => `- ${line}`),
+    ...proposed.filter((line) => !currentSet.has(line)).map((line) => `+ ${line}`)
+  ];
+  return lines.length ? lines.join("\n") : "(no changes)";
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (isPlainObject(value)) {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+  }
+  return value;
+}
+
+function stableJson(value) {
+  return JSON.stringify(stableValue(value));
+}
+
+function jsonPatchForPolicy(currentPolicy, proposedPolicy) {
+  const current = normalizePolicyIr(currentPolicy);
+  const proposed = normalizePolicyIr(proposedPolicy);
+  const patch = [];
+  if (stableJson(current.defaults) !== stableJson(proposed.defaults)) {
+    patch.push({ op: "replace", path: "/defaults", value: proposed.defaults });
+  }
+  if (stableJson(current.metadata) !== stableJson(proposed.metadata)) {
+    patch.push({ op: "replace", path: "/metadata", value: proposed.metadata });
+  }
+  const currentById = new Map(current.statements.map((statement) => [statement.id, statement]));
+  const proposedById = new Map(proposed.statements.map((statement) => [statement.id, statement]));
+  for (const statement of current.statements) {
+    if (!proposedById.has(statement.id)) {
+      patch.push({ op: "remove", path: `/statements/${statement.id}` });
+    }
+  }
+  for (const statement of proposed.statements) {
+    const existing = currentById.get(statement.id);
+    if (!existing) {
+      patch.push({ op: "add", path: "/statements/-", value: statement });
+    } else if (stableJson(existing) !== stableJson(statement)) {
+      patch.push({ op: "replace", path: `/statements/${statement.id}`, value: statement });
+    }
   }
   return patch;
 }
 
-function formatProposal(pending, currentRules, proposedRules, title = "Proposed policy change:") {
-  const { added, removed } = diffRules(currentRules, proposedRules);
+function uniqueLines(lines) {
+  return [...new Set(lines.filter((line) => typeof line === "string" && line.trim()))];
+}
+
+function actionTools(statement) {
+  if (!isPlainObject(statement?.action)) return ["*"];
+  if (typeof statement.action.eq === "string") return [statement.action.eq];
+  if (Array.isArray(statement.action.in)) return statement.action.in.filter((entry) => typeof entry === "string");
+  return ["*"];
+}
+
+function conditionValues(statement, field, op = "") {
+  return (Array.isArray(statement?.conditions) ? statement.conditions : [])
+    .filter((condition) => condition?.field === field && (!op || condition.op === op))
+    .flatMap((condition) => Array.isArray(condition.value) ? condition.value : [condition.value])
+    .filter((value) => typeof value === "string" && value);
+}
+
+function riskWarningsForPolicy(policy) {
+  const normalized = normalizePolicyIr(policy);
+  const warnings = [];
+  for (const statement of normalized.statements) {
+    const tools = actionTools(statement);
+    const isPermit = statement.effect === "permit";
+    const isForbid = statement.effect === "forbid";
+    const permitsBash = isPermit && tools.includes("Bash");
+    const permitsWriteTools = isPermit && tools.some((tool) => ["Write", "Edit", "MultiEdit"].includes(tool));
+    if (permitsWriteTools) {
+      warnings.push("RISK Write/Edit/MultiEdit can change workspace files.");
+    }
+    if (permitsBash && !statement.conditions.length) {
+      warnings.push("RISK Bash is broadly allowed with no program restrictions.");
+    }
+    if (permitsBash && conditionValues(statement, "bash.program", "not_in").length) {
+      warnings.push(`RISK Bash is broadly allowed except: ${conditionValues(statement, "bash.program", "not_in").join(", ")}.`);
+    }
+    const allowedPrograms = conditionValues(statement, "bash.program", "in");
+    if (isPermit && allowedPrograms.some((program) => NETWORK_PROGRAMS.has(program))) {
+      warnings.push(`RISK Network-capable Bash programs allowed: ${allowedPrograms.filter((program) => NETWORK_PROGRAMS.has(program)).join(", ")}.`);
+    }
+    if (isPermit && allowedPrograms.some((program) => ADMIN_PROGRAMS.has(program))) {
+      warnings.push(`RISK Cloud/db/admin Bash programs allowed: ${allowedPrograms.filter((program) => ADMIN_PROGRAMS.has(program)).join(", ")}.`);
+    }
+    const blockedPrograms = conditionValues(statement, "bash.program", "in");
+    if (isForbid && blockedPrograms.some((program) => ADMIN_PROGRAMS.has(program))) {
+      warnings.push(`BLOCK Cloud/db/admin Bash programs explicitly denied: ${blockedPrograms.filter((program) => ADMIN_PROGRAMS.has(program)).join(", ")}.`);
+    }
+  }
+  return uniqueLines(warnings);
+}
+
+function formatOptionalList(items, empty = "(none)") {
+  const values = uniqueLines(Array.isArray(items) ? items : []);
+  return values.length ? values.map((entry) => `- ${entry}`).join("\n") : empty;
+}
+
+function formatProposal(pending, currentPolicy, proposedPolicy, title = "Proposed policy change:") {
+  const reviewDiff = formatPolicyReviewDiff(currentPolicy, proposedPolicy);
   return [
     title,
     pending.source?.type ? `Source: ${pending.source.type}` : "",
     `Proposal: ${pending.proposalId}`,
     `Base policy: v${pending.baseVersion}`,
     "",
-    "Changes:",
-    ...summarizeRules(added, "+"),
-    ...summarizeRules(removed, "-"),
-    added.length || removed.length ? "" : "(no changes)",
+    "Review:",
+    summarizePolicyReview(proposedPolicy),
+    "",
+    "Risk warnings:",
+    formatOptionalList(riskWarningsForPolicy(proposedPolicy)),
     "",
     "Patch:",
-    JSON.stringify(pending.patch || jsonPatchForRules(currentRules, proposedRules), null, 2),
+    JSON.stringify(pending.patch || jsonPatchForPolicy(currentPolicy, proposedPolicy), null, 2),
     "",
-    "Legacy diff:",
-    formatDiff(currentRules, proposedRules),
+    "Diff:",
+    reviewDiff,
     "",
     "JSON proposal:",
     JSON.stringify({
       proposalId: pending.proposalId,
       baseVersion: pending.baseVersion,
+      basePolicyHash: pending.basePolicyHash,
       proposalHash: pending.proposalHash,
       expiresAt: pending.expiresAt,
-      policy: pending.proposedPolicy,
-      proposedRules
+      policy: pending.proposedPolicy
     }, null, 2),
     "",
-    formatRulesList(proposedRules, "Proposed rules"),
-    "",
-    `Type /armor policy confirm ${pending.proposalId} to apply, or /armor policy cancel ${pending.proposalId} to discard.`
+    "Next:",
+    `  /armor yes                         apply ${pending.proposalId}`,
+    `  /armor no                          discard ${pending.proposalId}`,
+    `  /armor policy confirm ${pending.proposalId}`,
+    `  /armor policy cancel ${pending.proposalId}`
   ].join("\n");
 }
 
 function formatDraft(draft) {
+  const riskWarnings = draft.riskWarnings || riskWarningsForPolicy(draft.policy);
+  const diff = draft.diff || "(not compared to active policy)";
   return [
     "Drafted from natural language. Not staged.",
     "",
     `Draft: ${draft.draftId}`,
+    draft.confidence ? `Confidence: ${draft.confidence}` : "",
+    "",
+    "Review:",
+    summarizePolicyReview(draft.policy),
+    "",
+    "Risk warnings:",
+    formatOptionalList(riskWarnings),
+    "",
+    "Diff:",
+    diff,
     "",
     "Ambiguities:",
-    ...draft.ambiguities.map((entry) => `- ${entry}`),
+    formatOptionalList(draft.ambiguities, "(none)"),
     "",
     "Normalized JSON:",
     JSON.stringify(draft.policy, null, 2),
     "",
     "Next:",
     `  /armor policy stage ${draft.draftId}`,
-    `  /armor policy revise ${draft.draftId} "clarify what should change"`
-  ].join("\n");
+    `  /armor policy revise ${draft.draftId} "clarify what should change"`,
+    "  /armor no"
+  ].filter((line) => line !== "").join("\n");
 }
 
 function formatDraftRevision({ original, revised, removedIds, note }) {
-  const beforeRules = policyIrToLegacyRules(original.policy);
-  const afterRules = policyIrToLegacyRules(revised.policy);
+  const riskWarnings = revised.riskWarnings || riskWarningsForPolicy(revised.policy);
   return [
     "Draft revised. Not staged.",
     "",
@@ -147,8 +306,14 @@ function formatDraftRevision({ original, revised, removedIds, note }) {
     note ? `Note: ${note}` : "",
     removedIds.length ? `Removed statements: ${removedIds.join(", ")}` : "",
     "",
+    "Review:",
+    summarizePolicyReview(revised.policy),
+    "",
+    "Risk warnings:",
+    formatOptionalList(riskWarnings),
+    "",
     "Changes:",
-    formatDiff(beforeRules, afterRules),
+    formatPolicyReviewDiff(original.policy, revised.policy),
     "",
     "Normalized JSON:",
     JSON.stringify(revised.policy, null, 2),
@@ -159,24 +324,114 @@ function formatDraftRevision({ original, revised, removedIds, note }) {
   ].filter((line) => line !== "").join("\n");
 }
 
-function nextPolicyId(rules) {
-  const ids = rules
-    .map(r => r.id.match(/^policy(\d+)$/i))
+async function issueCryptoPolicyTokenForState(config, policyState) {
+  if (!config.cryptoPolicyEnabled) {
+    return { ok: true, note: "" };
+  }
+  try {
+    const { createCryptoPolicyService } = await import("./crypto-policy.mjs");
+    const cryptoService = createCryptoPolicyService(config);
+    await cryptoService.issuePolicyToken(policyState, {
+      userId: config.userId,
+      agentId: config.agentId,
+      contextId: config.contextId
+    });
+    return { ok: true, note: " Crypto policy token issued." };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: message };
+  }
+}
+
+async function clearCryptoPolicyToken(config) {
+  if (!config.cryptoPolicyEnabled) return;
+  try {
+    const { createCryptoPolicyService } = await import("./crypto-policy.mjs");
+    await createCryptoPolicyService(config).clearCache();
+  } catch {
+    // Clearing stale crypto cache is best-effort; local policy remains authoritative.
+  }
+}
+
+function isEmptyDefaultDenyPolicy(policy) {
+  const normalized = normalizePolicyIr(policy);
+  return normalized.defaults.decision === "deny" && normalized.statements.length === 0;
+}
+
+function canApplyFailClosedWhenCryptoFails(pending, proposedPolicy) {
+  return pending?.reason === "reset policy statements" && isEmptyDefaultDenyPolicy(proposedPolicy);
+}
+
+function nextPolicyId(policy) {
+  const ids = normalizePolicyIr(policy).statements
+    .map((statement) => statement.id.match(/^policy(\d+)$/i))
     .filter(Boolean)
-    .map(m => parseInt(m[1], 10));
+    .map((match) => parseInt(match[1], 10));
   return `policy${(ids.length ? Math.max(...ids) : 0) + 1}`;
 }
 
-function policyFromRules(rules, state, name = "current") {
-  const currentDefault = state?.policy?.defaults?.decision || "deny";
-  return legacyRulesToPolicyIr(
-    rules,
-    {
-      name: state?.policy?.metadata?.name || name,
-      description: state?.policy?.metadata?.description || ""
-    },
-    { decision: currentDefault }
-  );
+function emptyPolicy(name = "current") {
+  return normalizePolicyIr({
+    schemaVersion: "armor.policy.v1",
+    kind: "PolicyProfile",
+    metadata: { name, description: "" },
+    defaults: { decision: "deny", conflictResolution: "deny_overrides" },
+    statements: []
+  });
+}
+
+function effectForCommandAction(action) {
+  if (action === "deny") return "forbid";
+  if (action === "require_approval") return "require_approval";
+  return "permit";
+}
+
+function isBashProgramTool(tool) {
+  const value = typeof tool === "string" ? tool.trim().toLowerCase() : "";
+  return value && !KNOWN_CLAUDE_TOOLS.has(tool) && KNOWN_BASH_PROGRAMS.has(value);
+}
+
+function statementForCommandRule(rule, id) {
+  const effect = effectForCommandAction(rule.action);
+  const tool = typeof rule.tool === "string" && rule.tool.trim() ? rule.tool.trim() : "*";
+  const program = tool.toLowerCase();
+  if (isBashProgramTool(tool)) {
+    return {
+      id,
+      effect,
+      principal: { type: "agent", id: "claude-code" },
+      action: { type: "tool", eq: "Bash" },
+      resource: { type: "workspace", scope: "current" },
+      conditions: [
+        { field: "bash.program", op: "in", value: [program] },
+        ...(effect === "permit" ? [{ field: "bash.hasWriteRedirection", op: "eq", value: false }] : [])
+      ]
+    };
+  }
+  return {
+    id,
+    effect,
+    principal: { type: "agent", id: "claude-code" },
+    action: { type: "tool", eq: tool },
+    resource: { type: "workspace", scope: "current" },
+    conditions: []
+  };
+}
+
+function appendRuleToPolicy(policy, rule) {
+  const current = normalizePolicyIr(policy);
+  return normalizePolicyIr({
+    ...current,
+    statements: [...current.statements, statementForCommandRule(rule, rule.id)]
+  });
+}
+
+function removeStatementFromPolicy(policy, id) {
+  const current = normalizePolicyIr(policy);
+  return normalizePolicyIr({
+    ...current,
+    statements: current.statements.filter((statement) => statement.id !== id)
+  });
 }
 
 function draftId() {
@@ -192,6 +447,33 @@ function extractJson(text) {
   } catch {
     return null;
   }
+}
+
+function findLifecycleFields(value, pathName = "$") {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry, idx) => findLifecycleFields(entry, `${pathName}[${idx}]`));
+  }
+  if (!isPlainObject(value)) return [];
+  const matches = [];
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = `${pathName}.${key}`;
+    if (DRAFT_LIFECYCLE_FIELDS.has(key)) matches.push(childPath);
+    matches.push(...findLifecycleFields(child, childPath));
+  }
+  return matches;
+}
+
+function validateDraftPolicyJson(parsedJson) {
+  const lifecycleFields = findLifecycleFields(parsedJson);
+  if (lifecycleFields.length) {
+    return {
+      ok: false,
+      errors: [
+        `Draft JSON cannot set lifecycle/staging fields: ${lifecycleFields.slice(0, 8).join(", ")}`
+      ]
+    };
+  }
+  return validatePolicyIr(parsedJson);
 }
 
 async function saveDraft(config, draft) {
@@ -288,43 +570,136 @@ function reviseDraftPolicy(draft, instruction) {
   };
 }
 
-function inferComplexDraft(raw, state) {
+function tokenizePolicyText(raw) {
+  return (typeof raw === "string" ? raw.toLowerCase() : "").match(/[a-z0-9_-]+/g) || [];
+}
+
+function hasToken(raw, token) {
+  return new RegExp(`\\b${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(raw);
+}
+
+function programHasDenyContext(raw, program) {
+  const escaped = program.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b(?:deny|block|forbid|except|exclude|without|not|disallow|do\\s+not\\s+allow)\\b(?:(?!\\ballow\\b)[\\s\\S]){0,100}\\b${escaped}\\b`, "i").test(raw) ||
+    new RegExp(`\\b${escaped}\\b[\\s\\S]{0,60}\\b(?:denied|blocked|forbidden|disallowed)\\b`, "i").test(raw);
+}
+
+function mentionedPrograms(raw) {
+  return [...KNOWN_BASH_PROGRAMS]
+    .map((program) => ({ program, index: raw.toLowerCase().search(new RegExp(`\\b${program.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i")) }))
+    .filter((entry) => entry.index >= 0)
+    .sort((a, b) => a.index - b.index)
+    .map((entry) => entry.program);
+}
+
+export function buildPolicyIntentAst(rawInput) {
+  const raw = typeof rawInput === "string" ? rawInput.trim() : "";
   const lower = raw.toLowerCase();
+  const tokens = tokenizePolicyText(raw);
   const name =
     raw.match(/save\s+(?:this\s+)?as\s+([a-z0-9_-]+)/i)?.[1] ||
     raw.match(/name\s+(?:the\s+)?policy\s+([a-z0-9_-]+)/i)?.[1] ||
     "draft-policy";
-  const wantsWriteTools = /\b(write|edit|modify|change|create files?|update files?)\b/i.test(raw);
-  const broadBashExceptDenied =
-    /\b(other things using bash|use other things using bash|bash but not|except|not these|anything else using bash)\b/i.test(raw) ||
-    (/\bdo not allow\b/i.test(raw) && /\bbash\b/i.test(raw) && /\b(psql|gcloud|kubectl|aws|az)\b/i.test(raw));
+  const writesMentioned = /\b(write|edit|modify|change|create files?|update files?|read\/write)\b/i.test(raw);
   const allowAllBash =
     /\ballow\s+all\s+bash\b/i.test(raw) ||
     /\bbash\s+tool\s+is\s+allowed\s+for\s+all\b/i.test(raw) ||
     /\bbash\b[\s\S]*\b(any|all)\s+commands?\b/i.test(raw);
+  const broadBashExceptDenied =
+    /\b(other things using bash|use other things using bash|bash but not|except|not these|anything else using bash)\b/i.test(raw) ||
+    (/\bdo not allow\b/i.test(raw) && /\bbash\b/i.test(raw));
   const removeExplicitForbid =
     /\b(remove|delete|drop)\b[\s\S]*\bforbid\b/i.test(raw) ||
     /\bremove\b[\s\S]*\bcloud\b[\s\S]*\bdb\b[\s\S]*\badmin\b/i.test(raw);
-  const programs = [];
-  for (const [needle, program] of [
-    ["ls", "ls"],
-    ["curl", "curl"],
-    ["grep", "grep"],
-    ["cat", "cat"],
-    ["find", "find"],
-    ["port", "lsof"],
-    ["port", "netstat"],
-    ["port", "ss"]
-  ]) {
-    if (lower.includes(needle) && !programs.includes(program)) programs.push(program);
+  const defaultDecision = /\b(default allow|allow by default)\b/i.test(raw)
+    ? "allow"
+    : "deny";
+  const ambiguities = [];
+  const riskWarnings = [];
+  const deniedPrograms = [];
+  const allowedPrograms = [];
+
+  for (const program of mentionedPrograms(raw)) {
+    if (programHasDenyContext(raw, program)) {
+      deniedPrograms.push(program);
+    } else if (!allowedPrograms.includes(program)) {
+      allowedPrograms.push(program);
+    }
   }
-  const denied = [];
-  for (const program of ["psql", "gcloud", "kubectl", "aws", "az"]) {
-    if (lower.includes(program)) denied.push(program);
+  if (/\bport checks?\b|\bport access\b/i.test(raw)) {
+    for (const program of ["lsof", "netstat", "ss"]) {
+      if (!allowedPrograms.includes(program)) allowedPrograms.push(program);
+    }
   }
-  const fileTools = wantsWriteTools
-    ? ["Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"]
-    : ["Read", "Grep", "Glob"];
+  if (allowAllBash && !deniedPrograms.length) {
+    riskWarnings.push("RISK All Bash commands are allowed. This is powerful and should only be staged for trusted workspaces.");
+  }
+  if (deniedPrograms.length && (allowAllBash || broadBashExceptDenied)) {
+    riskWarnings.push(`RISK Bash is broadly allowed except: ${deniedPrograms.join(", ")}.`);
+  }
+  if (writesMentioned) {
+    riskWarnings.push("RISK Write/Edit/MultiEdit are included because the request mentioned writing or editing files.");
+  }
+  if (allowedPrograms.some((program) => NETWORK_PROGRAMS.has(program))) {
+    riskWarnings.push(`RISK Network-capable Bash programs mentioned: ${allowedPrograms.filter((program) => NETWORK_PROGRAMS.has(program)).join(", ")}.`);
+  }
+  if (deniedPrograms.some((program) => ADMIN_PROGRAMS.has(program))) {
+    riskWarnings.push(`BLOCK Cloud/db/admin Bash programs explicitly denied: ${deniedPrograms.filter((program) => ADMIN_PROGRAMS.has(program)).join(", ")}.`);
+  }
+  if (/\b(file access|files? access)\b/i.test(raw)) {
+    ambiguities.push("AMBIGUOUS file access could mean read-only or write access. This draft defaults to read-oriented tools unless writing was explicit.");
+  }
+  if (/\b(network access|internal domains?|all urls?|external urls?)\b/i.test(raw)) {
+    ambiguities.push("AMBIGUOUS network access needs host/domain scoping before this should be staged.");
+  }
+  if (/\b(safe commands?|admin tools?)\b/i.test(raw)) {
+    ambiguities.push("AMBIGUOUS vague command groups need explicit programs.");
+  }
+  if (/\bport checks?\b|\bport access\b/i.test(raw)) {
+    ambiguities.push("AMBIGUOUS port checks could mean lsof, netstat, ss, nc, or nmap. This draft permits lsof/netstat/ss only.");
+  }
+
+  const confidence = ambiguities.length
+    ? "ambiguous"
+    : riskWarnings.length
+      ? "risky_exact"
+      : "exact";
+
+  return {
+    version: "armor.policy.intent.v1",
+    raw,
+    tokens,
+    confidence,
+    profileName: name,
+    defaults: { decision: defaultDecision },
+    fileTools: writesMentioned
+      ? ["Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"]
+      : ["Read", "Grep", "Glob"],
+    bash: {
+      allowAll: allowAllBash,
+      broadExceptDenied: broadBashExceptDenied,
+      allowedPrograms: uniqueLines(allowedPrograms),
+      deniedPrograms: uniqueLines(deniedPrograms),
+      removeExplicitForbid
+    },
+    riskWarnings: uniqueLines(riskWarnings),
+    ambiguities: uniqueLines(ambiguities)
+  };
+}
+
+function inferComplexDraft(raw, state) {
+  const lower = raw.toLowerCase();
+  const ast = buildPolicyIntentAst(raw);
+  const name = ast.profileName;
+  const wantsWriteTools = ast.fileTools.some((tool) => ["Write", "Edit", "MultiEdit"].includes(tool));
+  const broadBashExceptDenied = ast.bash.broadExceptDenied;
+  const allowAllBash = ast.bash.allowAll;
+  const removeExplicitForbid = ast.bash.removeExplicitForbid;
+  const programs = ast.bash.allowedPrograms;
+  const denied = ast.bash.deniedPrograms;
+  const bashHasExceptions = denied.length > 0 && (broadBashExceptDenied || /\bexcept\b/i.test(raw));
+  const allowUnrestrictedBash = allowAllBash && !bashHasExceptions;
+  const fileTools = ast.fileTools;
   const statements = [
     {
       id: wantsWriteTools ? "allow-file-tools" : "allow-read-tools",
@@ -335,7 +710,7 @@ function inferComplexDraft(raw, state) {
       conditions: []
     }
   ];
-  if (allowAllBash) {
+  if (allowUnrestrictedBash) {
     statements.push({
       id: "allow-all-bash",
       effect: "permit",
@@ -344,7 +719,7 @@ function inferComplexDraft(raw, state) {
       resource: { type: "workspace", scope: "current" },
       conditions: []
     });
-  } else if (broadBashExceptDenied && denied.length) {
+  } else if ((allowAllBash || broadBashExceptDenied) && denied.length) {
     statements.push({
       id: "allow-bash-except-denied-programs",
       effect: "permit",
@@ -366,7 +741,7 @@ function inferComplexDraft(raw, state) {
       ]
     });
   }
-  if (denied.length && !removeExplicitForbid && !allowAllBash) {
+  if (denied.length && !removeExplicitForbid) {
     statements.push({
       id: "forbid-cloud-db-admin",
       effect: "forbid",
@@ -380,14 +755,14 @@ function inferComplexDraft(raw, state) {
     schemaVersion: "armor.policy.v1",
     kind: "PolicyProfile",
     metadata: { name, description: `Drafted from: ${raw}` },
-    defaults: { decision: "deny", conflictResolution: "deny_overrides" },
+    defaults: { decision: ast.defaults.decision, conflictResolution: "deny_overrides" },
     statements
   });
-  const ambiguities = [];
-  if (allowAllBash) {
+  const ambiguities = [...ast.ambiguities];
+  if (allowUnrestrictedBash) {
     ambiguities.push("All Bash commands are allowed. This is powerful and should only be staged for trusted workspaces.");
   }
-  if (broadBashExceptDenied && denied.length) {
+  if ((allowAllBash || broadBashExceptDenied) && denied.length) {
     ambiguities.push(`Bash is broadly allowed except ${denied.join(", ")}. Review carefully before staging.`);
   }
   if (removeExplicitForbid && denied.length) {
@@ -397,15 +772,19 @@ function inferComplexDraft(raw, state) {
     ambiguities.push("Write/Edit/MultiEdit are included because the prompt mentioned writing or editing files.");
   }
   if (lower.includes("curl")) ambiguities.push("curl can access external network. Scope all URLs or selected domains?");
-  if (lower.includes("port")) ambiguities.push("port checks could mean lsof, netstat, ss, nc, or nmap. This draft permits lsof/netstat/ss only.");
-  if (lower.includes("file")) ambiguities.push("file access could mean read-only or write access. This draft allows read-oriented tools only.");
+  if (lower.includes("file") && !wantsWriteTools) ambiguities.push("file access could mean read-only or write access. This draft allows read-oriented tools only.");
   if (!ambiguities.length) ambiguities.push("This was too complex for deterministic staging; review the normalized JSON before staging.");
+  const currentPolicy = isPlainObject(state?.policy) ? normalizePolicyIr(state.policy) : emptyPolicy();
   return {
     draftId: draftId(),
     createdAt: new Date().toISOString(),
     source: { type: "llm_or_complex_nl_draft", input: raw },
     policy,
-    ambiguities,
+    ast,
+    confidence: ast.confidence,
+    riskWarnings: uniqueLines([...ast.riskWarnings, ...riskWarningsForPolicy(policy)]),
+    ambiguities: uniqueLines(ambiguities),
+    diff: formatPolicyReviewDiff(currentPolicy, policy),
     policyHash: canonicalPolicyHash(policy)
   };
 }
@@ -414,19 +793,14 @@ function canonicalCommandText(prompt) {
   const trimmed = typeof prompt === "string" ? prompt.trim() : "";
   if (!trimmed) return null;
 
-  let match = trimmed.match(/^\/armor-policy\b\s*(.*)$/i);
-  if (match) return { rest: (match[1] || "").trim(), alias: "/armor-policy" };
-
-  match = trimmed.match(/^\/armorclaude:armor-policy\b\s*(.*)$/i);
-  if (match) return { rest: (match[1] || "").trim(), alias: "/armorclaude:armor-policy" };
-
-  match = trimmed.match(/^\/armor\b\s*(.*)$/i);
+  let match = trimmed.match(/^\/armorclaude:armor(?:\s+([\s\S]*))?$/i);
+  if (!match) match = trimmed.match(/^\/armor(?:\s+([\s\S]*))?$/i);
   if (!match) return null;
   let rest = (match[1] || "").trim();
   if (/^policy\b/i.test(rest)) {
     rest = rest.replace(/^policy\b\s*/i, "").trim();
   }
-  return { rest, alias: "/armor" };
+  return { rest, alias: match[0].toLowerCase().startsWith("/armorclaude:armor") ? "/armorclaude:armor" : "/armor" };
 }
 
 function parseCommand(prompt) {
@@ -437,9 +811,19 @@ function parseCommand(prompt) {
   const lower = rest.toLowerCase();
 
   if (!rest || lower === "help") return { cmd: "help" };
+  if (["yes", "y", "approve", "ok"].includes(lower)) {
+    return { cmd: "confirm", proposalId: "", saveAs: "" };
+  }
+  if (["no", "n", "reject", "deny"].includes(lower)) {
+    return { cmd: "cancel", proposalId: "" };
+  }
   if (lower === "list") return { cmd: "list" };
+  if (lower === "view") return { cmd: "view" };
   if (lower === "reset") return { cmd: "reset" };
   if (lower === "export") return { cmd: "export" };
+  if (["rebind", "refresh-token", "repair-token"].includes(lower)) {
+    return { cmd: "rebind" };
+  }
 
   const stageMatch = rest.match(/^stage\s+([\s\S]+)$/i);
   if (stageMatch) return { cmd: "stage", value: stageMatch[1].trim() };
@@ -466,12 +850,18 @@ function parseCommand(prompt) {
     if (looksComplexNaturalLanguage(rest)) return { cmd: "draft-complex", raw: rest };
     const action = addMatch[1].toLowerCase() === "hold" ? "require_approval" : addMatch[1].toLowerCase();
     const rules = parseNaturalRules(rest);
+    const classification = classifyParsedRules(rules, rest);
+    if (classification === "draft") return { cmd: "draft-complex", raw: rest };
+    if (classification === "unsupported") return { cmd: "parse-error", raw: rest };
     if (rules.length > 1) return { cmd: "add-many", rules, raw: rest };
     return { cmd: "add", action, tool: addMatch[2].trim() };
   }
   if (lower.startsWith("add ")) {
     if (looksComplexNaturalLanguage(rest)) return { cmd: "draft-complex", raw: rest };
     const rules = parseNaturalRules(rest);
+    const classification = classifyParsedRules(rules, rest);
+    if (classification === "draft") return { cmd: "draft-complex", raw: rest };
+    if (classification === "unsupported") return { cmd: "parse-error", raw: rest };
     if (rules.length > 0) return { cmd: "add-many", rules, raw: rest };
     return { cmd: "parse-error", raw: rest };
   }
@@ -557,10 +947,31 @@ function splitToolList(rawTools) {
     .filter(Boolean);
 }
 
+function classifyParsedRules(rules, raw) {
+  const lower = typeof raw === "string" ? raw.toLowerCase() : "";
+  const bashContext = /\b(through bash|using bash|bash command|bash program|shell command|terminal command)\b/i.test(lower);
+  for (const rule of rules) {
+    const tool = rule.tool;
+    const lowerTool = String(tool || "").toLowerCase();
+    if (!KNOWN_CLAUDE_TOOLS.has(tool)) {
+      if (KNOWN_BASH_PROGRAMS.has(lowerTool)) return "draft";
+      return "unsupported";
+    }
+    if (bashContext && KNOWN_BASH_PROGRAMS.has(lowerTool)) return "draft";
+  }
+  return "ok";
+}
+
+function phraseMentionsBashProgram(text) {
+  const lower = typeof text === "string" ? text.toLowerCase() : "";
+  return [...KNOWN_BASH_PROGRAMS].some((program) => new RegExp(`\\b${program.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(lower));
+}
+
 function looksComplexNaturalLanguage(text) {
   const lower = text.toLowerCase();
-  return /["']|only allow|should|policy should|save (this )?as|port access|file access|curl|psql|gcloud/.test(lower) &&
-    !/^add\s+(allow|deny|hold|require_approval)\s+[\w\s,|&+*-]+$/i.test(text);
+  return /["']|only allow|should|policy should|save (this )?as|port access|port checks|file access|file tools|read\/write|network access|internal domains|safe commands|admin tools|except|bash but not|default allow|default deny|allow all bash|through bash|using bash|curl|psql|gcloud|kubectl|aws|az/.test(lower) &&
+    !/^add\s+(allow|deny|hold|require_approval)\s+(read|grep|glob|write|edit|multiedit|bash|webfetch|websearch|explore|skill)(\s*(,|\band\b|\&|\+)\s*(read|grep|glob|write|edit|multiedit|bash|webfetch|websearch|explore|skill))*$/i.test(text) &&
+    (phraseMentionsBashProgram(text) || /["']|only allow|should|policy should|save (this )?as|port access|port checks|file access|file tools|read\/write|network access|internal domains|safe commands|admin tools|except|bash but not|default allow|default deny|allow all bash|through bash|using bash/.test(lower));
 }
 
 export function parseNaturalRules(text) {
@@ -586,16 +997,20 @@ function helpText() {
     "",
     "  /armor                              — show this help",
     "  /armor policy list                  — show current rules",
+    "  /armor policy view                  — show active policy JSON",
     "  /armor policy add allow Read and Grep, deny Write, hold Bash",
     "  /armor policy stage <draft-id|json> — stage validated draft or JSON",
     "  /armor policy revise <draft-id> \"remove <statement-id>\"",
     "  /armor policy draft edit <draft-id> <json> — replace draft JSON after validation",
     "  /armor policy draft validate <json> — validate pasted policy JSON as a new draft",
+    "  /armor policy rebind                 — reissue crypto binding for current policy",
     "  /armor policy remove <rule-id>       — propose removing a rule",
     "  /armor policy reset                  — propose clearing all rules",
     "  /armor policy template <name>        — propose applying a template",
     "  /armor policy confirm [proposal-id]  — apply staged change",
     "  /armor policy cancel [proposal-id]   — discard staged change",
+    "  /armor yes                           — apply current staged change",
+    "  /armor no                            — discard current staged change",
     "  /armor policy export                 — dump policy as JSON",
     "",
     "  /armor mcp list                     — show detected MCPs",
@@ -607,7 +1022,7 @@ function helpText() {
     "  /armor profile switch <name>        — switch to a saved profile",
     "  /armor profile delete <name>        — delete a profile",
     "",
-    "  Legacy alias: /armor-policy ...",
+    "  Use /armor only; legacy /armor-policy is intentionally unsupported.",
     `  Templates: ${getTemplateNames().join(", ")}`,
   ].join("\n");
 }
@@ -639,16 +1054,20 @@ export async function handleArmorPolicyCommand(prompt, config) {
     case "draft-validate": {
       const parsedJson = extractJson(parsed.value);
       if (!parsedJson) return "Draft validation failed: input is not valid JSON.";
-      const result = validatePolicyIr(parsedJson);
+      const result = validateDraftPolicyJson(parsedJson);
       if (!result.ok) {
         return `Draft validation failed:\n${result.errors.map((e) => `- ${e}`).join("\n")}`;
       }
+      const state = await loadPolicyState(config.policyFile);
       const draft = await saveDraft(config, {
         draftId: draftId(),
         createdAt: new Date().toISOString(),
         source: { type: "llm_draft", input: "pasted-json" },
         policy: result.policy,
+        confidence: "schema_validated",
+        riskWarnings: riskWarningsForPolicy(result.policy),
         ambiguities: ["LLM/pasted draft validated structurally. Review intent before staging."],
+        diff: formatPolicyReviewDiff(state.policy, result.policy),
         policyHash: canonicalPolicyHash(result.policy)
       });
       return formatDraft(draft);
@@ -659,10 +1078,11 @@ export async function handleArmorPolicyCommand(prompt, config) {
       if (!existing) return `Draft not found: ${parsed.draftId}`;
       const parsedJson = extractJson(parsed.value);
       if (!parsedJson) return "Draft edit failed: replacement is not valid JSON.";
-      const result = validatePolicyIr(parsedJson);
+      const result = validateDraftPolicyJson(parsedJson);
       if (!result.ok) {
         return `Draft edit failed validation:\n${result.errors.map((e) => `- ${e}`).join("\n")}`;
       }
+      const state = await loadPolicyState(config.policyFile);
       const draft = await saveDraft(config, {
         draftId: draftId(),
         createdAt: new Date().toISOString(),
@@ -672,7 +1092,10 @@ export async function handleArmorPolicyCommand(prompt, config) {
           previousDraftId: existing.draftId
         },
         policy: result.policy,
+        confidence: "schema_validated",
+        riskWarnings: riskWarningsForPolicy(result.policy),
         ambiguities: ["Manual JSON edit validated structurally. Review intent before staging."],
+        diff: formatPolicyReviewDiff(state.policy, result.policy),
         policyHash: canonicalPolicyHash(result.policy)
       });
       return formatDraftRevision({
@@ -697,6 +1120,8 @@ export async function handleArmorPolicyCommand(prompt, config) {
           previousDraftId: existing.draftId
         },
         policy: revised.policy,
+        confidence: "exact",
+        riskWarnings: riskWarningsForPolicy(revised.policy),
         ambiguities: [
           "Draft was revised deterministically. Review the normalized JSON before staging."
         ],
@@ -721,25 +1146,37 @@ export async function handleArmorPolicyCommand(prompt, config) {
       } else {
         const parsedJson = extractJson(parsed.value);
         if (!parsedJson) return "Stage failed: provide a draft id or valid policy JSON.";
-        const result = validatePolicyIr(parsedJson);
+        const result = validateDraftPolicyJson(parsedJson);
         if (!result.ok) {
           return `Stage failed validation:\n${result.errors.map((e) => `- ${e}`).join("\n")}`;
         }
         policy = result.policy;
       }
-      const proposedRules = policyIrToLegacyRules(policy);
-      const pending = await stagePending(config, state, state.policy.rules, proposedRules, `stage ${draft?.draftId || "pasted policy"}`, policy, {
+      const proposedPolicy = normalizePolicyIr(policy);
+      const pending = await stagePending(config, state, proposedPolicy, `stage ${draft?.draftId || "pasted policy"}`, {
         type: draft ? "llm_draft_stage" : "pasted_json_stage"
       });
-      return formatProposal(pending, state.policy.rules, proposedRules, "Staged validated policy draft:");
+      return formatProposal(pending, state.policy, proposedPolicy, "Staged validated policy draft:");
     }
 
     case "list": {
       const state = await loadPolicyState(config.policyFile);
-      if (!state.policy.rules.length) {
+      const review = summarizePolicyReview(state.policy);
+      if (review === "(no statements)") {
         return `Policy v${state.version}: no rules configured.\nUse /armor policy add or /armor policy template to get started.`;
       }
-      return `Policy v${state.version}:\n${state.policy.rules.map((r, i) => `  ${i + 1}. ${formatRule(r)}`).join("\n")}`;
+      return [
+        `Policy v${state.version}:`,
+        review
+          .split("\n")
+          .map((line, index) => `  ${index + 1}. ${line}`)
+          .join("\n")
+      ].join("\n");
+    }
+
+    case "view": {
+      const state = await loadPolicyState(config.policyFile);
+      return JSON.stringify(state.policy, null, 2);
     }
 
     case "export": {
@@ -747,47 +1184,61 @@ export async function handleArmorPolicyCommand(prompt, config) {
       return JSON.stringify(state, null, 2);
     }
 
+    case "rebind": {
+      if (!config.cryptoPolicyEnabled) {
+        return "Crypto policy binding is disabled for this setup.";
+      }
+      const state = await loadPolicyState(config.policyFile);
+      const result = await issueCryptoPolicyTokenForState(config, state);
+      if (!result.ok) {
+        return `Crypto policy rebind failed. Active policy was not changed. Reason: ${result.error}`;
+      }
+      return `Crypto policy rebound for policy v${state.version}.${result.note}`;
+    }
+
     case "add": {
       const state = await loadPolicyState(config.policyFile);
-      const id = nextPolicyId(state.policy.rules);
+      const id = nextPolicyId(state.policy);
       const newRule = { id, action: parsed.action, tool: parsed.tool };
-      const proposedRules = [...state.policy.rules, newRule];
-      const proposedPolicy = policyFromRules(proposedRules, state);
-      const pending = await stagePending(config, state, state.policy.rules, proposedRules, `add ${parsed.action} ${parsed.tool}`, proposedPolicy, { type: "deterministic" });
-      return formatProposal(pending, state.policy.rules, proposedRules);
+      const proposedPolicy = appendRuleToPolicy(state.policy, newRule);
+      const pending = await stagePending(config, state, proposedPolicy, `add ${parsed.action} ${parsed.tool}`, { type: "deterministic" });
+      return formatProposal(pending, state.policy, proposedPolicy);
     }
 
     case "add-many": {
       const state = await loadPolicyState(config.policyFile);
-      let nextRules = [...state.policy.rules];
+      let proposedPolicy = state.policy;
       for (const rule of parsed.rules) {
-        const id = nextPolicyId(nextRules);
-        nextRules = [...nextRules, { id, action: rule.action, tool: rule.tool }];
+        const id = nextPolicyId(proposedPolicy);
+        const nextRule = { id, action: rule.action, tool: rule.tool };
+        proposedPolicy = appendRuleToPolicy(proposedPolicy, nextRule);
       }
-      const proposedPolicy = policyFromRules(nextRules, state);
-      const pending = await stagePending(config, state, state.policy.rules, nextRules, parsed.raw, proposedPolicy, { type: "deterministic" });
-      return formatProposal(pending, state.policy.rules, nextRules, "Proposed policy changes:");
+      const pending = await stagePending(config, state, proposedPolicy, parsed.raw, { type: "deterministic" });
+      return formatProposal(pending, state.policy, proposedPolicy, "Proposed policy changes:");
     }
 
     case "remove": {
       const state = await loadPolicyState(config.policyFile);
-      const exists = state.policy.rules.find(r => r.id === parsed.id);
+      const exists = normalizePolicyIr(state.policy).statements.find((statement) => statement.id === parsed.id);
       if (!exists) return `Rule not found: ${parsed.id}`;
-      const proposedRules = state.policy.rules.filter(r => r.id !== parsed.id);
-      const proposedPolicy = policyFromRules(proposedRules, state);
-      const pending = await stagePending(config, state, state.policy.rules, proposedRules, `remove ${parsed.id}`, proposedPolicy, { type: "deterministic" });
-      return formatProposal(pending, state.policy.rules, proposedRules);
+      const proposedPolicy = removeStatementFromPolicy(state.policy, parsed.id);
+      const pending = await stagePending(config, state, proposedPolicy, `remove ${parsed.id}`, { type: "deterministic" });
+      return formatProposal(pending, state.policy, proposedPolicy);
     }
 
     case "reset": {
       const state = await loadPolicyState(config.policyFile);
-      const proposedPolicy = policyFromRules([], state);
-      const pending = await stagePending(config, state, state.policy.rules, [], "reset all rules", proposedPolicy, { type: "deterministic" });
+      const proposedPolicy = emptyPolicy(state.policy?.metadata?.name || "current");
+      const pending = await stagePending(config, state, proposedPolicy, "reset policy statements", { type: "deterministic" });
       return [
-        "Proposed: clear ALL policy rules.",
-        formatDiff(state.policy.rules, []),
+        "Proposed: reset active policy to an empty default-deny policy.",
+        formatPolicyReviewDiff(state.policy, proposedPolicy),
         "",
-        `Type /armor policy confirm ${pending.proposalId} to apply, or /armor policy cancel ${pending.proposalId} to discard.`
+        "Next:",
+        `  /armor yes                         apply ${pending.proposalId}`,
+        `  /armor no                          discard ${pending.proposalId}`,
+        `  /armor policy confirm ${pending.proposalId}`,
+        `  /armor policy cancel ${pending.proposalId}`
       ].join("\n");
     }
 
@@ -797,9 +1248,9 @@ export async function handleArmorPolicyCommand(prompt, config) {
         return `Unknown template: ${parsed.name}\nAvailable: ${getTemplateNames().join(", ")}`;
       }
       const state = await loadPolicyState(config.policyFile);
-      const proposedPolicy = policyFromRules(tmpl.rules, state);
-      const pending = await stagePending(config, state, state.policy.rules, tmpl.rules, `template ${parsed.name}`, proposedPolicy, { type: "deterministic" });
-      return formatProposal(pending, state.policy.rules, tmpl.rules, `Proposed: apply template "${tmpl.name}" — ${tmpl.description}`);
+      const proposedPolicy = normalizePolicyIr(tmpl.policy);
+      const pending = await stagePending(config, state, proposedPolicy, `template ${parsed.name}`, { type: "deterministic" });
+      return formatProposal(pending, state.policy, proposedPolicy, `Proposed: apply template "${tmpl.name}" — ${tmpl.description}`);
     }
 
     case "confirm": {
@@ -816,18 +1267,18 @@ export async function handleArmorPolicyCommand(prompt, config) {
       if (Number.isFinite(pending.baseVersion) && pending.baseVersion !== state.version) {
         return `Policy changed since proposal was staged (base v${pending.baseVersion}, current v${state.version}). Please review and stage again.`;
       }
-      const currentHashMaterial = pending.proposedPolicy || pending.proposedRules;
-      if (
-        (pending.proposalHash && pending.proposalHash !== hashJson(currentHashMaterial)) ||
-        (pending.proposedRulesHash && pending.proposedRulesHash !== hashJson(pending.proposedRules))
-      ) {
+      if (pending.basePolicyHash && pending.basePolicyHash !== canonicalPolicyHash(state.policy)) {
+        return "Policy changed since proposal was staged. Please review and stage again.";
+      }
+      if (!pending.proposedPolicy || pending.proposalHash !== hashJson(pending.proposedPolicy)) {
         return "Staged policy proposal hash mismatch. Refusing to apply.";
       }
+      const proposedPolicy = normalizePolicyIr(pending.proposedPolicy);
       const nextState = {
         version: state.version + 1,
         updatedAt: new Date().toISOString(),
         updatedBy: "user",
-        policy: pending.proposedPolicy || policyFromRules(pending.proposedRules, state),
+        policy: proposedPolicy,
         history: [
           ...state.history,
           {
@@ -836,34 +1287,35 @@ export async function handleArmorPolicyCommand(prompt, config) {
             updatedBy: "user",
             reason: pending.reason,
             proposalId: pending.proposalId,
-            policy: pending.proposedPolicy || policyFromRules(pending.proposedRules, state)
+            policy: proposedPolicy
           }
         ]
       };
-      await savePolicyState(config.policyFile, nextState);
       let profileNote = "";
+      let cryptoNote = "";
+      const cryptoResult = await issueCryptoPolicyTokenForState(config, nextState);
+      if (!cryptoResult.ok) {
+        if (canApplyFailClosedWhenCryptoFails(pending, proposedPolicy)) {
+          await savePolicyState(config.policyFile, nextState);
+          await clearPending(config);
+          await clearCryptoPolicyToken(config);
+          return [
+            `Policy updated to v${nextState.version}. ${pending.reason}`,
+            "Crypto policy token issuance failed, so the cached token was cleared.",
+            "Active policy is now empty default-deny; tool execution will fail closed until /armor policy rebind succeeds.",
+            `Reason: ${cryptoResult.error}`
+          ].join("\n");
+        }
+        return `Policy update blocked: crypto policy token issuance failed, so the active policy was not changed. Reason: ${cryptoResult.error}`;
+      }
+      cryptoNote = cryptoResult.note;
+
+      await savePolicyState(config.policyFile, nextState);
       if (parsed.saveAs) {
         const saved = await saveProfile(config, parsed.saveAs, "", nextState.policy);
         profileNote = ` Profile "${parsed.saveAs}" saved (v${saved.version}).`;
       }
       await clearPending(config);
-
-      // Crypto integrity: issue signed policy token after every confirm
-      let cryptoNote = "";
-      if (config.cryptoPolicyEnabled) {
-        try {
-          const { createCryptoPolicyService } = await import("./crypto-policy.mjs");
-          const cryptoService = createCryptoPolicyService(config);
-          await cryptoService.issuePolicyToken(nextState, {
-            userId: config.userId,
-            agentId: config.agentId,
-            contextId: config.contextId
-          });
-          cryptoNote = " Crypto policy token issued.";
-        } catch {
-          cryptoNote = " (crypto token issuance failed — policy still applied)";
-        }
-      }
 
       // OPA mode: push compiled bundle to backend
       if (config.enforcementEngine === "opa" && config.apiKey) {
@@ -923,11 +1375,12 @@ export async function handleArmorPolicyCommand(prompt, config) {
 
     case "profile-save": {
       const state = await loadPolicyState(config.policyFile);
-      if (!state.policy.rules.length) {
+      const statementCount = normalizePolicyIr(state.policy).statements.length;
+      if (!statementCount) {
         return "Cannot save empty policy as profile. Add rules first.";
       }
       const saved = await saveProfile(config, parsed.name, "", state.policy);
-      return `Profile "${parsed.name}" saved (v${saved.version}, ${state.policy.rules.length} rules).`;
+      return `Profile "${parsed.name}" saved (v${saved.version}, ${statementCount} statements).`;
     }
 
     case "profile-switch": {
@@ -938,15 +1391,12 @@ export async function handleArmorPolicyCommand(prompt, config) {
         return `Profile not found: ${parsed.name}\nAvailable: ${names || "(none)"}`;
       }
       const state = await loadPolicyState(config.policyFile);
-      const profilePolicy = profile.policy?.schemaVersion
-        ? normalizePolicyIr(profile.policy)
-        : policyFromRules(profile.policy.rules, state, parsed.name);
-      const profileRules = policyIrToLegacyRules(profilePolicy);
-      const pending = await stagePending(config, state, state.policy.rules, profileRules, `switch to profile "${parsed.name}"`, profilePolicy, { type: "deterministic" });
+      const profilePolicy = normalizePolicyIr(profile.policy);
+      const pending = await stagePending(config, state, profilePolicy, `switch to profile "${parsed.name}"`, { type: "deterministic" });
       return formatProposal(
         pending,
-        state.policy.rules,
-        profileRules,
+        state.policy,
+        profilePolicy,
         `Proposed: switch to profile "${profile.profile.name}" — ${profile.profile.description || "(no description)"}`
       );
     }
@@ -973,8 +1423,8 @@ export async function handleArmorPolicyCommand(prompt, config) {
       if (!result.profiles.length) return "No org profiles found on backend.";
       let saved = 0;
       for (const p of result.profiles) {
-        if (p?.profile?.name && p?.policy?.rules) {
-          await saveProfile(config, p.profile.name, p.profile.description || "", p.policy.rules);
+        if (p?.profile?.name && p?.policy) {
+          await saveProfile(config, p.profile.name, p.profile.description || "", p.policy);
           saved++;
         }
       }
@@ -1018,21 +1468,19 @@ export async function handleArmorPolicyCommand(prompt, config) {
   }
 }
 
-async function stagePending(config, state, currentRules, proposedRules, reason, proposedPolicy = null, source = { type: "deterministic" }) {
-  const policy = proposedPolicy || policyFromRules(proposedRules, state);
-  const patch = jsonPatchForRules(currentRules, proposedRules);
+async function stagePending(config, state, proposedPolicy, reason, source = { type: "deterministic" }) {
+  const policy = normalizePolicyIr(proposedPolicy);
+  const patch = jsonPatchForPolicy(state.policy, policy);
   const pending = {
     proposalId: proposalId(),
     stagedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + PROPOSAL_TTL_MS).toISOString(),
     baseVersion: Number.isFinite(state.version) ? state.version : 0,
+    basePolicyHash: canonicalPolicyHash(state.policy),
     reason,
     source,
-    currentRules,
-    proposedRules,
     proposedPolicy: policy,
     patch,
-    proposedRulesHash: hashJson(proposedRules),
     proposalHash: hashJson(policy)
   };
   await writeJson(pendingPath(config), pending);

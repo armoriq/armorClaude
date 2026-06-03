@@ -2,7 +2,7 @@ import path from "node:path";
 import { mkdir, readdir, unlink } from "node:fs/promises";
 import { readJson, writeJson } from "./fs-store.mjs";
 import { POLICY_TEMPLATES } from "./policy-templates.mjs";
-import { legacyRulesToPolicyIr, normalizePolicyIr, policyIrToLegacyRules } from "./policy-ir.mjs";
+import { legacyRulesToPolicyIr, normalizePolicyIr } from "./policy-ir.mjs";
 
 function profilesDir(config) {
   return path.join(config.dataDir, "profiles");
@@ -22,8 +22,7 @@ export async function seedBuiltinProfiles(config) {
     const filePath = profilePath(config, key);
     const existing = await readJson(filePath, null);
     if (existing) continue;
-    const policy = legacyRulesToPolicyIr(tmpl.rules, { name: key, description: tmpl.description }, { decision: "deny" });
-    const rules = policyIrToLegacyRules(policy);
+    const policy = normalizePolicyIr(tmpl.policy);
     await writeJson(filePath, {
       profile: {
         name: key,
@@ -33,10 +32,26 @@ export async function seedBuiltinProfiles(config) {
         orgId: "local"
       },
       version: 1,
-      policy: { ...policy, rules },
-      rules
+      policy
     });
   }
+}
+
+function normalizeProfileData(data, fallbackName = "profile") {
+  if (!data?.profile?.name) return null;
+  const description = data.profile.description || "";
+  const policy = data.policy?.schemaVersion
+    ? normalizePolicyIr(data.policy)
+    : legacyRulesToPolicyIr(
+        Array.isArray(data.policy?.rules) ? data.policy.rules : Array.isArray(data.rules) ? data.rules : [],
+        { name: data.profile.name || fallbackName, description },
+        { decision: "deny" }
+      );
+  return {
+    profile: data.profile,
+    version: data.version || 1,
+    policy
+  };
 }
 
 export async function listProfiles(config) {
@@ -52,8 +67,9 @@ export async function listProfiles(config) {
   for (const f of files) {
     if (!f.endsWith(".json")) continue;
     const data = await readJson(path.join(dir, f), null);
-    if (data?.profile?.name) {
-      profiles.push(data);
+    const normalized = normalizeProfileData(data, f.replace(/\.json$/, ""));
+    if (normalized) {
+      profiles.push(normalized);
     }
   }
   return profiles;
@@ -61,17 +77,21 @@ export async function listProfiles(config) {
 
 export async function loadProfile(config, name) {
   await seedBuiltinProfiles(config);
-  return readJson(profilePath(config, name), null);
+  const data = await readJson(profilePath(config, name), null);
+  const normalized = normalizeProfileData(data, name);
+  if (normalized && JSON.stringify(normalized) !== JSON.stringify(data)) {
+    await writeJson(profilePath(config, name), normalized);
+  }
+  return normalized;
 }
 
-export async function saveProfile(config, name, description, rulesOrPolicy) {
+export async function saveProfile(config, name, description, policyLike) {
   await ensureProfilesDir(config);
   const existing = await readJson(profilePath(config, name), null);
   const version = existing ? (existing.version || 0) + 1 : 1;
-  const policy = rulesOrPolicy?.schemaVersion
-    ? normalizePolicyIr(rulesOrPolicy)
-    : legacyRulesToPolicyIr(Array.isArray(rulesOrPolicy) ? rulesOrPolicy : [], { name, description }, { decision: "deny" });
-  const rules = policyIrToLegacyRules(policy);
+  const policy = policyLike?.schemaVersion
+    ? normalizePolicyIr(policyLike)
+    : legacyRulesToPolicyIr(Array.isArray(policyLike) ? policyLike : policyLike?.rules || [], { name, description }, { decision: "deny" });
   const data = {
     profile: {
       name,
@@ -82,8 +102,7 @@ export async function saveProfile(config, name, description, rulesOrPolicy) {
       orgId: "local"
     },
     version,
-    policy: { ...policy, rules },
-    rules
+    policy
   };
   await writeJson(profilePath(config, name), data);
   return data;

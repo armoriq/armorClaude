@@ -58,10 +58,22 @@ export async function evaluateOpa(config, opaInput) {
       return { allowed: false, reason: "OPA returned empty result — fail-closed" };
     }
 
+    const decisionText = typeof result.decision === "string" ? result.decision.toLowerCase() : "";
+    const requiresApproval =
+      result.ask === true ||
+      result.hold === true ||
+      result.require_approval === true ||
+      ["ask", "hold", "require_approval", "require-approval"].includes(decisionText);
+    const matchedPolicy = result.matched_policy || null;
     const decision = {
-      allowed: result.allow === true,
-      reason: result.allow ? "opa_allow" : (result.reason || "opa_deny"),
-      matchedPolicy: result.matched_policy || null
+      allowed: requiresApproval ? false : result.allow === true,
+      reason: requiresApproval
+        ? (result.reason || "OPA policy requires approval")
+        : result.allow ? "opa_allow" : (result.reason || "opa_deny"),
+      matchedPolicy,
+      matchedRule: requiresApproval
+        ? { id: matchedPolicy || "opa-require-approval", effect: "require_approval" }
+        : null
     };
 
     cache.set(cacheKey, { decision, expiresAt: Date.now() + cacheTtl });

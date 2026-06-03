@@ -150,9 +150,9 @@ scripts/
 
 ## Policy Authoring UX
 
-Policy mutation is deliberately outside Claude's tool path. The primary human command is `/armor policy ...`; `/armor-policy ...` remains as a legacy alias. These commands are consumed by the `UserPromptSubmit` hook with `blockPrompt()`, so Claude's LLM never receives the mutation request.
+Policy mutation is deliberately outside Claude's tool path. The primary human command is `/armor policy ...`; `/armor policy ...` remains as a legacy alias. These commands are consumed by the `UserPromptSubmit` hook with `blockPrompt()`, so Claude's LLM never receives the mutation request.
 
-The plugin skill path is non-authoritative. If a tab-completed `/armorclaude:armor-policy` skill expansion is attempted, `UserPromptExpansion` blocks it and points the user back to `/armor policy ...`. The skill file itself is help-only and must not mutate policy.
+The plugin skill path is non-authoritative. If a tab-completed `/armorclaude:armor` skill expansion is attempted, `UserPromptExpansion` blocks it and points the user back to `/armor policy ...`. The skill file itself is help-only and must not mutate policy.
 
 Natural-language policy additions are parsed deterministically by the hook, for example:
 

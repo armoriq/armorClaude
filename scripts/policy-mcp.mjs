@@ -77,15 +77,15 @@ async function run() {
     async (args) => {
       const { state } = await loadStateAndConfig();
       if (typeof args.id === "string" && args.id.trim()) {
-        const rule = state.policy.rules.find((entry) => entry.id === args.id.trim());
-        if (!rule) {
-          return toTextResult(`Policy rule not found: ${args.id}`);
+        const statement = state.policy.statements.find((entry) => entry.id === args.id.trim());
+        if (!statement) {
+          return toTextResult(`Policy statement not found: ${args.id}`);
         }
-        return toTextResult(JSON.stringify(rule, null, 2), { rule });
+        return toTextResult(JSON.stringify(statement, null, 2), { statement });
       }
       return toTextResult(JSON.stringify(state, null, 2), {
         version: state.version,
-        rules: state.policy.rules
+        policy: state.policy
       });
     }
   );

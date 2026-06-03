@@ -117,8 +117,9 @@ test("compilePolicyForBundle produces bundle format", () => {
     { id: "p1", action: "deny", tool: "Bash" },
     { id: "p2", action: "allow", tool: "*" }
   ]);
-  assert.equal(bundle.rules.length, 2);
-  assert.equal(bundle.format, "armorclaude-v1");
+  assert.equal(bundle.statements.length, 2);
+  assert.equal(bundle.rules, undefined);
+  assert.equal(bundle.format, "armorclaude-ir-v1");
   assert.ok(bundle.compiledAt);
 });
 
@@ -171,6 +172,34 @@ test("evaluateOpa returns deny on OPA deny", async () => {
     );
     assert.equal(result.allowed, false);
     assert.ok(result.reason.includes("blocked_by_policy"));
+  } finally {
+    server.close();
+  }
+});
+
+test("evaluateOpa maps OPA hold decision to native approval", async () => {
+  const { server, url } = await startMockOpa((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      result: {
+        decision: "hold",
+        reason: "opa_hold_bash",
+        matched_policy: "hold-bash"
+      }
+    }));
+  });
+  try {
+    resetOpaClientState();
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "opa-test-"));
+    const config = buildConfig(tmp, { enforcementEngine: "opa", opaPdpUrl: url });
+    await seedPolicy(config, [{ id: "h1", action: "require_approval", tool: "Bash" }]);
+
+    const output = await handlePreToolUse(
+      { hook_event_name: "PreToolUse", session_id: "opa-hold", tool_name: "Bash", tool_input: { command: "ls" } },
+      config
+    );
+    assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
+    assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /opa_hold_bash/);
   } finally {
     server.close();
   }
@@ -291,42 +320,42 @@ test("handlePreToolUse falls back to local when OPA URL not set even if engine=o
 });
 
 // ---------------------------------------------------------------------------
-// /armor-policy settings commands
+// /armor policy settings commands
 // ---------------------------------------------------------------------------
 
-test("/armor-policy settings shows current config", async () => {
+test("/armor policy settings shows current config", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "opa-test-"));
   const config = buildConfig(tmp);
-  const out = await handleArmorPolicyCommand("/armor-policy settings", config);
+  const out = await handleArmorPolicyCommand("/armor policy settings", config);
   assert.ok(out.includes("Enforcement engine"));
   assert.ok(out.includes("local"));
   assert.ok(out.includes("MCP deny-by-default"));
 });
 
-test("/armor-policy settings enforcement opa without URL returns error", async () => {
+test("/armor policy settings enforcement opa without URL returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "opa-test-"));
   const config = buildConfig(tmp);
-  const out = await handleArmorPolicyCommand("/armor-policy settings enforcement opa", config);
+  const out = await handleArmorPolicyCommand("/armor policy settings enforcement opa", config);
   assert.ok(out.includes("Cannot switch"));
 });
 
-test("/armor-policy settings enforcement local succeeds", async () => {
+test("/armor policy settings enforcement local succeeds", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "opa-test-"));
   const config = buildConfig(tmp);
-  const out = await handleArmorPolicyCommand("/armor-policy settings enforcement local", config);
+  const out = await handleArmorPolicyCommand("/armor policy settings enforcement local", config);
   assert.ok(out.includes("local"));
 });
 
-test("/armor-policy settings enforcement opa with URL succeeds", async () => {
+test("/armor policy settings enforcement opa with URL succeeds", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "opa-test-"));
   const config = buildConfig(tmp, { opaPdpUrl: "http://localhost:8181" });
-  const out = await handleArmorPolicyCommand("/armor-policy settings enforcement opa", config);
+  const out = await handleArmorPolicyCommand("/armor policy settings enforcement opa", config);
   assert.ok(out.includes("opa"));
 });
 
-test("/armor-policy settings unknown returns help", async () => {
+test("/armor policy settings unknown returns help", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "opa-test-"));
   const config = buildConfig(tmp);
-  const out = await handleArmorPolicyCommand("/armor-policy settings blah", config);
+  const out = await handleArmorPolicyCommand("/armor policy settings blah", config);
   assert.ok(out.includes("Unknown setting"));
 });

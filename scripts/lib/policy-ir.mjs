@@ -46,6 +46,31 @@ const KNOWN_TOOLS = new Set([
   "TodoWrite",
   "ExitPlanMode"
 ]);
+const LEGACY_BASH_PROGRAMS = new Set([
+  "awk",
+  "cat",
+  "curl",
+  "find",
+  "grep",
+  "head",
+  "jq",
+  "less",
+  "lf",
+  "ls",
+  "lsof",
+  "nc",
+  "netstat",
+  "nmap",
+  "sed",
+  "ss",
+  "tail",
+  "tree",
+  "psql",
+  "gcloud",
+  "kubectl",
+  "aws",
+  "az"
+]);
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -71,27 +96,44 @@ function actionValue(action) {
   return [];
 }
 
+function selectorForValues(values) {
+  const clean = values.filter((value) => typeof value === "string" && value.trim());
+  if (clean.length === 1) return { type: "tool", eq: clean[0] };
+  return { type: "tool", in: clean };
+}
+
+function safeToolSuffix(tool) {
+  return String(tool).replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
 function normalizeLegacyAction(action) {
   if (action === "deny") return "forbid";
   if (action === "require_approval") return "require_approval";
   return "permit";
 }
 
-function legacyAction(effect) {
-  if (effect === "forbid") return "deny";
-  if (effect === "require_approval") return "require_approval";
-  return "allow";
-}
-
 export function legacyRulesToPolicyIr(rules = [], metadata = {}, defaults = {}) {
-  const statements = (Array.isArray(rules) ? rules : []).map((rule, idx) => ({
-    id: typeof rule.id === "string" && rule.id ? rule.id : `policy${idx + 1}`,
-    effect: normalizeLegacyAction(rule.action),
-    principal: { type: "agent", id: "claude-code" },
-    action: { type: "tool", eq: typeof rule.tool === "string" && rule.tool ? rule.tool : "*" },
-    resource: { type: "workspace", scope: "current" },
-    conditions: []
-  }));
+  const statements = (Array.isArray(rules) ? rules : []).map((rule, idx) => {
+    const tool = typeof rule.tool === "string" && rule.tool ? rule.tool : "*";
+    const effect = normalizeLegacyAction(rule.action);
+    const program = tool.trim().toLowerCase();
+    const isBashProgram = isLegacyBashProgramTool(tool);
+    return {
+      id: typeof rule.id === "string" && rule.id ? rule.id : `policy${idx + 1}`,
+      effect,
+      principal: { type: "agent", id: "claude-code" },
+      action: { type: "tool", eq: isBashProgram ? "Bash" : tool },
+      resource: { type: "workspace", scope: "current" },
+      conditions: isBashProgram
+        ? [
+            { field: "bash.program", op: "in", value: [program] },
+            ...(effect === "permit"
+              ? [{ field: "bash.hasWriteRedirection", op: "eq", value: false }]
+              : [])
+          ]
+        : []
+    };
+  });
   return normalizePolicyIr({
     schemaVersion: POLICY_IR_VERSION,
     kind: "PolicyProfile",
@@ -104,22 +146,6 @@ export function legacyRulesToPolicyIr(rules = [], metadata = {}, defaults = {}) 
       conflictResolution: "deny_overrides"
     },
     statements
-  });
-}
-
-export function policyIrToLegacyRules(policy) {
-  const normalized = normalizePolicyIr(policy);
-  return normalized.statements.flatMap((statement) => {
-    const values = actionValue(statement.action);
-    const tools = values.length ? values : ["*"];
-    return tools.map((tool, idx) => ({
-      id: tools.length === 1 ? statement.id : `${statement.id}-${tool.replace(/[^A-Za-z0-9_-]/g, "_") || idx + 1}`,
-      action: legacyAction(statement.effect),
-      tool
-    }));
-  }).sort((a, b) => {
-    const rank = { deny: 0, require_approval: 1, allow: 2 };
-    return (rank[a.action] ?? 9) - (rank[b.action] ?? 9);
   });
 }
 
@@ -139,11 +165,101 @@ export function normalizePolicyIr(policyLike) {
         decision: DEFAULT_DECISIONS.has(defaults.decision) ? defaults.decision : "deny",
         conflictResolution: "deny_overrides"
       },
-      statements: statements.map((statement, idx) => normalizeStatement(statement, idx))
+      statements: compactPolicyStatements(statements.flatMap((statement, idx) => normalizeStatementGroup(statement, idx)))
     };
   }
   const legacyRules = Array.isArray(policyLike?.rules) ? policyLike.rules : [];
   return legacyRulesToPolicyIr(legacyRules);
+}
+
+function isLegacyBashProgramTool(value) {
+  return !KNOWN_TOOLS.has(value) && LEGACY_BASH_PROGRAMS.has(normalizeToolName(value));
+}
+
+function hasCondition(conditions, field, op) {
+  return conditions.some((condition) => condition?.field === field && condition?.op === op);
+}
+
+function normalizeStatementGroup(statement, idx) {
+  const normalized = normalizeStatement(statement, idx);
+  if (normalized.action.type !== "tool") return [normalized];
+  const values = actionValue(normalized.action);
+  const bashPrograms = values.filter(isLegacyBashProgramTool).map((value) => normalizeToolName(value));
+  if (!bashPrograms.length) return [normalized];
+
+  const toolValues = values.filter((value) => !isLegacyBashProgramTool(value));
+  const repairedBash = {
+    ...normalized,
+    id: toolValues.length ? `${normalized.id}-bash-programs` : normalized.id,
+    action: { type: "tool", eq: "Bash" },
+    conditions: [
+      ...normalized.conditions,
+      { field: "bash.program", op: "in", value: [...new Set(bashPrograms)] },
+      ...(normalized.effect === "permit" && !hasCondition(normalized.conditions, "bash.hasWriteRedirection", "eq")
+        ? [{ field: "bash.hasWriteRedirection", op: "eq", value: false }]
+        : [])
+    ]
+  };
+  if (!toolValues.length) return [repairedBash];
+  return [
+    {
+      ...normalized,
+      action: selectorForValues(toolValues)
+    },
+    repairedBash
+  ];
+}
+
+function compactKey(statement, baseId) {
+  return JSON.stringify({
+    id: baseId,
+    effect: statement.effect,
+    principal: statement.principal,
+    resource: statement.resource,
+    conditions: statement.conditions
+  });
+}
+
+function splitToolStatementBase(statement) {
+  if (statement.action?.type !== "tool" || typeof statement.action?.eq !== "string") return null;
+  const tool = statement.action.eq;
+  if (!KNOWN_TOOLS.has(tool) || tool === "*" || tool === "Bash") return null;
+  const suffix = `-${safeToolSuffix(tool)}`;
+  if (!statement.id.endsWith(suffix)) return null;
+  return statement.id.slice(0, -suffix.length);
+}
+
+function compactPolicyStatements(statements) {
+  const out = [];
+  const groups = new Map();
+  for (const statement of statements) {
+    const baseId = splitToolStatementBase(statement);
+    if (!baseId) {
+      out.push(statement);
+      continue;
+    }
+    const key = compactKey(statement, baseId);
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        index: out.length,
+        baseId,
+        statement,
+        tools: []
+      };
+      groups.set(key, group);
+      out.push(null);
+    }
+    group.tools.push(statement.action.eq);
+  }
+  for (const group of groups.values()) {
+    out[group.index] = {
+      ...group.statement,
+      id: group.baseId,
+      action: selectorForValues([...new Set(group.tools)])
+    };
+  }
+  return out.filter(Boolean);
 }
 
 function normalizeStatement(statement, idx) {

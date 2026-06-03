@@ -6,7 +6,6 @@ import {
   legacyRulesToPolicyIr,
   normalizePolicyIr,
   parseBashCommand,
-  policyIrToLegacyRules,
   validatePolicyIr
 } from "../scripts/lib/policy-ir.mjs";
 import { compilePolicyForSdkIntent, compilePolicyIrForOpaData, compileToOpaInput } from "../scripts/lib/policy-compiler.mjs";
@@ -65,16 +64,93 @@ test("validatePolicyIr rejects unknown fields and operators", () => {
   assert.ok(result.errors.some((e) => e.includes("Unknown condition op")));
 });
 
-test("legacy rules migrate to IR and back", () => {
+test("legacy rules migrate to IR as one-time compatibility input", () => {
   const ir = legacyRulesToPolicyIr([
     { id: "p1", action: "deny", tool: "Write" },
     { id: "p2", action: "require_approval", tool: "Bash" }
   ]);
   assert.equal(ir.schemaVersion, "armor.policy.v1");
   assert.equal(ir.statements[0].effect, "forbid");
-  assert.deepEqual(policyIrToLegacyRules(ir), [
-    { id: "p1", action: "deny", tool: "Write" },
-    { id: "p2", action: "require_approval", tool: "Bash" }
+  assert.equal(ir.statements[0].action.eq, "Write");
+  assert.equal(ir.statements[1].effect, "require_approval");
+  assert.equal(ir.statements[1].action.eq, "Bash");
+});
+
+test("legacy bare Bash program rules migrate to Bash program conditions", () => {
+  const ir = legacyRulesToPolicyIr([
+    { id: "legacy-ls", action: "allow", tool: "ls" },
+    { id: "legacy-gcloud", action: "deny", tool: "gcloud" }
+  ]);
+  assert.deepEqual(ir.statements[0], {
+    id: "legacy-ls",
+    effect: "permit",
+    principal: { type: "agent", id: "claude-code" },
+    action: { type: "tool", eq: "Bash" },
+    resource: { type: "workspace", scope: "current" },
+    conditions: [
+      { field: "bash.program", op: "in", value: ["ls"] },
+      { field: "bash.hasWriteRedirection", op: "eq", value: false }
+    ]
+  });
+  assert.deepEqual(ir.statements[1], {
+    id: "legacy-gcloud",
+    effect: "forbid",
+    principal: { type: "agent", id: "claude-code" },
+    action: { type: "tool", eq: "Bash" },
+    resource: { type: "workspace", scope: "current" },
+    conditions: [
+      { field: "bash.program", op: "in", value: ["gcloud"] }
+    ]
+  });
+});
+
+test("normalizePolicyIr repairs stale split tool statements and Bash program tools", () => {
+  const repaired = normalizePolicyIr({
+    schemaVersion: "armor.policy.v1",
+    kind: "PolicyProfile",
+    metadata: { name: "stale", description: "" },
+    defaults: { decision: "deny", conflictResolution: "deny_overrides" },
+    statements: [
+      {
+        id: "allow-read-tools-Read",
+        effect: "permit",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "Read" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: []
+      },
+      {
+        id: "allow-read-tools-Grep",
+        effect: "permit",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "Grep" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: []
+      },
+      {
+        id: "allow-read-tools-Glob",
+        effect: "permit",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "Glob" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: []
+      },
+      {
+        id: "policy1",
+        effect: "permit",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "ls" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: []
+      }
+    ]
+  });
+  assert.deepEqual(repaired.statements[0].action, { type: "tool", in: ["Read", "Grep", "Glob"] });
+  assert.equal(repaired.statements[0].id, "allow-read-tools");
+  assert.equal(repaired.statements[1].action.eq, "Bash");
+  assert.deepEqual(repaired.statements[1].conditions, [
+    { field: "bash.program", op: "in", value: ["ls"] },
+    { field: "bash.hasWriteRedirection", op: "eq", value: false }
   ]);
 });
 
@@ -143,16 +219,11 @@ test("compilePolicyForSdkIntent emits CSRG path allow and tool metadata", () => 
   assert.equal(compiled.metadata.policyHash, "hash-123");
 });
 
-test("compileToOpaInput expands IR multi-tool statements for OPA compatibility", () => {
+test("compileToOpaInput preserves IR statements and emits OPA clientRule envelope", () => {
   const input = compileToOpaInput(samplePolicy(), "Grep", {});
   const allowedTools = input.policies.flatMap((policy) => policy.clientRule.allowedTools);
   assert.ok(allowedTools.includes("Read"));
   assert.ok(allowedTools.includes("Grep"));
   assert.ok(allowedTools.includes("Glob"));
-});
-
-test("policyIrToLegacyRules orders deny before allow for fail-closed compatibility", () => {
-  const rules = policyIrToLegacyRules(samplePolicy());
-  assert.equal(rules[0].action, "deny");
-  assert.equal(rules[0].tool, "Bash");
+  assert.equal(input.policy.statements.length, 3);
 });

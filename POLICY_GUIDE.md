@@ -39,10 +39,28 @@ Apply a proposal:
 /armor policy confirm <proposal-id>
 ```
 
+Or use the short approval command:
+
+```text
+/armor yes
+```
+
 Discard a proposal:
 
 ```text
 /armor policy cancel <proposal-id>
+```
+
+Or use the short discard command:
+
+```text
+/armor no
+```
+
+If ArmorClaude says the crypto policy token does not match the current policy, reissue the binding:
+
+```text
+/armor policy rebind
 ```
 
 Save the current policy as a reusable profile:
@@ -71,6 +89,8 @@ Changes:
 + require approval for Bash
 
 Next:
+  /armor yes
+  /armor no
   /armor policy confirm pol_1234abcd
   /armor policy cancel pol_1234abcd
 ```
@@ -161,6 +181,10 @@ A policy diff looks like:
 `forbid` means blocked.
 
 `require approval` means Claude must ask before using it.
+
+When a tool is controlled by `hold` or `require approval`, ArmorClaude returns Claude Code's native approval prompt for that tool call after the policy, intent, and verification checks pass. You can approve or reject the tool call in Claude Code's normal permission UI.
+
+Unknown MCP servers also ask in Claude Code's normal permission UI for one tool call. To trust the server for future calls, approve it with `/armor mcp approve <server>`.
 
 ## Recommended Starter Policies
 

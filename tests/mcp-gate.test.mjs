@@ -122,7 +122,7 @@ test("listMcpServers returns all registered servers", () => {
 // PreToolUse: MCP deny-by-default
 // ---------------------------------------------------------------------------
 
-test("handlePreToolUse denies unknown external MCP tool", async () => {
+test("handlePreToolUse asks before running an unknown external MCP tool", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "mcp-gate-test-"));
   const config = buildConfig(tmp);
   const output = await handlePreToolUse(
@@ -134,9 +134,9 @@ test("handlePreToolUse denies unknown external MCP tool", async () => {
     },
     config
   );
-  assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
+  assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
   assert.ok(output?.hookSpecificOutput?.permissionDecisionReason?.includes("not approved"));
-  assert.ok(output?.hookSpecificOutput?.permissionDecisionReason?.includes("/armor-policy mcp approve"));
+  assert.ok(output?.hookSpecificOutput?.permissionDecisionReason?.includes("/armor mcp approve"));
 });
 
 test("handlePreToolUse denies explicitly denied MCP server", async () => {
@@ -243,43 +243,43 @@ test("MCP gate is disabled when mcpDenyByDefault is false", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// /armor-policy mcp commands
+// /armor policy mcp commands
 // ---------------------------------------------------------------------------
 
-test("/armor-policy mcp list shows no servers initially", async () => {
+test("/armor policy mcp list shows no servers initially", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "mcp-gate-test-"));
   const config = buildConfig(tmp);
-  const out = await handleArmorPolicyCommand("/armor-policy mcp list", config);
+  const out = await handleArmorPolicyCommand("/armor policy mcp list", config);
   assert.ok(out.includes("No MCP servers"));
 });
 
-test("/armor-policy mcp approve + list shows approved server", async () => {
+test("/armor policy mcp approve + list shows approved server", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "mcp-gate-test-"));
   const config = buildConfig(tmp);
-  const approveOut = await handleArmorPolicyCommand("/armor-policy mcp approve github", config);
+  const approveOut = await handleArmorPolicyCommand("/armor policy mcp approve github", config);
   assert.ok(approveOut.includes("approved"));
 
-  const listOut = await handleArmorPolicyCommand("/armor-policy mcp list", config);
+  const listOut = await handleArmorPolicyCommand("/armor policy mcp list", config);
   assert.ok(listOut.includes("github"));
   assert.ok(listOut.includes("approved"));
 });
 
-test("/armor-policy mcp deny blocks server", async () => {
+test("/armor policy mcp deny blocks server", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "mcp-gate-test-"));
   const config = buildConfig(tmp);
-  const denyOut = await handleArmorPolicyCommand("/armor-policy mcp deny evil-server", config);
+  const denyOut = await handleArmorPolicyCommand("/armor policy mcp deny evil-server", config);
   assert.ok(denyOut.includes("denied"));
 
-  const listOut = await handleArmorPolicyCommand("/armor-policy mcp list", config);
+  const listOut = await handleArmorPolicyCommand("/armor policy mcp list", config);
   assert.ok(listOut.includes("evil-server"));
   assert.ok(listOut.includes("denied"));
 });
 
-test("end-to-end: deny → approve → tool allowed", async () => {
+test("end-to-end: unknown MCP asks → approve → tool allowed", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "mcp-gate-test-"));
   const config = buildConfig(tmp);
 
-  const deny1 = await handlePreToolUse(
+  const ask1 = await handlePreToolUse(
     {
       hook_event_name: "PreToolUse",
       session_id: "e2e-1",
@@ -288,9 +288,9 @@ test("end-to-end: deny → approve → tool allowed", async () => {
     },
     config
   );
-  assert.equal(deny1?.hookSpecificOutput?.permissionDecision, "deny");
+  assert.equal(ask1?.hookSpecificOutput?.permissionDecision, "ask");
 
-  await handleArmorPolicyCommand("/armor-policy mcp approve github", config);
+  await handleArmorPolicyCommand("/armor policy mcp approve github", config);
 
   const allow = await handlePreToolUse(
     {

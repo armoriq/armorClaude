@@ -73,12 +73,12 @@ Proposed policy change:
 Confirm it:
 
 ```
-/armor policy confirm
+/armor yes
 ```
 
 From now on, every WebFetch call is denied at the `PreToolUse` hook — regardless of whether it was in the plan.
 
-List rules:
+List the active policy:
 
 ```
 /armor policy list

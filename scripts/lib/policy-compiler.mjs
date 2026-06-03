@@ -1,33 +1,59 @@
-import { normalizePolicyIr, policyIrToLegacyRules } from "./policy-ir.mjs";
+import { legacyRulesToPolicyIr, normalizePolicyIr } from "./policy-ir.mjs";
 
 /**
- * ArmorClaude rules → OPA input mapper.
- * Subset of conmap-auto/src/policies/compiler/opa-target-compiler.ts logic.
+ * ArmorClaude IR -> OPA input mapper.
  *
- * Converts ArmorClaude policy rules into the OPA input format expected
- * by armoriq-opa/bundles/armoriq/armoriq.rego.
+ * OPA receives canonical statements plus a compatibility clientRule envelope
+ * for existing rego bundles that still read allowedTools/blockedTools. The
+ * source data remains the IR statement.
  */
 
-export function compileToOpaInput(rules, toolName, toolParams) {
-  const legacyRules = Array.isArray(rules) ? rules : policyIrToLegacyRules(normalizePolicyIr(rules));
-  const policies = legacyRules.map((rule, idx) => ({
-    policyId: rule.id,
-    policyName: rule.id,
+function policyFromInput(policy) {
+  return Array.isArray(policy) ? legacyRulesToPolicyIr(policy) : normalizePolicyIr(policy);
+}
+
+function actionValues(action) {
+  if (typeof action?.eq === "string") return [action.eq];
+  if (Array.isArray(action?.in)) return action.in.filter((entry) => typeof entry === "string");
+  return ["*"];
+}
+
+function legacyAction(effect) {
+  if (effect === "forbid") return "block";
+  if (effect === "require_approval") return "hold";
+  return "allow";
+}
+
+function clientRuleForStatement(statement) {
+  const tools = actionValues(statement.action);
+  const blockedTools = statement.effect === "forbid" ? tools : [];
+  const allowedTools = statement.effect === "forbid" ? [] : tools;
+  return {
+    allowedTools,
+    blockedTools,
+    enforcementAction: legacyAction(statement.effect),
+    conditions: statement.conditions,
+    resource: statement.resource
+  };
+}
+
+export function compileToOpaInput(policy, toolName, toolParams) {
+  const ir = policyFromInput(policy);
+  const policies = ir.statements.map((statement, idx) => ({
+    policyId: statement.id,
+    policyName: statement.id,
     priority: idx + 1,
-    clientRule: {
-      allowedTools: rule.tool === "*"
-        ? (rule.action === "deny" ? [] : ["*"])
-        : (rule.action === "deny" ? [] : [rule.tool]),
-      blockedTools: rule.action === "deny" ? [rule.tool] : [],
-      enforcementAction: rule.action === "deny" ? "block"
-        : rule.action === "require_approval" ? "hold"
-        : "allow",
-      dataClassRestrictions: rule.dataClass ? [rule.dataClass] : []
-    }
+    statement,
+    clientRule: clientRuleForStatement(statement)
   }));
 
   return {
     policies,
+    policy: {
+      schemaVersion: ir.schemaVersion,
+      defaults: ir.defaults,
+      statements: ir.statements
+    },
     context: {
       timestamp: new Date().toISOString()
     },
@@ -42,23 +68,8 @@ export function compileToOpaInput(rules, toolName, toolParams) {
   };
 }
 
-export function compilePolicyForBundle(rules) {
-  const legacyRules = Array.isArray(rules) ? rules : policyIrToLegacyRules(normalizePolicyIr(rules));
-  return {
-    rules: legacyRules.map((rule, idx) => ({
-      id: rule.id,
-      priority: idx + 1,
-      action: rule.action,
-      tool: rule.tool,
-      dataClass: rule.dataClass || null
-    })),
-    compiledAt: new Date().toISOString(),
-    format: "armorclaude-v1"
-  };
-}
-
-export function compilePolicyIrForOpaData(policy) {
-  const ir = normalizePolicyIr(policy);
+export function compilePolicyForBundle(policy) {
+  const ir = policyFromInput(policy);
   return {
     format: "armorclaude-ir-v1",
     schemaVersion: ir.schemaVersion,
@@ -68,33 +79,35 @@ export function compilePolicyIrForOpaData(policy) {
   };
 }
 
+export function compilePolicyIrForOpaData(policy) {
+  return compilePolicyForBundle(policy);
+}
+
 export function compilePolicyForSdkIntent(policy, policyHash = "") {
-  const legacyRules = Array.isArray(policy)
-    ? policy
-    : policyIrToLegacyRules(normalizePolicyIr(policy));
+  const ir = policyFromInput(policy);
   const allowedTools = [];
   const deniedTools = [];
-  for (const rule of legacyRules) {
-    if (!rule || typeof rule.tool !== "string" || !rule.tool.trim()) continue;
-    if (rule.action === "deny") {
-      deniedTools.push(rule.tool);
-    } else if (rule.action === "allow" || rule.action === "require_approval") {
-      allowedTools.push(rule.tool);
+  for (const statement of ir.statements) {
+    const values = actionValues(statement.action);
+    if (statement.effect === "forbid") {
+      deniedTools.push(...values);
+    } else if (statement.effect === "permit" || statement.effect === "require_approval") {
+      allowedTools.push(...values);
     }
   }
   return {
     // CSRG verifies Merkle paths like /steps/[0]/tool. ArmorClaude has
     // already evaluated the local IR before token minting, so the CSRG token
     // policy should authorize proof verification for the registered plan
-    // paths while carrying tool-level allowlists as metadata for backend/proxy
-    // policy layers.
+    // paths while carrying statement-level metadata for backend/proxy layers.
     allow: ["*"],
     deny: [],
     allowed_tools: uniqueStrings(allowedTools),
     denied_tools: uniqueStrings(deniedTools),
+    statements: ir.statements,
     metadata: {
       source: "armorclaude",
-      schemaVersion: "armor.policy.v1",
+      schemaVersion: ir.schemaVersion,
       policyHash
     }
   };

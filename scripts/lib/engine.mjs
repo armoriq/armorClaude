@@ -1,11 +1,5 @@
-import {
-  isPlainObject,
-  normalizeToolName,
-  nowEpochSeconds,
-  redactSecrets,
-  sanitizeParams,
-} from "./common.mjs";
-import { addPromptContext, blockPrompt, denyPreTool, denyPreToolWithHint } from "./hook-output.mjs";
+import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
+import { addPromptContext, askPreTool, blockPrompt, denyPreTool, denyPreToolWithHint } from "./hook-output.mjs";
 import { isArmorPolicyCommand, handleArmorPolicyCommand } from "./armor-policy-commands.mjs";
 import { getTemplateNames } from "./policy-templates.mjs";
 import {
@@ -55,6 +49,10 @@ const INTENT_POLICY_COMPILER_VERSION = "sdk-csrg-policy-v1";
 
 function shouldDeny(config) {
   return config.mode === "enforce";
+}
+
+function legacyArmorPolicyMessage() {
+  return "Legacy /armor-policy is intentionally unsupported. Use /armor policy ... instead.";
 }
 
 function mergeIntentIntoSession(session, intentResponse, config) {
@@ -210,6 +208,37 @@ function denyOrAllow(config, reason) {
   return null;
 }
 
+function policyDecisionRequiresApproval(policyDecision) {
+  const action = policyDecision?.matchedRule?.action;
+  const effect = policyDecision?.matchedRule?.effect;
+  return action === "require_approval" || effect === "require_approval";
+}
+
+async function evaluateConfiguredPolicy(config, policyState, toolName, toolInput) {
+  if (config.enforcementEngine === "opa" && config.opaPdpUrl) {
+    const opaInput = compileToOpaInput(policyState.policy, toolName, toolInput);
+    return await evaluateOpa(config, opaInput);
+  }
+  return evaluatePolicy({
+    policy: policyState.policy,
+    toolName,
+    toolParams: toolInput
+  });
+}
+
+function preToolPolicyOutput(policyDecision, toolName) {
+  if (policyDecisionRequiresApproval(policyDecision)) {
+    return askPreTool(
+      policyDecision.reason ||
+      `ArmorClaude policy requires your approval before running ${toolName}.`
+    );
+  }
+  if (!policyDecision.allowed) {
+    return denyPreTool(policyDecision.reason || "ArmorClaude policy denied");
+  }
+  return null;
+}
+
 function debugLog(config, message) {
   if (config.debug) {
     process.stderr.write(`[armorclaude] ${message}\n`);
@@ -358,15 +387,12 @@ export async function handleUserPromptExpansion(input, config) {
     return blockPrompt(response);
   }
   if (["armor-policy", "armorclaude:armor-policy"].includes(normalizedCommand)) {
-    const response = await handleArmorPolicyCommand(`/armor-policy ${commandArgs}`.trim(), config);
-    return blockPrompt(response);
+    return blockPrompt(legacyArmorPolicyMessage());
   }
 
   const serialized = JSON.stringify(input || {});
   if (/armorclaude:armor-policy|armor-policy/i.test(serialized)) {
-    return blockPrompt(
-      "ArmorClaude policy management is human-only. Use /armor policy ... so the secure UserPromptSubmit hook handles it."
-    );
+    return blockPrompt(legacyArmorPolicyMessage());
   }
   return null;
 }
@@ -378,10 +404,13 @@ export async function handleUserPromptSubmit(input, config) {
     return null;
   }
 
-  // --- /armor-policy commands: human-only, policy-immune ---
+  // --- /armor commands: human-only, policy-immune ---
   if (isArmorPolicyCommand(prompt)) {
     const response = await handleArmorPolicyCommand(prompt, config);
     return blockPrompt(response);
+  }
+  if (/^\s*\/(?:armor-policy|armorclaude:armor-policy)\b/i.test(prompt)) {
+    return blockPrompt(legacyArmorPolicyMessage());
   }
 
   // --- Store prompt in session ---
@@ -518,21 +547,30 @@ export async function handlePreToolUse(input, config) {
   // anything (rm -rf, curl, kill) and must continue through the full
   // pipeline. Same for Edit/Write/NotebookEdit (mutating) and any MCP tool
   // that isn't an ArmorClaude meta-tool (already handled above).
-  const safeInternalTools = new Set([
+  const coordinationTools = new Set([
     // Claude Code coordination (no side effects)
     "toolsearch",
     "todowrite",
     "listmcpresourcestool",
     "readmcpresourcetool",
-    "exitplanmode",
-    // Built-in read-only filesystem/network tools
+    "exitplanmode"
+  ]);
+  if (coordinationTools.has(norm)) {
+    return null;
+  }
+
+  const readOnlyPolicyTools = new Set([
     "read",
     "grep",
     "glob",
     "websearch",
     "webfetch",
   ]);
-  if (safeInternalTools.has(norm)) {
+  if (readOnlyPolicyTools.has(norm)) {
+    const safePolicyState = await loadPolicyState(config.policyFile);
+    const safePolicyDecision = await evaluateConfiguredPolicy(config, safePolicyState, toolName, toolInput);
+    const safePolicyOutput = preToolPolicyOutput(safePolicyDecision, toolName);
+    if (safePolicyOutput) return safePolicyOutput;
     return null;
   }
 
@@ -542,6 +580,7 @@ export async function handlePreToolUse(input, config) {
   // --- MCP deny-by-default gate ---
   // External MCP tools are denied until the user explicitly approves the server.
   // Skills (Anthropic-vetted) are allowed by default but tracked.
+  let mcpApprovalReason = "";
   if (config.mcpDenyByDefault !== false) {
     const identity = parseToolIdentity(toolName);
     if (identity.category === "external-mcp" || identity.category === "plugin-mcp") {
@@ -553,16 +592,15 @@ export async function handlePreToolUse(input, config) {
           await saveRuntimeState(config.runtimeFile, runtimeState);
           autoRegisterMcp(config, server).catch(() => {});
         }
-        return denyPreTool(
+        mcpApprovalReason =
           `ArmorClaude: MCP server "${server}" is not approved. ` +
-          `Type /armor-policy mcp approve ${server} to allow it, ` +
-          `or /armor-policy mcp deny ${server} to block it.`
-        );
+          "Approve this one tool call in Claude Code, or type " +
+          `/armor mcp approve ${server} to trust this server persistently.`;
       }
-      if (entry.status === "denied") {
+      if (entry?.status === "denied") {
         return denyPreTool(
           `ArmorClaude: MCP server "${server}" is denied by policy. ` +
-          `Type /armor-policy mcp approve ${server} to change this.`
+          `Type /armor policy mcp approve ${server} to change this.`
         );
       }
     }
@@ -691,18 +729,9 @@ export async function handlePreToolUse(input, config) {
   }
 
   // --- Policy evaluation: dispatch based on enforcement engine ---
-  let policyDecision;
-  if (config.enforcementEngine === "opa" && config.opaPdpUrl) {
-    const opaInput = compileToOpaInput(policyState.policy, toolName, toolInput);
-    policyDecision = await evaluateOpa(config, opaInput);
-  } else {
-    policyDecision = evaluatePolicy({
-      policy: policyState.policy,
-      toolName,
-      toolParams: toolInput
-    });
-  }
-  if (!policyDecision.allowed) {
+  let policyDecision = await evaluateConfiguredPolicy(config, policyState, toolName, toolInput);
+  const requiresUserApproval = policyDecisionRequiresApproval(policyDecision);
+  if (!policyDecision.allowed && !requiresUserApproval) {
     return denyPreTool(policyDecision.reason || "ArmorClaude policy denied");
   }
 
@@ -956,6 +985,15 @@ export async function handlePreToolUse(input, config) {
   // --- Record tool for discovery ---
   upsertDiscoveredTool(runtimeState, toolName);
   await saveRuntimeState(config.runtimeFile, runtimeState);
+  if (mcpApprovalReason) {
+    return askPreTool(mcpApprovalReason);
+  }
+  if (requiresUserApproval) {
+    return askPreTool(
+      policyDecision.reason ||
+      `ArmorClaude policy requires your approval before running ${toolName}.`
+    );
+  }
   return null;
 }
 

@@ -172,32 +172,32 @@ test("syncPolicy sends policy state to /policies/sync", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// /armor-policy command wiring
+// /armor policy command wiring
 // ---------------------------------------------------------------------------
 
-test("/armor-policy sync without apiKey returns error", async () => {
+test("/armor policy sync without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
   const config = buildConfig(tmp);
   await seedPolicy(config, [{ id: "p1", action: "allow", tool: "*" }]);
-  const out = await handleArmorPolicyCommand("/armor-policy sync", config);
+  const out = await handleArmorPolicyCommand("/armor policy sync", config);
   assert.ok(out.includes("API key"));
 });
 
-test("/armor-policy profile push without apiKey returns error", async () => {
+test("/armor policy profile push without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
   const config = buildConfig(tmp);
-  const out = await handleArmorPolicyCommand("/armor-policy profile push my-profile", config);
+  const out = await handleArmorPolicyCommand("/armor policy profile push my-profile", config);
   assert.ok(out.includes("API key"));
 });
 
-test("/armor-policy profile pull without apiKey returns error", async () => {
+test("/armor policy profile pull without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
   const config = buildConfig(tmp);
-  const out = await handleArmorPolicyCommand("/armor-policy profile pull", config);
+  const out = await handleArmorPolicyCommand("/armor policy profile pull", config);
   assert.ok(out.includes("API key"));
 });
 
-test("/armor-policy profile push with apiKey sends to backend", async () => {
+test("/armor policy profile push with apiKey sends to backend", async () => {
   let received = false;
   const { server, url } = await startMockServer((req, res) => {
     received = true;
@@ -208,7 +208,7 @@ test("/armor-policy profile push with apiKey sends to backend", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
     const config = buildConfig(tmp, { apiKey: "test-key", backendEndpoint: url });
     await saveProfile(config, "my-profile", "test", [{ id: "p1", action: "allow", tool: "*" }]);
-    const out = await handleArmorPolicyCommand("/armor-policy profile push my-profile", config);
+    const out = await handleArmorPolicyCommand("/armor policy profile push my-profile", config);
     assert.ok(received, "Backend should have received the request");
     assert.ok(out.includes("pushed"));
   } finally {
@@ -216,7 +216,7 @@ test("/armor-policy profile push with apiKey sends to backend", async () => {
   }
 });
 
-test("/armor-policy profile pull with apiKey saves profiles locally", async () => {
+test("/armor policy profile pull with apiKey saves profiles locally", async () => {
   const mockProfiles = [
     { profile: { name: "from-org", description: "Org profile" }, version: 1, policy: { rules: [{ id: "o1", action: "deny", tool: "Bash" }] } }
   ];
@@ -227,17 +227,19 @@ test("/armor-policy profile pull with apiKey saves profiles locally", async () =
   try {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
     const config = buildConfig(tmp, { apiKey: "test-key", backendEndpoint: url });
-    const out = await handleArmorPolicyCommand("/armor-policy profile pull", config);
+    const out = await handleArmorPolicyCommand("/armor policy profile pull", config);
     assert.ok(out.includes("Pulled 1"));
     const local = await loadProfile(config, "from-org");
     assert.ok(local);
-    assert.equal(local.policy.rules[0].id, "o1");
+    assert.equal(local.policy.rules, undefined);
+    assert.equal(local.rules, undefined);
+    assert.equal(local.policy.statements[0].id, "o1");
   } finally {
     server.close();
   }
 });
 
-test("/armor-policy sync with apiKey sends to backend", async () => {
+test("/armor policy sync with apiKey sends to backend", async () => {
   let received = false;
   const { server, url } = await startMockServer((req, res) => {
     received = true;
@@ -248,7 +250,7 @@ test("/armor-policy sync with apiKey sends to backend", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
     const config = buildConfig(tmp, { apiKey: "test-key", backendEndpoint: url });
     await seedPolicy(config, [{ id: "p1", action: "deny", tool: "Bash" }]);
-    const out = await handleArmorPolicyCommand("/armor-policy sync", config);
+    const out = await handleArmorPolicyCommand("/armor policy sync", config);
     assert.ok(received);
     assert.ok(out.includes("synced"));
   } finally {
