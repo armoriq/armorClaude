@@ -134,9 +134,9 @@ const SECRET_PATTERNS = [
   // GitHub personal access tokens
   /\bghp_[A-Za-z0-9]{30,}\b/g,
   // JWT-ish three-part tokens
-  /\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b/g,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
   // Private key blocks
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
 ];
 
 function redactString(text) {
@@ -206,7 +206,7 @@ export async function postJson(url, payload, headers, timeoutMs) {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-      signal: controller.signal
+      signal: controller.signal,
     });
     const text = await response.text();
     let data = null;

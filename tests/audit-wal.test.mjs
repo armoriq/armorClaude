@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Audit WAL tests — exercise the on-disk write-ahead log without spinning
  * up the daemon. Covers:
@@ -66,7 +67,10 @@ test("crash-replay: missing advance leaves rows for next read", async () => {
   const wal2 = createAuditWal({ dataDir: dir });
   const { rows } = await wal2.readBatch();
   assert.equal(rows.length, 2, "uncommitted rows are replayed");
-  assert.deepEqual(rows.map((r) => r.id), [1, 2]);
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    [1, 2]
+  );
 });
 
 test("rotation: oversize triggers archive + offset reset", async () => {
@@ -105,7 +109,10 @@ test("malformed line is skipped, not blocking the stream", async () => {
 
   const { rows } = await wal.readBatch();
   assert.equal(rows.length, 2, "malformed line skipped, valid rows still returned");
-  assert.deepEqual(rows.map((r) => r.id), [1, 3]);
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    [1, 3]
+  );
 });
 
 test("row too large is rejected (cap protects O_APPEND atomicity)", async () => {
@@ -120,9 +127,7 @@ test("readBatch returns rows in enqueue order even when disk order is scrambled"
   // Promise.all serializes the entry points but the underlying fs.appendFile
   // calls race in the kernel — disk order is non-deterministic.
   await Promise.all(
-    Array.from({ length: 10 }, (_, i) =>
-      wal.appendLine({ logical_step: i, payload: `row-${i}` }),
-    ),
+    Array.from({ length: 10 }, (_, i) => wal.appendLine({ logical_step: i, payload: `row-${i}` }))
   );
   const { rows } = await wal.readBatch(20);
   assert.equal(rows.length, 10);
@@ -131,7 +136,7 @@ test("readBatch returns rows in enqueue order even when disk order is scrambled"
   assert.deepEqual(
     rows.map((r) => r.logical_step),
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    "rows must come back in enqueue order, not disk order",
+    "rows must come back in enqueue order, not disk order"
   );
 });
 

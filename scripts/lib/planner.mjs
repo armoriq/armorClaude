@@ -96,7 +96,7 @@ export function parsePlanMarkdown(markdown) {
         action: toolRef,
         mcp: "claude-code",
         description: text,
-        metadata: {}
+        metadata: {},
       });
     }
   }
@@ -108,7 +108,7 @@ export function parsePlanMarkdown(markdown) {
         action: toolName,
         mcp: "claude-code",
         description: `Use ${toolName}`,
-        metadata: {}
+        metadata: {},
       });
     }
   }
@@ -118,7 +118,7 @@ export function parsePlanMarkdown(markdown) {
 
   return {
     steps,
-    metadata: { goal, source: "plan-file-heuristic" }
+    metadata: { goal, source: "plan-file-heuristic" },
   };
 }
 
@@ -127,9 +127,20 @@ export function parsePlanMarkdown(markdown) {
 // ---------------------------------------------------------------------------
 
 const KNOWN_TOOLS = new Set([
-  "read", "write", "edit", "bash", "glob", "grep", "agent",
-  "webfetch", "websearch", "notebookedit", "askuserquestion",
-  "taskcreate", "taskupdate", "skill"
+  "read",
+  "write",
+  "edit",
+  "bash",
+  "glob",
+  "grep",
+  "agent",
+  "webfetch",
+  "websearch",
+  "notebookedit",
+  "askuserquestion",
+  "taskcreate",
+  "taskupdate",
+  "skill",
 ]);
 
 function extractToolFromStepText(text) {
@@ -153,12 +164,9 @@ function extractToolFromStepText(text) {
  * Claude Code writes plans to ~/.claude/plans/<session-name>.md
  */
 export function resolvePlanFilePath(input) {
-  const transcriptPath =
-    typeof input?.transcript_path === "string" ? input.transcript_path : "";
+  const transcriptPath = typeof input?.transcript_path === "string" ? input.transcript_path : "";
 
-  const sessionMatch = transcriptPath.match(
-    /sessions\/([^/]+?)(?:\.jsonl)?$/
-  );
+  const sessionMatch = transcriptPath.match(/sessions\/([^/]+?)(?:\.jsonl)?$/);
   const sessionName = sessionMatch ? sessionMatch[1] : null;
 
   if (sessionName) {

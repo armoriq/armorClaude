@@ -30,7 +30,7 @@
  */
 
 import { createServer } from "node:net";
-import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./lib/config.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
@@ -64,12 +64,14 @@ function claimPid() {
         try {
           process.kill(existing, 0);
           process.stderr.write(
-            `[armorclaude-daemon] another daemon is already running (pid=${existing}). Exiting.\n`,
+            `[armorclaude-daemon] another daemon is already running (pid=${existing}). Exiting.\n`
           );
           process.exit(0);
         } catch {
           // stale PID file — owner is dead. Take over.
-          process.stderr.write(`[armorclaude-daemon] cleaning stale PID file (was pid=${existing})\n`);
+          process.stderr.write(
+            `[armorclaude-daemon] cleaning stale PID file (was pid=${existing})\n`
+          );
         }
       }
     } catch {
@@ -81,7 +83,11 @@ function claimPid() {
 
 // ---- Socket cleanup ------------------------------------------------------
 function cleanupSocket() {
-  try { if (existsSync(socketPath)) unlinkSync(socketPath); } catch {}
+  try {
+    if (existsSync(socketPath)) unlinkSync(socketPath);
+  } catch {
+    /* empty */
+  }
 }
 
 function cleanupPid() {
@@ -90,7 +96,9 @@ function cleanupPid() {
       const owner = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
       if (owner === process.pid) unlinkSync(pidPath);
     }
-  } catch {}
+  } catch {
+    /* empty */
+  }
 }
 
 claimPid();
@@ -104,10 +112,14 @@ const sessionLocks = new Map();
 function withSessionLock(sessionId, fn) {
   if (!sessionId) return fn(); // no lock needed if there's no session
   const prev = sessionLocks.get(sessionId) || Promise.resolve();
-  const next = prev.then(() => fn()).catch((err) => {
-    process.stderr.write(`[armorclaude-daemon] session ${sessionId} handler failed: ${err?.message ?? err}\n`);
-    return null;
-  });
+  const next = prev
+    .then(() => fn())
+    .catch((err) => {
+      process.stderr.write(
+        `[armorclaude-daemon] session ${sessionId} handler failed: ${err?.message ?? err}\n`
+      );
+      return null;
+    });
   sessionLocks.set(sessionId, next);
   // Drop the lock entry once it settles so the map doesn't grow forever.
   next.finally(() => {
@@ -159,24 +171,33 @@ async function flushAudit(reason) {
           } else {
             for (const dto of rows) {
               await iap.createAuditLog(dto).catch((e) => {
-                if (config.debug) process.stderr.write(`[daemon] audit row failed: ${e?.message ?? e}\n`);
+                if (config.debug)
+                  process.stderr.write(`[daemon] audit row failed: ${e?.message ?? e}\n`);
               });
             }
           }
           await auditWal.advanceOffset(endOffset);
           if (config.debug) {
-            process.stderr.write(`[daemon] audit WAL flushed size=${rows.length} reason=${reason}\n`);
+            process.stderr.write(
+              `[daemon] audit WAL flushed size=${rows.length} reason=${reason}\n`
+            );
           }
         } catch (err) {
           // Don't advance the offset — next tick replays from same position.
           if (config.debug) {
-            process.stderr.write(`[daemon] audit WAL flush failed reason=${reason} err=${err?.message ?? err}\n`);
+            process.stderr.write(
+              `[daemon] audit WAL flush failed reason=${reason} err=${err?.message ?? err}\n`
+            );
           }
           break;
         }
       }
       // Prune archived segments older than the retention cap (default 5).
-      try { await auditWal.pruneArchive(); } catch {}
+      try {
+        await auditWal.pruneArchive();
+      } catch {
+        /* empty */
+      }
       return;
     }
 
@@ -189,7 +210,8 @@ async function flushAudit(reason) {
       } else {
         for (const dto of batch) {
           await iap.createAuditLog(dto).catch((e) => {
-            if (config.debug) process.stderr.write(`[daemon] audit row failed: ${e?.message ?? e}\n`);
+            if (config.debug)
+              process.stderr.write(`[daemon] audit row failed: ${e?.message ?? e}\n`);
           });
         }
       }
@@ -201,7 +223,9 @@ async function flushAudit(reason) {
         auditBuffer.unshift(...batch);
       }
       if (config.debug) {
-        process.stderr.write(`[daemon] audit flush failed reason=${reason} err=${err?.message ?? err}\n`);
+        process.stderr.write(
+          `[daemon] audit flush failed reason=${reason} err=${err?.message ?? err}\n`
+        );
       }
     }
   } finally {
@@ -225,7 +249,9 @@ async function enqueueAudit(dto) {
       // Disk-full or row-too-large: fall back to in-memory so we don't
       // silently drop the row. This is best-effort — caller is fire-and-forget.
       if (config.debug) {
-        process.stderr.write(`[daemon] audit WAL append failed (falling back to memory): ${err?.message ?? err}\n`);
+        process.stderr.write(
+          `[daemon] audit WAL append failed (falling back to memory): ${err?.message ?? err}\n`
+        );
       }
       auditBuffer.push(dto);
     }
@@ -238,29 +264,37 @@ async function enqueueAudit(dto) {
   }
 }
 
-const auditTimer = setInterval(() => { flushAudit("interval"); }, AUDIT_FLUSH_INTERVAL_MS);
+const auditTimer = setInterval(() => {
+  flushAudit("interval");
+}, AUDIT_FLUSH_INTERVAL_MS);
 auditTimer.unref();
 
 // ---- Hook dispatch -------------------------------------------------------
 async function dispatchHook(event, input) {
   switch (event) {
-    case "SessionStart":         return handleSessionStart(input, config);
-    case "UserPromptSubmit":     return handleUserPromptSubmit(input, config);
-    case "PreToolUse":           return handlePreToolUse(input, config);
-    case "PostToolUse":          return handlePostToolUse(input, config);
-    case "PostToolUseFailure":   return handlePostToolUseFailure(input, config);
-    case "Stop":                 {
+    case "SessionStart":
+      return handleSessionStart(input, config);
+    case "UserPromptSubmit":
+      return handleUserPromptSubmit(input, config);
+    case "PreToolUse":
+      return handlePreToolUse(input, config);
+    case "PostToolUse":
+      return handlePostToolUse(input, config);
+    case "PostToolUseFailure":
+      return handlePostToolUseFailure(input, config);
+    case "Stop": {
       const out = await handleStop(input, config);
       // Flush audits on turn end so each turn's row count lands together.
       await flushAudit("stop");
       return out;
     }
-    case "SessionEnd":           {
+    case "SessionEnd": {
       const out = await handleSessionEnd(input, config);
       await flushAudit("session_end");
       return out;
     }
-    default: throw new Error(`unknown event: ${event}`);
+    default:
+      throw new Error(`unknown event: ${event}`);
   }
 }
 
@@ -274,7 +308,9 @@ const idleTimer = setInterval(() => {
 }, 60_000);
 idleTimer.unref();
 
-function bumpActivity() { lastActivity = Date.now(); }
+function bumpActivity() {
+  lastActivity = Date.now();
+}
 
 // ---- Server -------------------------------------------------------------
 const server = createServer((socket) => {
@@ -297,23 +333,34 @@ const server = createServer((socket) => {
       handleLine(line, socket).catch((err) => {
         try {
           socket.write(JSON.stringify({ error: err?.message ?? String(err) }) + "\n");
-        } catch {}
+        } catch {
+          /* empty */
+        }
       });
     }
   });
-  socket.on("error", () => { /* clients come and go; ignore */ });
+  socket.on("error", () => {
+    /* clients come and go; ignore */
+  });
 });
 
 async function handleLine(rawLine, socket) {
   bumpActivity();
   if (!rawLine.trim()) return;
   let msg;
-  try { msg = JSON.parse(rawLine); }
-  catch { socket.write(JSON.stringify({ error: "invalid JSON" }) + "\n"); return; }
+  try {
+    msg = JSON.parse(rawLine);
+  } catch {
+    socket.write(JSON.stringify({ error: "invalid JSON" }) + "\n");
+    return;
+  }
   const reqId = typeof msg?.reqId === "string" ? msg.reqId : null;
   switch (msg?.type) {
     case "ping": {
-      socket.write(JSON.stringify({ reqId, ok: true, version: DAEMON_VERSION, uptime: process.uptime() }) + "\n");
+      socket.write(
+        JSON.stringify({ reqId, ok: true, version: DAEMON_VERSION, uptime: process.uptime() }) +
+          "\n"
+      );
       return;
     }
     case "audit_enqueue": {
@@ -324,7 +371,8 @@ async function handleLine(rawLine, socket) {
       try {
         await enqueueAudit(msg.dto);
       } catch (err) {
-        if (config.debug) process.stderr.write(`[daemon] enqueueAudit failed: ${err?.message ?? err}\n`);
+        if (config.debug)
+          process.stderr.write(`[daemon] enqueueAudit failed: ${err?.message ?? err}\n`);
       }
       return;
     }
@@ -354,8 +402,13 @@ server.on("error", (err) => {
 server.listen(socketPath, () => {
   // 0600 so only this user can connect (defense in depth — Unix sockets
   // already inherit dir perms, but we set explicitly).
-  try { require("node:fs").chmodSync(socketPath, 0o600); } catch {}
-  if (config.debug) process.stderr.write(`[armorclaude-daemon] listening on ${socketPath} pid=${process.pid}\n`);
+  try {
+    chmodSync(socketPath, 0o600);
+  } catch {
+    /* best-effort */
+  }
+  if (config.debug)
+    process.stderr.write(`[armorclaude-daemon] listening on ${socketPath} pid=${process.pid}\n`);
 });
 
 // ---- Shutdown handlers ---------------------------------------------------
@@ -363,7 +416,11 @@ function shutdown(code) {
   // Try to flush audits one last time. If we can't await (sync context), at
   // least kick the flush; the process will linger briefly.
   flushAudit("shutdown").finally(() => {
-    try { server.close(); } catch {}
+    try {
+      server.close();
+    } catch {
+      /* empty */
+    }
     cleanupSocket();
     cleanupPid();
     process.exit(code);
@@ -371,7 +428,7 @@ function shutdown(code) {
 }
 
 process.on("SIGTERM", () => shutdown(0));
-process.on("SIGINT",  () => shutdown(0));
+process.on("SIGINT", () => shutdown(0));
 // SIGHUP — operator signals "config / creds changed, reload yourself".
 // Re-reads launchctl env + ~/.armoriq/credentials.json via loadConfig().
 // The engine's invalidateTokenOnKeyChange detects per-session token drift
@@ -382,10 +439,10 @@ process.on("SIGHUP", () => {
   try {
     const fresh = loadConfig();
     const before = config.apiKey ? config.apiKey.slice(0, 16) : "(unset)";
-    const after  = fresh.apiKey  ? fresh.apiKey.slice(0, 16)  : "(unset)";
+    const after = fresh.apiKey ? fresh.apiKey.slice(0, 16) : "(unset)";
     config = fresh;
     process.stderr.write(
-      `[armorclaude-daemon] SIGHUP: config reloaded. apiKey prefix: ${before} -> ${after}\n`,
+      `[armorclaude-daemon] SIGHUP: config reloaded. apiKey prefix: ${before} -> ${after}\n`
     );
   } catch (err) {
     process.stderr.write(`[armorclaude-daemon] SIGHUP reload failed: ${err?.message ?? err}\n`);

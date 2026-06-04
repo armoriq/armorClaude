@@ -7,7 +7,7 @@ import {
   handleSessionEnd,
   handleSessionStart,
   handleStop,
-  handleUserPromptSubmit
+  handleUserPromptSubmit,
 } from "./lib/engine.mjs";
 import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 

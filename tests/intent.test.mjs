@@ -7,7 +7,7 @@ import { handlePreToolUse } from "../scripts/lib/engine.mjs";
 import {
   checkIntentTokenPlan,
   parseCsrgProofHeaders,
-  resolveCsrgProofsFromToken
+  resolveCsrgProofsFromToken,
 } from "../scripts/lib/intent.mjs";
 import { createIapService } from "../scripts/lib/iap-service.mjs";
 
@@ -48,9 +48,9 @@ function buildConfig(tmpDir, overrides = {}) {
       maxChars: 2000,
       maxDepth: 4,
       maxKeys: 50,
-      maxItems: 50
+      maxItems: 50,
     },
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -58,7 +58,7 @@ test("parseCsrgProofHeaders rejects invalid JSON proof header", () => {
   const parsed = parseCsrgProofHeaders({
     csrg_path: "/steps/[0]/action",
     csrg_proof: "{not-json}",
-    csrg_value_digest: "abc"
+    csrg_value_digest: "abc",
   });
   assert.match(parsed.error || "", /invalid json/i);
 });
@@ -67,28 +67,28 @@ test("resolveCsrgProofsFromToken selects param-matched step for duplicate tools"
   const plan = {
     steps: [
       { action: "write", metadata: { inputs: { file_path: "a.txt" } } },
-      { action: "write", metadata: { inputs: { file_path: "b.txt" } } }
-    ]
+      { action: "write", metadata: { inputs: { file_path: "b.txt" } } },
+    ],
   };
   const token = {
     plan,
     step_proofs: [
       {
         path: "/steps/[0]/action",
-        proof: [{ position: "left", sibling_hash: "aaa" }]
+        proof: [{ position: "left", sibling_hash: "aaa" }],
       },
       {
         path: "/steps/[1]/action",
-        proof: [{ position: "left", sibling_hash: "bbb" }]
-      }
-    ]
+        proof: [{ position: "left", sibling_hash: "bbb" }],
+      },
+    ],
   };
   const resolved = resolveCsrgProofsFromToken({
     intentTokenRaw: JSON.stringify(token),
     plan,
     toolName: "write",
     toolParams: { file_path: "b.txt" },
-    usedStepIndices: new Set()
+    usedStepIndices: new Set(),
   });
   assert.equal(resolved?.stepIndex, 1);
   assert.equal(resolved?.path, "/steps/[1]/action");
@@ -97,7 +97,7 @@ test("resolveCsrgProofsFromToken selects param-matched step for duplicate tools"
 test("iapService.verifyStep sends payload with jwt token and CSRG context", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, {
-    verifyStepEndpoint: "https://example.test/iap/verify-step"
+    verifyStepEndpoint: "https://example.test/iap/verify-step",
   });
   const iapService = createIapService(config);
 
@@ -105,22 +105,22 @@ test("iapService.verifyStep sends payload with jwt token and CSRG context", asyn
   let capturedPayload = null;
   globalThis.fetch = async (_url, options) => {
     capturedPayload = JSON.parse(options.body);
-    return new Response(
-      JSON.stringify({ allowed: true, reason: "ok", step: { step_index: 2 } }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ allowed: true, reason: "ok", step: { step_index: 2 } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   };
 
   try {
     const result = await iapService.verifyStep(
       JSON.stringify({
         jwtToken: "jwt-token-abc",
-        plan: { steps: [{ action: "read" }] }
+        plan: { steps: [{ action: "read" }] },
       }),
       {
         path: "/steps/[2]/action",
         proof: [{ position: "left", sibling_hash: "abc" }],
-        valueDigest: "deadbeef"
+        valueDigest: "deadbeef",
       },
       "read"
     );
@@ -138,12 +138,12 @@ test("iapService.verifyStep sends payload with jwt token and CSRG context", asyn
 test("checkIntentTokenPlan detects intent drift", () => {
   const token = {
     plan: { steps: [{ action: "Read" }, { action: "Write" }] },
-    expiresAt: Math.floor(Date.now() / 1000) + 600
+    expiresAt: Math.floor(Date.now() / 1000) + 600,
   };
   const result = checkIntentTokenPlan({
     intentTokenRaw: JSON.stringify(token),
     toolName: "Bash",
-    toolParams: {}
+    toolParams: {},
   });
   assert.equal(result.matched, true);
   assert.match(result.blockReason, /intent drift/i);
@@ -152,12 +152,12 @@ test("checkIntentTokenPlan detects intent drift", () => {
 test("checkIntentTokenPlan allows tool in plan", () => {
   const token = {
     plan: { steps: [{ action: "Read" }, { action: "Write" }] },
-    expiresAt: Math.floor(Date.now() / 1000) + 600
+    expiresAt: Math.floor(Date.now() / 1000) + 600,
   };
   const result = checkIntentTokenPlan({
     intentTokenRaw: JSON.stringify(token),
     toolName: "Read",
-    toolParams: {}
+    toolParams: {},
   });
   assert.equal(result.matched, true);
   assert.equal(result.blockReason, undefined);
@@ -166,12 +166,12 @@ test("checkIntentTokenPlan allows tool in plan", () => {
 test("checkIntentTokenPlan detects expired token", () => {
   const token = {
     plan: { steps: [{ action: "Read" }] },
-    expiresAt: Math.floor(Date.now() / 1000) - 100
+    expiresAt: Math.floor(Date.now() / 1000) - 100,
   };
   const result = checkIntentTokenPlan({
     intentTokenRaw: JSON.stringify(token),
     toolName: "Read",
-    toolParams: {}
+    toolParams: {},
   });
   assert.equal(result.matched, true);
   assert.match(result.blockReason, /expired/i);
@@ -183,14 +183,14 @@ test("checkIntentTokenPlan: parameter mismatch is advisory by default (Phase 3 h
   // the LLM couldn't guess exact bash commands. We now allow by default.
   const token = {
     plan: {
-      steps: [{ action: "Write", metadata: { inputs: { file_path: "allowed.txt" } } }]
+      steps: [{ action: "Write", metadata: { inputs: { file_path: "allowed.txt" } } }],
     },
-    expiresAt: Math.floor(Date.now() / 1000) + 600
+    expiresAt: Math.floor(Date.now() / 1000) + 600,
   };
   const result = checkIntentTokenPlan({
     intentTokenRaw: JSON.stringify(token),
     toolName: "Write",
-    toolParams: { file_path: "forbidden.txt" }
+    toolParams: { file_path: "forbidden.txt" },
   });
   assert.equal(result.matched, true);
   assert.equal(result.blockReason, undefined);
@@ -199,11 +199,16 @@ test("checkIntentTokenPlan: parameter mismatch is advisory by default (Phase 3 h
 test("checkToolAgainstPlan with strict=true blocks param mismatch (opt-in)", async () => {
   const { checkToolAgainstPlan } = await import("../scripts/lib/intent.mjs");
   const plan = {
-    steps: [{ action: "Bash", metadata: { inputs: { command: "npm test" } } }]
+    steps: [{ action: "Bash", metadata: { inputs: { command: "npm test" } } }],
   };
   const lax = checkToolAgainstPlan({ plan, toolName: "Bash", toolInput: { command: "rm -rf /" } });
   assert.equal(lax.allowed, true, "default lax mode allows mismatched params");
-  const strict = checkToolAgainstPlan({ plan, toolName: "Bash", toolInput: { command: "rm -rf /" }, strict: true });
+  const strict = checkToolAgainstPlan({
+    plan,
+    toolName: "Bash",
+    toolInput: { command: "rm -rf /" },
+    strict: true,
+  });
   assert.equal(strict.allowed, false, "strict=true blocks mismatched params");
   assert.match(strict.reason, /parameters not allowed/i);
 });
@@ -219,20 +224,20 @@ test("checkToolAgainstPlan still blocks tool-name drift even when permissive", a
 test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplicate tools", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, {
-    verifyStepEndpoint: "https://example.test/iap/verify-step"
+    verifyStepEndpoint: "https://example.test/iap/verify-step",
   });
   const token = {
     jwtToken: "jwt-token-xyz",
     plan: {
       steps: [
         { action: "write", metadata: { inputs: { file_path: "a.txt" } } },
-        { action: "write", metadata: { inputs: { file_path: "b.txt" } } }
-      ]
+        { action: "write", metadata: { inputs: { file_path: "b.txt" } } },
+      ],
     },
     step_proofs: [
       { path: "/steps/[0]/action", proof: [{ position: "left", sibling_hash: "s0" }] },
-      { path: "/steps/[1]/action", proof: [{ position: "left", sibling_hash: "s1" }] }
-    ]
+      { path: "/steps/[1]/action", proof: [{ position: "left", sibling_hash: "s1" }] },
+    ],
   };
 
   await writeFile(
@@ -243,9 +248,9 @@ test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplic
           s1: {
             intentTokenRaw: JSON.stringify(token),
             plan: token.plan,
-            updatedAt: Math.floor(Date.now() / 1000)
-          }
-        }
+            updatedAt: Math.floor(Date.now() / 1000),
+          },
+        },
       },
       null,
       2
@@ -260,7 +265,7 @@ test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplic
     seenStepIndices.push(payload.step_index);
     return new Response(JSON.stringify({ allowed: true, reason: "ok" }), {
       status: 200,
-      headers: { "content-type": "application/json" }
+      headers: { "content-type": "application/json" },
     });
   };
 
@@ -270,7 +275,7 @@ test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplic
         hook_event_name: "PreToolUse",
         session_id: "s1",
         tool_name: "write",
-        tool_input: { file_path: "a.txt" }
+        tool_input: { file_path: "a.txt" },
       },
       config
     );
@@ -279,7 +284,7 @@ test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplic
         hook_event_name: "PreToolUse",
         session_id: "s1",
         tool_name: "write",
-        tool_input: { file_path: "b.txt" }
+        tool_input: { file_path: "b.txt" },
       },
       config
     );

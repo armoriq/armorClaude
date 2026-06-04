@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Phase 4 Tier B daemon tests.
  *
@@ -50,10 +51,14 @@ async function spawnDaemonChild(dataDir) {
 }
 
 async function killDaemon(child, dataDir) {
-  try { process.kill(child.pid, "SIGTERM"); } catch {}
+  try {
+    process.kill(child.pid, "SIGTERM");
+  } catch {}
   // give it a moment to clean up
   await new Promise((r) => setTimeout(r, 200));
-  try { process.kill(child.pid, "SIGKILL"); } catch {}
+  try {
+    process.kill(child.pid, "SIGKILL");
+  } catch {}
 }
 
 async function loadConfigFor(dataDir) {
@@ -123,10 +128,7 @@ test("daemon: SessionStart returns context output", async () => {
       config,
     });
     assert.ok(output?.hookSpecificOutput?.additionalContext);
-    assert.match(
-      output.hookSpecificOutput.additionalContext,
-      /ArmorClaude active/i,
-    );
+    assert.match(output.hookSpecificOutput.additionalContext, /ArmorClaude active/i);
   } finally {
     await killDaemon(child, dataDir);
   }
@@ -142,7 +144,12 @@ test("daemon: roundtrip latency p95 < 50ms (over Unix socket)", async () => {
     // Warm up — first call sometimes pays connection-establish cost.
     await dispatchViaDaemon({
       event: "PreToolUse",
-      input: { hook_event_name: "PreToolUse", session_id: "warm", tool_name: "read", tool_input: {} },
+      input: {
+        hook_event_name: "PreToolUse",
+        session_id: "warm",
+        tool_name: "read",
+        tool_input: {},
+      },
       config,
     });
     for (let i = 0; i < 30; i++) {
@@ -164,7 +171,7 @@ test("daemon: roundtrip latency p95 < 50ms (over Unix socket)", async () => {
     const p50 = samples[Math.floor(samples.length * 0.5)];
     assert.ok(
       p95 < 50,
-      `daemon roundtrip p95 should be < 50ms; got p50=${p50.toFixed(2)} p95=${p95.toFixed(2)}`,
+      `daemon roundtrip p95 should be < 50ms; got p50=${p50.toFixed(2)} p95=${p95.toFixed(2)}`
     );
   } finally {
     await killDaemon(child, dataDir);
@@ -189,7 +196,7 @@ test("daemon: concurrent hooks for SAME session serialize (runtime-state stays c
           source: "startup",
         },
         config,
-      }),
+      })
     );
     const results = await Promise.all(calls);
     for (const r of results) {

@@ -12,7 +12,7 @@
  * State is persisted to disk because hooks are stateless short-lived processes.
  */
 
-import { isPlainObject, postJson, sha256Hex } from "./common.mjs";
+import { postJson, sha256Hex } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 import path from "node:path";
 
@@ -33,7 +33,7 @@ export function computePolicyDigest(rules) {
       tool: r.tool,
       dataClass: r.dataClass,
       params: r.params,
-      scope: r.scope
+      scope: r.scope,
     })),
     null,
     0
@@ -66,7 +66,7 @@ export function createCryptoPolicyService(config) {
         version: policyState.version || 0,
         updated_at: policyState.updatedAt || new Date().toISOString(),
         updated_by: policyState.updatedBy,
-        policy_digest: digest
+        policy_digest: digest,
       };
 
       const plan = buildPolicyPlan(policyState.policy);
@@ -75,15 +75,15 @@ export function createCryptoPolicyService(config) {
         plan,
         policy: {
           global: {
-            metadata: policyMetadata
-          }
+            metadata: policyMetadata,
+          },
         },
         identity: {
           user_id: identity.userId || config.userId || "claude-user",
           agent_id: identity.agentId || config.agentId || "claude-code",
-          context_id: identity.contextId || config.contextId || "default"
+          context_id: identity.contextId || config.contextId || "default",
         },
-        validity_seconds: validitySeconds
+        validity_seconds: validitySeconds,
       };
 
       const response = await postJson(
@@ -100,14 +100,14 @@ export function createCryptoPolicyService(config) {
 
       const token = {
         ...response.data,
-        policy_digest: digest
+        policy_digest: digest,
       };
 
       // Persist to disk
       await writeJson(stateFilePath, {
         token,
         policyDigest: digest,
-        issuedAt: Date.now()
+        issuedAt: Date.now(),
       });
 
       return token;
@@ -121,13 +121,13 @@ export function createCryptoPolicyService(config) {
       if (!tokenDigest) {
         return {
           valid: false,
-          reason: "No policy token - policy not cryptographically bound"
+          reason: "No policy token - policy not cryptographically bound",
         };
       }
       if (currentDigest !== tokenDigest) {
         return {
           valid: false,
-          reason: `Policy mismatch: current=${currentDigest.slice(0, 16)}... token=${tokenDigest.slice(0, 16)}...`
+          reason: `Policy mismatch: current=${currentDigest.slice(0, 16)}... token=${tokenDigest.slice(0, 16)}...`,
         };
       }
       return { valid: true, reason: "Policy digest verified" };
@@ -154,7 +154,7 @@ export function createCryptoPolicyService(config) {
         path: ruleProof.path,
         value: { tool: toolName, rule_id: ruleId },
         proof: ruleProof.proof,
-        token: cached.token.token
+        token: cached.token.token,
       };
 
       const response = await postJson(
@@ -167,7 +167,7 @@ export function createCryptoPolicyService(config) {
       if (!response.ok || !response.data) {
         return {
           allowed: false,
-          reason: response.text || "CSRG verification failed"
+          reason: response.text || "CSRG verification failed",
         };
       }
 
@@ -187,8 +187,10 @@ export function createCryptoPolicyService(config) {
     async clearCache() {
       try {
         await writeJson(stateFilePath, null);
-      } catch { /* ignore */ }
-    }
+      } catch {
+        /* ignore */
+      }
+    },
   };
 }
 
@@ -214,8 +216,8 @@ function buildPolicyPlan(policy) {
       rule_tool: rule.tool,
       rule_data_class: rule.dataClass,
       rule_params: rule.params,
-      rule_scope: rule.scope
-    }
+      rule_scope: rule.scope,
+    },
   }));
 
   if (steps.length === 0) {
@@ -229,8 +231,8 @@ function buildPolicyPlan(policy) {
         rule_tool: "*",
         rule_data_class: undefined,
         rule_params: undefined,
-        rule_scope: undefined
-      }
+        rule_scope: undefined,
+      },
     });
   }
 
@@ -238,7 +240,7 @@ function buildPolicyPlan(policy) {
     steps,
     metadata: {
       goal: "ArmorIQ policy enforcement",
-      policy_type: "crypto-bound"
-    }
+      policy_type: "crypto-bound",
+    },
   };
 }
