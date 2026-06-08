@@ -34,7 +34,7 @@ if (!installedOk()) {
   process.stderr.write("[armorclaude] installing dependencies (one-time)...\n");
   const result = spawnSync(
     "npm",
-    ["install", "--omit=dev", "--silent", "--no-audit", "--no-fund"],
+    ["install", "--omit=dev", "--ignore-scripts", "--silent", "--no-audit", "--no-fund"],
     {
       cwd: pluginRoot,
       stdio: ["ignore", "ignore", "inherit"],
