@@ -54,6 +54,14 @@ test("validatePolicyIr accepts valid ArmorClaude IR", () => {
   assert.equal(result.policy.schemaVersion, "armor.policy.v1");
 });
 
+test("validatePolicyIr accepts default hold", () => {
+  const policy = samplePolicy();
+  policy.defaults.decision = "hold";
+  const result = validatePolicyIr(policy);
+  assert.equal(result.ok, true);
+  assert.equal(result.policy.defaults.decision, "hold");
+});
+
 test("validatePolicyIr rejects unknown fields and operators", () => {
   const policy = samplePolicy();
   policy.extra = true;
@@ -164,6 +172,19 @@ test("evaluatePolicyIr enforces default deny and forbid overrides", () => {
   assert.match(denied.reason, /forbid-db-cloud/);
 });
 
+test("evaluatePolicyIr maps default hold to approval for unmatched tools", () => {
+  const policy = normalizePolicyIr({
+    ...samplePolicy(),
+    defaults: { decision: "hold", conflictResolution: "deny_overrides" },
+    statements: []
+  });
+  const held = evaluatePolicyIr({ policy, toolName: "Write", toolParams: { file_path: "a.txt" } });
+  assert.equal(held.allowed, false);
+  assert.match(held.reason, /default hold: no statement matched tool Write/);
+  assert.equal(held.matchedRule.effect, "require_approval");
+  assert.equal(held.matchedRule.id, "default-hold");
+});
+
 test("evaluatePolicyIr blocks unsafe Bash redirection under safe bash policy", () => {
   const policy = samplePolicy();
   const denied = evaluatePolicyIr({ policy, toolName: "Bash", toolParams: { command: "ls > out.txt" } });
@@ -171,13 +192,13 @@ test("evaluatePolicyIr blocks unsafe Bash redirection under safe bash policy", (
   assert.match(denied.reason, /default deny: no statement matched tool Bash/);
 });
 
-test("validatePolicyIr accepts Claude Code Explore and Skill tool names", () => {
+test("validatePolicyIr accepts current Claude Code tool names", () => {
   const policy = samplePolicy();
   policy.statements.push({
     id: "allow-claude-helpers",
     effect: "permit",
     principal: { type: "agent", id: "claude-code" },
-    action: { type: "tool", in: ["Explore", "Skill"] },
+    action: { type: "tool", in: ["Explore", "Agent", "Skill", "AskUserQuestion", "LSP", "PowerShell", "ToolSearch", "TaskCreate", "Workflow"] },
     resource: { type: "workspace", scope: "current" },
     conditions: []
   });
@@ -203,6 +224,13 @@ test("compilePolicyIrForOpaData preserves IR statements for OPA bundles", () => 
   assert.equal(data.format, "armorclaude-ir-v1");
   assert.equal(data.statements.length, 3);
   assert.equal(data.defaults.decision, "deny");
+});
+
+test("compilePolicyIrForOpaData preserves default hold for OPA bundles", () => {
+  const policy = samplePolicy();
+  policy.defaults.decision = "hold";
+  const data = compilePolicyIrForOpaData(policy);
+  assert.equal(data.defaults.decision, "hold");
 });
 
 test("compilePolicyForSdkIntent emits CSRG path allow and tool metadata", () => {

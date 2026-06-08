@@ -19,22 +19,51 @@ const DRAFTS_FILE = "policy-drafts.json";
 const PROPOSAL_TTL_MS = 30 * 60 * 1000;
 const KNOWN_CLAUDE_TOOLS = new Set([
   "*",
+  "Agent",
+  "AskUserQuestion",
   "Bash",
-  "Explore",
-  "Read",
-  "Write",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
   "Edit",
-  "MultiEdit",
-  "Grep",
+  "EnterPlanMode",
+  "EnterWorktree",
+  "ExitPlanMode",
+  "ExitWorktree",
+  "Explore",
   "Glob",
-  "NotebookRead",
+  "Grep",
+  "ListMcpResourcesTool",
+  "LSP",
+  "Monitor",
+  "MultiEdit",
   "NotebookEdit",
-  "WebFetch",
-  "WebSearch",
+  "NotebookRead",
+  "PowerShell",
+  "PushNotification",
+  "Read",
+  "ReadMcpResourceTool",
+  "RemoteTrigger",
+  "ScheduleWakeup",
+  "SendMessage",
+  "ShareOnboardingGuide",
   "Skill",
   "Task",
+  "TaskCreate",
+  "TaskGet",
+  "TaskList",
+  "TaskOutput",
+  "TaskStop",
+  "TaskUpdate",
+  "TeamCreate",
+  "TeamDelete",
   "TodoWrite",
-  "ExitPlanMode"
+  "ToolSearch",
+  "WaitForMcpServers",
+  "WebFetch",
+  "WebSearch",
+  "Workflow",
+  "Write"
 ]);
 const KNOWN_BASH_PROGRAMS = new Set([
   "awk",
@@ -73,6 +102,65 @@ const DRAFT_LIFECYCLE_FIELDS = new Set([
   "stagedAt"
 ]);
 
+function splitCamelToolName(tool) {
+  return String(tool)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/Mcp/g, "MCP")
+    .toLowerCase();
+}
+
+const TOOL_ALIASES = new Map(
+  [
+    ...[...KNOWN_CLAUDE_TOOLS]
+      .filter((tool) => tool !== "*")
+      .flatMap((tool) => [
+        [tool.toLowerCase(), tool],
+        [splitCamelToolName(tool), tool],
+        [splitCamelToolName(tool).replace(/\s+/g, "-"), tool],
+        [splitCamelToolName(tool).replace(/\s+/g, "_"), tool]
+      ]),
+    ["agent", "Agent"],
+    ["subagent", "Agent"],
+    ["sub agent", "Agent"],
+    ["sub-agent", "Agent"],
+    ["ask user question", "AskUserQuestion"],
+    ["ask user", "AskUserQuestion"],
+    ["askuserquestion", "AskUserQuestion"],
+    ["bash", "Bash"],
+    ["shell", "Bash"],
+    ["terminal", "Bash"],
+    ["code search", "Grep"],
+    ["content search", "Grep"],
+    ["file search", "Glob"],
+    ["read", "Read"],
+    ["read files", "Read"],
+    ["grep", "Grep"],
+    ["glob", "Glob"],
+    ["edit", "Edit"],
+    ["write", "Write"],
+    ["multi edit", "MultiEdit"],
+    ["multi-edit", "MultiEdit"],
+    ["multiedit", "MultiEdit"],
+    ["notebook edit", "NotebookEdit"],
+    ["notebook read", "NotebookRead"],
+    ["powershell", "PowerShell"],
+    ["power shell", "PowerShell"],
+    ["skill", "Skill"],
+    ["skills", "Skill"],
+    ["todo", "TodoWrite"],
+    ["todo write", "TodoWrite"],
+    ["tool search", "ToolSearch"],
+    ["toolsearch", "ToolSearch"],
+    ["web fetch", "WebFetch"],
+    ["webfetch", "WebFetch"],
+    ["fetch web", "WebFetch"],
+    ["web search", "WebSearch"],
+    ["websearch", "WebSearch"],
+    ["search web", "WebSearch"],
+    ["workflow", "Workflow"]
+  ].map(([alias, tool]) => [alias.toLowerCase(), tool])
+);
+
 function pendingPath(config) {
   return path.join(config.dataDir, PENDING_FILE);
 }
@@ -97,19 +185,89 @@ function conditionText(condition) {
   return `${condition.field} ${condition.op} ${value}`;
 }
 
+function defaultDecisionText(policy) {
+  const decision = normalizePolicyIr(policy).defaults.decision;
+  if (decision === "allow") return "DEFAULT ALLOW unmatched tools";
+  if (decision === "hold") return "DEFAULT ASK unmatched tools";
+  return "DEFAULT BLOCK unmatched tools";
+}
+
+function programSetKey(programs) {
+  return uniqueLines(programs).slice().sort().join("\u0000");
+}
+
+function statementPrograms(statement, op) {
+  return conditionValues(statement, "bash.program", op);
+}
+
+function isBashToolStatement(statement) {
+  return statement.action?.type === "tool" && actionValues(statement.action).includes("Bash");
+}
+
+function matchingBashForbidByProgramSet(statements) {
+  const byKey = new Map();
+  for (const statement of statements) {
+    if (statement.effect !== "forbid" || !isBashToolStatement(statement)) continue;
+    const blocked = statementPrograms(statement, "in");
+    if (!blocked.length) continue;
+    byKey.set(programSetKey(blocked), statement);
+  }
+  return byKey;
+}
+
+function matchingBashPermitByProgramSet(statements) {
+  const byKey = new Map();
+  for (const statement of statements) {
+    if (statement.effect !== "permit" || !isBashToolStatement(statement)) continue;
+    const exceptPrograms = statementPrograms(statement, "not_in");
+    if (!exceptPrograms.length) continue;
+    byKey.set(programSetKey(exceptPrograms), statement);
+  }
+  return byKey;
+}
+
+function statementReviewLine(statement, pairedStatement = null) {
+  const action = statement.action?.eq || (Array.isArray(statement.action?.in) ? statement.action.in.join(", ") : "*");
+  const effect =
+    statement.effect === "forbid" ? "BLOCK" :
+    statement.effect === "require_approval" ? "ASK" :
+    "ALLOW";
+  const exceptPrograms = statement.effect === "permit" && isBashToolStatement(statement)
+    ? statementPrograms(statement, "not_in")
+    : [];
+  if (exceptPrograms.length && pairedStatement) {
+    return `${effect.padEnd(5)} ${statement.id}: Bash when bash.program not_in [${exceptPrograms.join(", ")}] (paired BLOCK guardrail: ${pairedStatement.id})`;
+  }
+  const blockedPrograms = statement.effect === "forbid" && isBashToolStatement(statement)
+    ? statementPrograms(statement, "in")
+    : [];
+  if (blockedPrograms.length && pairedStatement) {
+    return `${effect.padEnd(5)} ${statement.id}: Bash when bash.program in [${blockedPrograms.join(", ")}] (guardrail for ${pairedStatement.id})`;
+  }
+  const conditions = statement.conditions.length
+    ? ` when ${statement.conditions.map(conditionText).filter(Boolean).join(" and ")}`
+    : "";
+  return `${effect.padEnd(5)} ${statement.id}: ${action}${conditions}`;
+}
+
 function summarizePolicyReview(policy) {
   const normalized = normalizePolicyIr(policy);
   const lines = [];
+  const guardrails = matchingBashForbidByProgramSet(normalized.statements);
+  const permits = matchingBashPermitByProgramSet(normalized.statements);
   for (const statement of normalized.statements) {
-    const action = statement.action?.eq || (Array.isArray(statement.action?.in) ? statement.action.in.join(", ") : "*");
-    const effect =
-      statement.effect === "forbid" ? "BLOCK" :
-      statement.effect === "require_approval" ? "ASK" :
-      "ALLOW";
-    const conditions = statement.conditions.length
-      ? ` when ${statement.conditions.map(conditionText).filter(Boolean).join(" and ")}`
-      : "";
-    lines.push(`${effect.padEnd(5)} ${statement.id}: ${action}${conditions}`);
+    const exceptPrograms = statement.effect === "permit" && isBashToolStatement(statement)
+      ? statementPrograms(statement, "not_in")
+      : [];
+    const blockedPrograms = statement.effect === "forbid" && isBashToolStatement(statement)
+      ? statementPrograms(statement, "in")
+      : [];
+    const paired = exceptPrograms.length
+      ? guardrails.get(programSetKey(exceptPrograms))
+      : blockedPrograms.length
+        ? permits.get(programSetKey(blockedPrograms))
+        : null;
+    lines.push(statementReviewLine(statement, paired));
   }
   return lines.length ? lines.join("\n") : "(no statements)";
 }
@@ -125,6 +283,9 @@ function formatPolicyReviewDiff(currentPolicy, proposedPolicy) {
   const currentSet = new Set(current);
   const proposedSet = new Set(proposed);
   const lines = [
+    ...(defaultDecisionText(currentPolicy) === defaultDecisionText(proposedPolicy)
+      ? []
+      : [`- ${defaultDecisionText(currentPolicy)}`, `+ ${defaultDecisionText(proposedPolicy)}`]),
     ...current.filter((line) => !proposedSet.has(line)).map((line) => `- ${line}`),
     ...proposed.filter((line) => !currentSet.has(line)).map((line) => `+ ${line}`)
   ];
@@ -192,6 +353,18 @@ function conditionValues(statement, field, op = "") {
 function riskWarningsForPolicy(policy) {
   const normalized = normalizePolicyIr(policy);
   const warnings = [];
+  const guardrails = matchingBashForbidByProgramSet(normalized.statements);
+  const guardrailIds = new Set(
+    normalized.statements
+      .filter((statement) => statement.effect === "permit" && isBashToolStatement(statement))
+      .map((statement) => guardrails.get(programSetKey(conditionValues(statement, "bash.program", "not_in")))?.id)
+      .filter(Boolean)
+  );
+  if (normalized.defaults.decision === "allow") {
+    warnings.push("RISK Default allow permits unmatched tools.");
+  } else if (normalized.defaults.decision === "hold") {
+    warnings.push("ASK Default hold asks for approval when no statement matches.");
+  }
   for (const statement of normalized.statements) {
     const tools = actionTools(statement);
     const isPermit = statement.effect === "permit";
@@ -205,7 +378,13 @@ function riskWarningsForPolicy(policy) {
       warnings.push("RISK Bash is broadly allowed with no program restrictions.");
     }
     if (permitsBash && conditionValues(statement, "bash.program", "not_in").length) {
-      warnings.push(`RISK Bash is broadly allowed except: ${conditionValues(statement, "bash.program", "not_in").join(", ")}.`);
+      const exceptPrograms = conditionValues(statement, "bash.program", "not_in");
+      const guardrail = guardrails.get(programSetKey(exceptPrograms));
+      warnings.push(
+        guardrail
+          ? `RISK Bash is broadly allowed except: ${exceptPrograms.join(", ")}. Exceptions are explicitly blocked by guardrail ${guardrail.id}.`
+          : `RISK Bash is broadly allowed except: ${exceptPrograms.join(", ")}.`
+      );
     }
     const allowedPrograms = conditionValues(statement, "bash.program", "in");
     if (isPermit && allowedPrograms.some((program) => NETWORK_PROGRAMS.has(program))) {
@@ -215,11 +394,22 @@ function riskWarningsForPolicy(policy) {
       warnings.push(`RISK Cloud/db/admin Bash programs allowed: ${allowedPrograms.filter((program) => ADMIN_PROGRAMS.has(program)).join(", ")}.`);
     }
     const blockedPrograms = conditionValues(statement, "bash.program", "in");
-    if (isForbid && blockedPrograms.some((program) => ADMIN_PROGRAMS.has(program))) {
+    if (isForbid && !guardrailIds.has(statement.id) && blockedPrograms.some((program) => ADMIN_PROGRAMS.has(program))) {
       warnings.push(`BLOCK Cloud/db/admin Bash programs explicitly denied: ${blockedPrograms.filter((program) => ADMIN_PROGRAMS.has(program)).join(", ")}.`);
     }
   }
   return uniqueLines(warnings);
+}
+
+function draftRiskWarnings(astWarnings, policy) {
+  const policyWarnings = riskWarningsForPolicy(policy);
+  const hasGuardrailWarning = policyWarnings.some((warning) => warning.includes("Exceptions are explicitly blocked by guardrail"));
+  const filteredAstWarnings = (Array.isArray(astWarnings) ? astWarnings : []).filter((warning) => {
+    if (!hasGuardrailWarning) return true;
+    return !warning.startsWith("RISK Bash is broadly allowed except:") &&
+      !warning.startsWith("BLOCK Cloud/db/admin Bash programs explicitly denied:");
+  });
+  return uniqueLines([...filteredAstWarnings, ...policyWarnings]);
 }
 
 function formatOptionalList(items, empty = "(none)") {
@@ -236,6 +426,7 @@ function formatProposal(pending, currentPolicy, proposedPolicy, title = "Propose
     `Base policy: v${pending.baseVersion}`,
     "",
     "Review:",
+    defaultDecisionText(proposedPolicy),
     summarizePolicyReview(proposedPolicy),
     "",
     "Risk warnings:",
@@ -275,6 +466,7 @@ function formatDraft(draft) {
     draft.confidence ? `Confidence: ${draft.confidence}` : "",
     "",
     "Review:",
+    defaultDecisionText(draft.policy),
     summarizePolicyReview(draft.policy),
     "",
     "Risk warnings:",
@@ -307,6 +499,7 @@ function formatDraftRevision({ original, revised, removedIds, note }) {
     removedIds.length ? `Removed statements: ${removedIds.join(", ")}` : "",
     "",
     "Review:",
+    defaultDecisionText(revised.policy),
     summarizePolicyReview(revised.policy),
     "",
     "Risk warnings:",
@@ -377,6 +570,26 @@ function emptyPolicy(name = "current") {
     metadata: { name, description: "" },
     defaults: { decision: "deny", conflictResolution: "deny_overrides" },
     statements: []
+  });
+}
+
+function normalizeDefaultDecision(raw) {
+  const value = typeof raw === "string"
+    ? raw.toLowerCase().replace(/[-\s]+/g, "_").trim()
+    : "";
+  if (["allow", "deny", "hold"].includes(value)) return value;
+  if (["ask", "approval", "require_approval"].includes(value)) return "hold";
+  return "";
+}
+
+function withDefaultDecision(policy, decision) {
+  const current = normalizePolicyIr(policy);
+  return normalizePolicyIr({
+    ...current,
+    defaults: {
+      ...current.defaults,
+      decision
+    }
   });
 }
 
@@ -491,10 +704,10 @@ async function loadDraft(config, id) {
 
 function reviseDraftPolicy(draft, instruction) {
   const raw = typeof instruction === "string" ? instruction.trim() : "";
-  const lower = raw.toLowerCase();
   const policy = normalizePolicyIr(draft.policy);
   const removedIds = [];
   let statements = policy.statements;
+  const deniedProgramRevision = parseDenyProgramRevision(raw);
 
   const removeMatch = raw.match(/\b(?:remove|delete|drop)\b\s+(?:the\s+)?([a-z0-9_-]+)(?:\s+(?:id|statement|rule))?/i);
   if (removeMatch) {
@@ -512,6 +725,8 @@ function reviseDraftPolicy(draft, instruction) {
     if (before === statements.length) {
       return { ok: false, error: `No draft statement matched "${removeMatch[1]}".` };
     }
+  } else if (deniedProgramRevision.length) {
+    statements = applyDenyProgramRevision(statements, deniedProgramRevision, removedIds);
   } else if (/\ballow\s+explore\b/i.test(raw)) {
     statements = [
       ...statements,
@@ -540,15 +755,18 @@ function reviseDraftPolicy(draft, instruction) {
     policy.defaults.decision = "allow";
   } else if (/\bdefault\s+deny\b|\bdeny\s+by\s+default\b/i.test(raw)) {
     policy.defaults.decision = "deny";
+  } else if (/\bdefault\s+hold\b|\bhold\s+by\s+default\b|\bdefault\s+ask\b|\bask\s+by\s+default\b|\brequire\s+approval\s+by\s+default\b/i.test(raw)) {
+    policy.defaults.decision = "hold";
   } else {
     return {
       ok: false,
       error: [
         "Could not revise that draft deterministically.",
         "Supported revise examples:",
-        `  /armor policy revise ${draft.draftId} "remove forbid-cloud-db-admin"`,
+        `  /armor policy revise ${draft.draftId} "block gcloud and psql in Bash"`,
+        `  /armor policy revise ${draft.draftId} "remove <statement-id>"`,
         `  /armor policy revise ${draft.draftId} "allow Explore"`,
-        `  /armor policy revise ${draft.draftId} "default allow"`
+        `  /armor policy revise ${draft.draftId} "default hold"`
       ].join("\n")
     };
   }
@@ -570,6 +788,386 @@ function reviseDraftPolicy(draft, instruction) {
   };
 }
 
+function parseDenyProgramRevision(raw) {
+  if (!/\b(?:deny|block|forbid|disallow|do\s+not\s+allow)\b/i.test(raw)) return [];
+  if (!/\b(?:bash|shell|terminal|command|program)\b/i.test(raw)) return [];
+  return mentionedPrograms(raw);
+}
+
+function actionValues(action) {
+  if (typeof action?.eq === "string") return [action.eq];
+  if (Array.isArray(action?.in)) return action.in.filter((entry) => typeof entry === "string");
+  return [];
+}
+
+function hasBashProgramCondition(statement, op) {
+  return statement.conditions.some((condition) => condition.field === "bash.program" && condition.op === op);
+}
+
+function appendProgramsToCondition(conditions, op, programs) {
+  let found = false;
+  const next = conditions.map((condition) => {
+    if (condition.field !== "bash.program" || condition.op !== op) return condition;
+    found = true;
+    return {
+      ...condition,
+      value: uniqueLines([...(Array.isArray(condition.value) ? condition.value : []), ...programs])
+    };
+  });
+  if (!found) next.push({ field: "bash.program", op, value: programs });
+  return next;
+}
+
+function removeProgramsFromInConditions(conditions, programs) {
+  return conditions
+    .map((condition) => {
+      if (condition.field !== "bash.program" || condition.op !== "in" || !Array.isArray(condition.value)) {
+        return condition;
+      }
+      return {
+        ...condition,
+        value: condition.value.filter((program) => !programs.includes(program))
+      };
+    })
+    .filter((condition) => !(condition.field === "bash.program" && condition.op === "in" && Array.isArray(condition.value) && condition.value.length === 0));
+}
+
+function removeProgramsFromConditionOp(conditions, op, programs) {
+  return conditions
+    .map((condition) => {
+      if (condition.field !== "bash.program" || condition.op !== op || !Array.isArray(condition.value)) {
+        return condition;
+      }
+      return {
+        ...condition,
+        value: condition.value.filter((program) => !programs.includes(program))
+      };
+    })
+    .filter((condition) => !(condition.field === "bash.program" && condition.op === op && Array.isArray(condition.value) && condition.value.length === 0));
+}
+
+function denyStatementIdForPrograms(programs) {
+  return programs.some((program) => ADMIN_PROGRAMS.has(program)) ? "forbid-cloud-db-admin" : "forbid-bash-programs";
+}
+
+function applyDenyProgramRevision(statements, programs, removedIds) {
+  const denied = uniqueLines(programs);
+  const denyId = denyStatementIdForPrograms(denied);
+  let denyUpdated = false;
+  const next = [];
+
+  for (const statement of statements) {
+    if (statement.action?.type === "tool" && actionValues(statement.action).includes("Bash") && statement.effect === "permit") {
+      const conditions = hasBashProgramCondition(statement, "not_in")
+        ? appendProgramsToCondition(statement.conditions, "not_in", denied)
+        : removeProgramsFromInConditions(statement.conditions, denied);
+      const shouldRemoveStatement = statement.conditions.some((condition) => condition.field === "bash.program" && condition.op === "in") &&
+        !conditions.some((condition) => condition.field === "bash.program" && condition.op === "in");
+      if (shouldRemoveStatement) {
+        removedIds.push(statement.id);
+        continue;
+      }
+      next.push({ ...statement, conditions });
+      continue;
+    }
+
+    if (statement.id === denyId && statement.effect === "forbid") {
+      denyUpdated = true;
+      next.push({
+        ...statement,
+        action: { type: "tool", eq: "Bash" },
+        conditions: appendProgramsToCondition(
+          statement.conditions.filter((condition) => condition.field !== "bash.hasWriteRedirection"),
+          "in",
+          denied
+        )
+      });
+      continue;
+    }
+
+    next.push(statement);
+  }
+
+  if (!denyUpdated) {
+    next.push({
+      id: denyId,
+      effect: "forbid",
+      principal: { type: "agent", id: "claude-code" },
+      action: { type: "tool", eq: "Bash" },
+      resource: { type: "workspace", scope: "current" },
+      conditions: [{ field: "bash.program", op: "in", value: denied }]
+    });
+  }
+
+  return next;
+}
+
+function statementTargetsBash(statement) {
+  return statement.action?.type === "tool" && actionValues(statement.action).some((value) => value === "Bash" || value === "*");
+}
+
+function hasAnyBashProgramCondition(statement) {
+  return statement.conditions.some((condition) => condition.field === "bash.program");
+}
+
+function mergeToolEffect(statements, tools, effect, preferredId) {
+  const selected = uniqueLines(tools).filter((tool) => KNOWN_CLAUDE_TOOLS.has(tool) && tool !== "Bash" && tool !== "*");
+  if (!selected.length) return statements;
+  let merged = false;
+  const next = statements.map((statement) => {
+    if (
+      merged ||
+      statement.effect !== effect ||
+      statement.action?.type !== "tool" ||
+      statementTargetsBash(statement) ||
+      statement.conditions.length
+    ) {
+      return statement;
+    }
+    const values = actionValues(statement.action).filter((tool) => KNOWN_CLAUDE_TOOLS.has(tool) && tool !== "Bash" && tool !== "*");
+    if (!values.length) return statement;
+    merged = true;
+    return {
+      ...statement,
+      action: values.length + selected.length === 1
+        ? { type: "tool", eq: values[0] || selected[0] }
+        : { type: "tool", in: uniqueLines([...values, ...selected]) }
+    };
+  });
+  if (merged) return next;
+  return [
+    ...next,
+    {
+      id: preferredId,
+      effect,
+      principal: { type: "agent", id: "claude-code" },
+      action: selected.length === 1 ? { type: "tool", eq: selected[0] } : { type: "tool", in: selected },
+      resource: { type: "workspace", scope: "current" },
+      conditions: []
+    }
+  ];
+}
+
+function mergeToolPermit(statements, tools, preferredId) {
+  return mergeToolEffect(statements, tools, "permit", preferredId);
+}
+
+function mergeToolForbid(statements, tools, preferredId) {
+  return mergeToolEffect(statements, tools, "forbid", preferredId);
+}
+
+function mergeToolHold(statements, tools, preferredId) {
+  return mergeToolEffect(statements, tools, "require_approval", preferredId);
+}
+
+function mergeAllowedBashPrograms(statements, programs) {
+  const allowed = uniqueLines(programs);
+  if (!allowed.length) return statements;
+  const covered = new Set();
+  const next = [];
+
+  for (const statement of statements) {
+    if (!statementTargetsBash(statement)) {
+      next.push(statement);
+      continue;
+    }
+
+    if (statement.effect === "forbid") {
+      const hadIn = hasBashProgramCondition(statement, "in");
+      const conditions = removeProgramsFromConditionOp(statement.conditions, "in", allowed);
+      if (hadIn && !conditions.some((condition) => condition.field === "bash.program" && condition.op === "in")) {
+        continue;
+      }
+      next.push({ ...statement, conditions });
+      continue;
+    }
+
+    if (statement.effect === "permit") {
+      if (hasBashProgramCondition(statement, "not_in")) {
+        next.push({
+          ...statement,
+          conditions: removeProgramsFromConditionOp(statement.conditions, "not_in", allowed)
+        });
+        allowed.forEach((program) => covered.add(program));
+        continue;
+      }
+      if (hasBashProgramCondition(statement, "in")) {
+        next.push({
+          ...statement,
+          conditions: appendProgramsToCondition(statement.conditions, "in", allowed)
+        });
+        allowed.forEach((program) => covered.add(program));
+        continue;
+      }
+      if (!hasAnyBashProgramCondition(statement)) {
+        next.push(statement);
+        allowed.forEach((program) => covered.add(program));
+        continue;
+      }
+    }
+
+    next.push(statement);
+  }
+
+  const missing = allowed.filter((program) => !covered.has(program));
+  if (!missing.length) return next;
+  return [
+    ...next,
+    {
+      id: "allow-safe-bash-inspection",
+      effect: "permit",
+      principal: { type: "agent", id: "claude-code" },
+      action: { type: "tool", eq: "Bash" },
+      resource: { type: "workspace", scope: "current" },
+      conditions: [
+        { field: "bash.program", op: "in", value: missing },
+        { field: "bash.hasWriteRedirection", op: "eq", value: false }
+      ]
+    }
+  ];
+}
+
+function removeProgramsFromForbidStatements(statements, programs) {
+  const removed = uniqueLines(programs);
+  if (!removed.length) return statements;
+  const next = [];
+  for (const statement of statements) {
+    if (statement.effect !== "forbid" || !statementTargetsBash(statement)) {
+      next.push(statement);
+      continue;
+    }
+    const hadIn = hasBashProgramCondition(statement, "in");
+    const conditions = removeProgramsFromConditionOp(statement.conditions, "in", removed);
+    if (hadIn && !conditions.some((condition) => condition.field === "bash.program" && condition.op === "in")) {
+      continue;
+    }
+    next.push({ ...statement, conditions });
+  }
+  return next;
+}
+
+function ensureBroadBashExcept(statements, programs) {
+  const denied = uniqueLines(programs);
+  if (!denied.length) return statements;
+  let found = false;
+  const next = statements.map((statement) => {
+    if (statement.effect !== "permit" || !statementTargetsBash(statement)) return statement;
+    if (hasBashProgramCondition(statement, "not_in")) {
+      found = true;
+      return {
+        ...statement,
+        conditions: appendProgramsToCondition(statement.conditions, "not_in", denied)
+      };
+    }
+    if (!hasAnyBashProgramCondition(statement)) {
+      found = true;
+      return {
+        ...statement,
+        conditions: [...statement.conditions, { field: "bash.program", op: "not_in", value: denied }]
+      };
+    }
+    return statement;
+  });
+  if (found) return next;
+  return [
+    ...next,
+    {
+      id: "allow-bash-except-denied-programs",
+      effect: "permit",
+      principal: { type: "agent", id: "claude-code" },
+      action: { type: "tool", eq: "Bash" },
+      resource: { type: "workspace", scope: "current" },
+      conditions: [{ field: "bash.program", op: "not_in", value: denied }]
+    }
+  ];
+}
+
+function rawMentionsPolicyCreation(raw) {
+  return /\b(name\s+(?:the\s+)?policy|save\s+(?:this\s+)?as|only\s+allow|policy\s+should|should\s+only)\b/i.test(raw);
+}
+
+function rawMentionsFileTools(raw) {
+  return /\b(read\s+tools?|file\s+tools?|read\/write|write|edit|modify|change|create files?|update files?)\b/i.test(raw);
+}
+
+function rawMentionsDefaultDecision(raw) {
+  return /\b(default\s+(?:allow|deny|hold|ask)|(?:allow|deny|hold|ask)\s+by\s+default|require\s+approval\s+by\s+default)\b/i.test(raw);
+}
+
+function maybeBuildAdditivePolicy(raw, ast, currentPolicy) {
+  if (!/^\s*add\b/i.test(raw) || rawMentionsPolicyCreation(raw)) return null;
+  let statements = [...currentPolicy.statements];
+  const removedIds = [];
+  const denied = ast.bash.deniedPrograms;
+  const allowed = ast.bash.allowedPrograms;
+  const allowedTools = ast.tools?.allowed || [];
+  const deniedTools = ast.tools?.denied || [];
+  const heldTools = ast.tools?.held || [];
+
+  if (rawMentionsFileTools(raw) || allowedTools.length) {
+    statements = mergeToolPermit(
+      statements,
+      uniqueLines([...ast.fileTools, ...allowedTools]),
+      ast.fileTools.some((tool) => ["Write", "Edit", "MultiEdit"].includes(tool)) ? "allow-file-tools" : "allow-read-tools"
+    );
+  }
+  if (deniedTools.length) {
+    statements = mergeToolForbid(statements, deniedTools, "forbid-tools");
+  }
+  if (heldTools.length) {
+    statements = mergeToolHold(statements, heldTools, "hold-tools");
+  }
+
+  if ((ast.bash.allowAll || ast.bash.broadExceptDenied) && denied.length) {
+    statements = ensureBroadBashExcept(statements, denied);
+    statements = ast.bash.removeExplicitForbid
+      ? removeProgramsFromForbidStatements(statements, denied)
+      : applyDenyProgramRevision(statements, denied, removedIds);
+  } else if (denied.length) {
+    statements = ast.bash.removeExplicitForbid
+      ? removeProgramsFromForbidStatements(statements, denied)
+      : applyDenyProgramRevision(statements, denied, removedIds);
+  }
+
+  if (ast.bash.allowAll && !denied.length) {
+    if (!statements.some((statement) => statement.effect === "permit" && statementTargetsBash(statement) && !hasAnyBashProgramCondition(statement))) {
+      statements.push({
+        id: "allow-all-bash",
+        effect: "permit",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "Bash" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: []
+      });
+    }
+  } else if (allowed.length) {
+    statements = mergeAllowedBashPrograms(statements, allowed);
+  }
+
+  if (
+    !rawMentionsFileTools(raw) &&
+    !allowedTools.length &&
+    !deniedTools.length &&
+    !heldTools.length &&
+    !denied.length &&
+    !allowed.length &&
+    !ast.bash.allowAll
+  ) return null;
+
+  return normalizePolicyIr({
+    ...currentPolicy,
+    metadata: {
+      ...currentPolicy.metadata,
+      name: ast.profileName !== "draft-policy" ? ast.profileName : currentPolicy.metadata.name,
+      description: `${currentPolicy.metadata.description || ""}\nDrafted from: ${raw}`.trim()
+    },
+    defaults: rawMentionsDefaultDecision(raw)
+      ? { ...currentPolicy.defaults, decision: ast.defaults.decision }
+      : currentPolicy.defaults,
+    statements
+  });
+}
+
 function tokenizePolicyText(raw) {
   return (typeof raw === "string" ? raw.toLowerCase() : "").match(/[a-z0-9_-]+/g) || [];
 }
@@ -580,8 +1178,20 @@ function hasToken(raw, token) {
 
 function programHasDenyContext(raw, program) {
   const escaped = program.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`\\b(?:deny|block|forbid|except|exclude|without|not|disallow|do\\s+not\\s+allow)\\b(?:(?!\\ballow\\b)[\\s\\S]){0,100}\\b${escaped}\\b`, "i").test(raw) ||
+  return new RegExp(`\\b(?:deny|block|forbid|except|expect|exclude|without|not|disallow|do\\s+not\\s+allow)\\b(?:(?!\\ballow\\b)[\\s\\S]){0,100}\\b${escaped}\\b`, "i").test(raw) ||
     new RegExp(`\\b${escaped}\\b[\\s\\S]{0,60}\\b(?:denied|blocked|forbidden|disallowed)\\b`, "i").test(raw);
+}
+
+function toolHasDenyContext(raw, alias) {
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b(?:deny|block|forbid|exclude|without|not|disallow|do\\s+not\\s+allow)\\b(?:(?!\\b(?:allow|permit|hold|ask|require\\s+approval)\\b)[\\s\\S]){0,100}\\b${escaped}\\b`, "i").test(raw) ||
+    new RegExp(`\\b${escaped}\\b[\\s\\S]{0,60}\\b(?:denied|blocked|forbidden|disallowed)\\b`, "i").test(raw);
+}
+
+function toolHasHoldContext(raw, alias) {
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b(?:hold|ask\\s+before|require\\s+approval|approval\\s+required)\\b(?:(?!\\b(?:allow|permit|deny|block|forbid)\\b)[\\s\\S]){0,100}\\b${escaped}\\b`, "i").test(raw) ||
+    new RegExp(`\\b${escaped}\\b[\\s\\S]{0,60}\\b(?:held|ask|approval\\s+required)\\b`, "i").test(raw);
 }
 
 function mentionedPrograms(raw) {
@@ -592,6 +1202,29 @@ function mentionedPrograms(raw) {
     .map((entry) => entry.program);
 }
 
+function mentionedClaudeTools(raw) {
+  const found = [];
+  const seen = new Set();
+  for (const [alias, tool] of TOOL_ALIASES.entries()) {
+    if (tool === "*" || tool === "Bash") continue;
+    const pattern = new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    const match = raw.match(pattern);
+    if (!match || seen.has(tool)) continue;
+    seen.add(tool);
+    found.push({
+      tool,
+      alias,
+      index: match.index ?? 0,
+      action: toolHasDenyContext(raw, alias)
+        ? "deny"
+        : toolHasHoldContext(raw, alias)
+          ? "hold"
+          : "allow"
+    });
+  }
+  return found.sort((a, b) => a.index - b.index);
+}
+
 export function buildPolicyIntentAst(rawInput) {
   const raw = typeof rawInput === "string" ? rawInput.trim() : "";
   const lower = raw.toLowerCase();
@@ -599,6 +1232,8 @@ export function buildPolicyIntentAst(rawInput) {
   const name =
     raw.match(/save\s+(?:this\s+)?as\s+([a-z0-9_-]+)/i)?.[1] ||
     raw.match(/name\s+(?:the\s+)?policy\s+([a-z0-9_-]+)/i)?.[1] ||
+    raw.match(/name\s+(?:this\s+)?profile\s+(?:as\s+)?([a-z0-9_-]+)/i)?.[1] ||
+    raw.match(/profile\s+(?:name\s+)?(?:as\s+)?([a-z0-9_-]+)/i)?.[1] ||
     "draft-policy";
   const writesMentioned = /\b(write|edit|modify|change|create files?|update files?|read\/write)\b/i.test(raw);
   const allowAllBash =
@@ -606,24 +1241,38 @@ export function buildPolicyIntentAst(rawInput) {
     /\bbash\s+tool\s+is\s+allowed\s+for\s+all\b/i.test(raw) ||
     /\bbash\b[\s\S]*\b(any|all)\s+commands?\b/i.test(raw);
   const broadBashExceptDenied =
-    /\b(other things using bash|use other things using bash|bash but not|except|not these|anything else using bash)\b/i.test(raw) ||
+    /\b(other things using bash|use other things using bash|bash but not|except|expect|not these|anything else using bash)\b/i.test(raw) ||
     (/\bdo not allow\b/i.test(raw) && /\bbash\b/i.test(raw));
   const removeExplicitForbid =
     /\b(remove|delete|drop)\b[\s\S]*\bforbid\b/i.test(raw) ||
     /\bremove\b[\s\S]*\bcloud\b[\s\S]*\bdb\b[\s\S]*\badmin\b/i.test(raw);
-  const defaultDecision = /\b(default allow|allow by default)\b/i.test(raw)
-    ? "allow"
-    : "deny";
+  const defaultDecision = /\b(default hold|hold by default|default ask|ask by default|require approval by default)\b/i.test(raw)
+    ? "hold"
+    : /\b(default allow|allow by default)\b/i.test(raw)
+      ? "allow"
+      : "deny";
   const ambiguities = [];
   const riskWarnings = [];
   const deniedPrograms = [];
   const allowedPrograms = [];
+  const allowedTools = [];
+  const deniedTools = [];
+  const heldTools = [];
 
   for (const program of mentionedPrograms(raw)) {
     if (programHasDenyContext(raw, program)) {
       deniedPrograms.push(program);
     } else if (!allowedPrograms.includes(program)) {
       allowedPrograms.push(program);
+    }
+  }
+  for (const entry of mentionedClaudeTools(raw)) {
+    if (entry.action === "deny") {
+      if (!deniedTools.includes(entry.tool)) deniedTools.push(entry.tool);
+    } else if (entry.action === "hold") {
+      if (!heldTools.includes(entry.tool)) heldTools.push(entry.tool);
+    } else if (!allowedTools.includes(entry.tool)) {
+      allowedTools.push(entry.tool);
     }
   }
   if (/\bport checks?\b|\bport access\b/i.test(raw)) {
@@ -640,6 +1289,15 @@ export function buildPolicyIntentAst(rawInput) {
   if (writesMentioned) {
     riskWarnings.push("RISK Write/Edit/MultiEdit are included because the request mentioned writing or editing files.");
   }
+  if (allowedTools.some((tool) => ["Write", "Edit", "MultiEdit", "Bash", "PowerShell", "Monitor", "WebFetch", "WebSearch", "Skill", "Workflow", "Agent"].includes(tool))) {
+    riskWarnings.push(`RISK Powerful Claude tools explicitly allowed: ${allowedTools.filter((tool) => ["Write", "Edit", "MultiEdit", "Bash", "PowerShell", "Monitor", "WebFetch", "WebSearch", "Skill", "Workflow", "Agent"].includes(tool)).join(", ")}.`);
+  }
+  if (deniedTools.length) {
+    riskWarnings.push(`BLOCK Claude tools explicitly denied: ${deniedTools.join(", ")}.`);
+  }
+  if (heldTools.length) {
+    riskWarnings.push(`ASK Claude tools require approval: ${heldTools.join(", ")}.`);
+  }
   if (allowedPrograms.some((program) => NETWORK_PROGRAMS.has(program))) {
     riskWarnings.push(`RISK Network-capable Bash programs mentioned: ${allowedPrograms.filter((program) => NETWORK_PROGRAMS.has(program)).join(", ")}.`);
   }
@@ -648,6 +1306,9 @@ export function buildPolicyIntentAst(rawInput) {
   }
   if (/\b(file access|files? access)\b/i.test(raw)) {
     ambiguities.push("AMBIGUOUS file access could mean read-only or write access. This draft defaults to read-oriented tools unless writing was explicit.");
+  }
+  if (/\bexpect\b/i.test(raw) && deniedPrograms.length) {
+    ambiguities.push("AMBIGUOUS interpreted 'expect' as 'except' because it appeared before denied Bash programs.");
   }
   if (/\b(network access|internal domains?|all urls?|external urls?)\b/i.test(raw)) {
     ambiguities.push("AMBIGUOUS network access needs host/domain scoping before this should be staged.");
@@ -673,8 +1334,13 @@ export function buildPolicyIntentAst(rawInput) {
     profileName: name,
     defaults: { decision: defaultDecision },
     fileTools: writesMentioned
-      ? ["Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"]
-      : ["Read", "Grep", "Glob"],
+      ? uniqueLines(["Read", "Grep", "Glob", "Write", "Edit", "MultiEdit", ...allowedTools.filter((tool) => ["Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"].includes(tool))])
+      : uniqueLines(["Read", "Grep", "Glob", ...allowedTools.filter((tool) => ["Read", "Grep", "Glob"].includes(tool))]),
+    tools: {
+      allowed: uniqueLines(allowedTools.filter((tool) => !["Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"].includes(tool))),
+      denied: uniqueLines(deniedTools),
+      held: uniqueLines(heldTools)
+    },
     bash: {
       allowAll: allowAllBash,
       broadExceptDenied: broadBashExceptDenied,
@@ -690,6 +1356,30 @@ export function buildPolicyIntentAst(rawInput) {
 function inferComplexDraft(raw, state) {
   const lower = raw.toLowerCase();
   const ast = buildPolicyIntentAst(raw);
+  const currentPolicy = isPlainObject(state?.policy) ? normalizePolicyIr(state.policy) : emptyPolicy();
+  const additivePolicy = maybeBuildAdditivePolicy(raw, ast, currentPolicy);
+  if (additivePolicy) {
+    const ambiguities = [...ast.ambiguities];
+    ambiguities.push("Additive draft: active policy statements not mentioned in the request were preserved.");
+    if (ast.bash.allowedPrograms.length) {
+      ambiguities.push(`Allowed Bash program change: ${ast.bash.allowedPrograms.join(", ")}.`);
+    }
+    if (ast.bash.deniedPrograms.length) {
+      ambiguities.push(`Denied Bash program change: ${ast.bash.deniedPrograms.join(", ")}.`);
+    }
+    return {
+      draftId: draftId(),
+      createdAt: new Date().toISOString(),
+      source: { type: "additive_complex_nl_draft", input: raw },
+      policy: additivePolicy,
+      ast,
+      confidence: ast.confidence,
+      riskWarnings: draftRiskWarnings(ast.riskWarnings, additivePolicy),
+      ambiguities: uniqueLines(ambiguities),
+      diff: formatPolicyReviewDiff(currentPolicy, additivePolicy),
+      policyHash: canonicalPolicyHash(additivePolicy)
+    };
+  }
   const name = ast.profileName;
   const wantsWriteTools = ast.fileTools.some((tool) => ["Write", "Edit", "MultiEdit"].includes(tool));
   const broadBashExceptDenied = ast.bash.broadExceptDenied;
@@ -697,9 +1387,12 @@ function inferComplexDraft(raw, state) {
   const removeExplicitForbid = ast.bash.removeExplicitForbid;
   const programs = ast.bash.allowedPrograms;
   const denied = ast.bash.deniedPrograms;
-  const bashHasExceptions = denied.length > 0 && (broadBashExceptDenied || /\bexcept\b/i.test(raw));
+  const bashHasExceptions = denied.length > 0 && (broadBashExceptDenied || /\b(?:except|expect)\b/i.test(raw));
   const allowUnrestrictedBash = allowAllBash && !bashHasExceptions;
-  const fileTools = ast.fileTools;
+  const allowedTools = ast.tools?.allowed || [];
+  const deniedTools = ast.tools?.denied || [];
+  const heldTools = ast.tools?.held || [];
+  const fileTools = uniqueLines([...ast.fileTools, ...allowedTools]);
   const statements = [
     {
       id: wantsWriteTools ? "allow-file-tools" : "allow-read-tools",
@@ -710,6 +1403,26 @@ function inferComplexDraft(raw, state) {
       conditions: []
     }
   ];
+  if (deniedTools.length) {
+    statements.push({
+      id: "forbid-tools",
+      effect: "forbid",
+      principal: { type: "agent", id: "claude-code" },
+      action: deniedTools.length === 1 ? { type: "tool", eq: deniedTools[0] } : { type: "tool", in: deniedTools },
+      resource: { type: "workspace", scope: "current" },
+      conditions: []
+    });
+  }
+  if (heldTools.length) {
+    statements.push({
+      id: "hold-tools",
+      effect: "require_approval",
+      principal: { type: "agent", id: "claude-code" },
+      action: heldTools.length === 1 ? { type: "tool", eq: heldTools[0] } : { type: "tool", in: heldTools },
+      resource: { type: "workspace", scope: "current" },
+      conditions: []
+    });
+  }
   if (allowUnrestrictedBash) {
     statements.push({
       id: "allow-all-bash",
@@ -765,6 +1478,15 @@ function inferComplexDraft(raw, state) {
   if ((allowAllBash || broadBashExceptDenied) && denied.length) {
     ambiguities.push(`Bash is broadly allowed except ${denied.join(", ")}. Review carefully before staging.`);
   }
+  if (allowedTools.length) {
+    ambiguities.push(`Claude tool allow change: ${allowedTools.join(", ")}.`);
+  }
+  if (deniedTools.length) {
+    ambiguities.push(`Claude tool block change: ${deniedTools.join(", ")}.`);
+  }
+  if (heldTools.length) {
+    ambiguities.push(`Claude tool approval change: ${heldTools.join(", ")}.`);
+  }
   if (removeExplicitForbid && denied.length) {
     ambiguities.push("Explicit forbid statement was omitted because the prompt asked to remove it; denied programs are only excluded from the Bash allow condition.");
   }
@@ -774,7 +1496,6 @@ function inferComplexDraft(raw, state) {
   if (lower.includes("curl")) ambiguities.push("curl can access external network. Scope all URLs or selected domains?");
   if (lower.includes("file") && !wantsWriteTools) ambiguities.push("file access could mean read-only or write access. This draft allows read-oriented tools only.");
   if (!ambiguities.length) ambiguities.push("This was too complex for deterministic staging; review the normalized JSON before staging.");
-  const currentPolicy = isPlainObject(state?.policy) ? normalizePolicyIr(state.policy) : emptyPolicy();
   return {
     draftId: draftId(),
     createdAt: new Date().toISOString(),
@@ -782,7 +1503,7 @@ function inferComplexDraft(raw, state) {
     policy,
     ast,
     confidence: ast.confidence,
-    riskWarnings: uniqueLines([...ast.riskWarnings, ...riskWarningsForPolicy(policy)]),
+    riskWarnings: draftRiskWarnings(ast.riskWarnings, policy),
     ambiguities: uniqueLines(ambiguities),
     diff: formatPolicyReviewDiff(currentPolicy, policy),
     policyHash: canonicalPolicyHash(policy)
@@ -824,6 +1545,15 @@ function parseCommand(prompt) {
   if (["rebind", "refresh-token", "repair-token"].includes(lower)) {
     return { cmd: "rebind" };
   }
+
+  const defaultMatch = rest.match(/^default\s+(\S+)$/i);
+  if (defaultMatch) {
+    const decision = normalizeDefaultDecision(defaultMatch[1]);
+    return decision
+      ? { cmd: "default", decision }
+      : { cmd: "default-error", value: defaultMatch[1] };
+  }
+  if (lower.startsWith("default ")) return { cmd: "default-error", value: rest.slice(8).trim() };
 
   const stageMatch = rest.match(/^stage\s+([\s\S]+)$/i);
   if (stageMatch) return { cmd: "stage", value: stageMatch[1].trim() };
@@ -923,18 +1653,7 @@ function normalizeToolLabel(raw) {
     .replace(/\s+tool$/i, "")
     .trim();
   const aliases = new Map([
-    ["bash", "Bash"],
-    ["shell", "Bash"],
-    ["terminal", "Bash"],
-    ["read", "Read"],
-    ["grep", "Grep"],
-    ["glob", "Glob"],
-    ["edit", "Edit"],
-    ["write", "Write"],
-    ["webfetch", "WebFetch"],
-    ["web fetch", "WebFetch"],
-    ["websearch", "WebSearch"],
-    ["web search", "WebSearch"]
+    ...TOOL_ALIASES
   ]);
   return aliases.get(cleaned.toLowerCase()) || cleaned;
 }
@@ -969,9 +1688,9 @@ function phraseMentionsBashProgram(text) {
 
 function looksComplexNaturalLanguage(text) {
   const lower = text.toLowerCase();
-  return /["']|only allow|should|policy should|save (this )?as|port access|port checks|file access|file tools|read\/write|network access|internal domains|safe commands|admin tools|except|bash but not|default allow|default deny|allow all bash|through bash|using bash|curl|psql|gcloud|kubectl|aws|az/.test(lower) &&
-    !/^add\s+(allow|deny|hold|require_approval)\s+(read|grep|glob|write|edit|multiedit|bash|webfetch|websearch|explore|skill)(\s*(,|\band\b|\&|\+)\s*(read|grep|glob|write|edit|multiedit|bash|webfetch|websearch|explore|skill))*$/i.test(text) &&
-    (phraseMentionsBashProgram(text) || /["']|only allow|should|policy should|save (this )?as|port access|port checks|file access|file tools|read\/write|network access|internal domains|safe commands|admin tools|except|bash but not|default allow|default deny|allow all bash|through bash|using bash/.test(lower));
+  return /["']|only allow|should|policy should|save (this )?as|port access|port checks|file access|file tools|read\/write|network access|internal domains|safe commands|admin tools|except|bash but not|default allow|default deny|default hold|default ask|allow all bash|through bash|using bash|curl|psql|gcloud|kubectl|aws|az/.test(lower) &&
+    !/^add\s+(allow|deny|hold|require_approval)\s+(read|grep|glob|write|edit|multiedit|bash|webfetch|websearch|explore|agent|skill|toolsearch|lsp|notebookedit|notebookread|powershell|workflow)(\s*(,|\band\b|\&|\+)\s*(read|grep|glob|write|edit|multiedit|bash|webfetch|websearch|explore|agent|skill|toolsearch|lsp|notebookedit|notebookread|powershell|workflow))*$/i.test(text) &&
+    (phraseMentionsBashProgram(text) || /["']|only allow|should|policy should|save (this )?as|port access|port checks|file access|file tools|read\/write|network access|internal domains|safe commands|admin tools|except|bash but not|default allow|default deny|default hold|default ask|allow all bash|through bash|using bash/.test(lower));
 }
 
 export function parseNaturalRules(text) {
@@ -998,6 +1717,7 @@ function helpText() {
     "  /armor                              — show this help",
     "  /armor policy list                  — show current rules",
     "  /armor policy view                  — show active policy JSON",
+    "  /armor policy default <allow|deny|hold> — stage unmatched-tool default",
     "  /armor policy add allow Read and Grep, deny Write, hold Bash",
     "  /armor policy stage <draft-id|json> — stage validated draft or JSON",
     "  /armor policy revise <draft-id> \"remove <statement-id>\"",
@@ -1043,6 +1763,14 @@ export async function handleArmorPolicyCommand(prompt, config) {
       return [
         "Could not parse that policy request, so no policy was staged.",
         "Try: /armor policy add allow Read and Grep, deny Write, hold Bash"
+      ].join("\n");
+
+    case "default-error":
+      return [
+        "Unknown default decision. No policy was staged.",
+        "Use: /armor policy default allow",
+        "Use: /armor policy default deny",
+        "Use: /armor policy default hold"
       ].join("\n");
 
     case "draft-complex": {
@@ -1163,10 +1891,15 @@ export async function handleArmorPolicyCommand(prompt, config) {
       const state = await loadPolicyState(config.policyFile);
       const review = summarizePolicyReview(state.policy);
       if (review === "(no statements)") {
-        return `Policy v${state.version}: no rules configured.\nUse /armor policy add or /armor policy template to get started.`;
+        return [
+          `Policy v${state.version}: no rules configured.`,
+          defaultDecisionText(state.policy),
+          "Use /armor policy add, /armor policy default, or /armor policy template to get started."
+        ].join("\n");
       }
       return [
         `Policy v${state.version}:`,
+        `  ${defaultDecisionText(state.policy)}`,
         review
           .split("\n")
           .map((line, index) => `  ${index + 1}. ${line}`)
@@ -1194,6 +1927,23 @@ export async function handleArmorPolicyCommand(prompt, config) {
         return `Crypto policy rebind failed. Active policy was not changed. Reason: ${result.error}`;
       }
       return `Crypto policy rebound for policy v${state.version}.${result.note}`;
+    }
+
+    case "default": {
+      const state = await loadPolicyState(config.policyFile);
+      const proposedPolicy = withDefaultDecision(state.policy, parsed.decision);
+      const pending = await stagePending(config, state, proposedPolicy, `default ${parsed.decision}`, { type: "deterministic" });
+      const behavior = {
+        allow: "unmatched tools will be allowed",
+        deny: "unmatched tools will be blocked",
+        hold: "unmatched tools will ask for approval"
+      }[parsed.decision];
+      return formatProposal(
+        pending,
+        state.policy,
+        proposedPolicy,
+        `Proposed: set default policy decision to ${parsed.decision} (${behavior}).`
+      );
     }
 
     case "add": {

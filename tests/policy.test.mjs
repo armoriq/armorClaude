@@ -212,6 +212,41 @@ test("handlePreToolUse asks for held read-only tools instead of bypassing policy
   assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /requires approval: hold-read/);
 });
 
+test("handlePreToolUse asks through native UI for default hold unmatched tools", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  const config = buildConfig(tmp);
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(
+    config.policyFile,
+    JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      updatedBy: "test",
+      policy: {
+        schemaVersion: "armor.policy.v1",
+        kind: "PolicyProfile",
+        metadata: { name: "default-hold", description: "" },
+        defaults: { decision: "hold", conflictResolution: "deny_overrides" },
+        statements: []
+      },
+      history: []
+    }),
+    "utf8"
+  );
+
+  const output = await handlePreToolUse(
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "session-default-hold",
+      tool_name: "Write",
+      tool_input: { file_path: "a.txt", content: "hello" }
+    },
+    config
+  );
+  assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
+  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /default hold/);
+});
+
 test("handlePreToolUse lets Claude coordination tools bypass user policy default deny", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp);

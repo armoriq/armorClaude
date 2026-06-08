@@ -4,7 +4,7 @@ import { isPlainObject, normalizeToolName } from "./common.mjs";
 export const POLICY_IR_VERSION = "armor.policy.v1";
 
 const EFFECTS = new Set(["permit", "forbid", "require_approval"]);
-const DEFAULT_DECISIONS = new Set(["allow", "deny"]);
+const DEFAULT_DECISIONS = new Set(["allow", "deny", "hold"]);
 const CONFLICT_RESOLUTIONS = new Set(["deny_overrides"]);
 const PRINCIPAL_TYPES = new Set(["agent", "user", "org", "role"]);
 const ACTION_TYPES = new Set(["tool", "mcp_server", "mcp_tool", "bash_program"]);
@@ -29,22 +29,51 @@ const CONDITION_OPS = new Set([
 ]);
 const KNOWN_TOOLS = new Set([
   "*",
+  "Agent",
+  "AskUserQuestion",
   "Bash",
-  "Explore",
-  "Read",
-  "Write",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
   "Edit",
-  "MultiEdit",
-  "Grep",
+  "EnterPlanMode",
+  "EnterWorktree",
+  "ExitPlanMode",
+  "ExitWorktree",
+  "Explore",
   "Glob",
-  "NotebookRead",
+  "Grep",
+  "ListMcpResourcesTool",
+  "LSP",
+  "Monitor",
+  "MultiEdit",
   "NotebookEdit",
-  "WebFetch",
-  "WebSearch",
+  "NotebookRead",
+  "PowerShell",
+  "PushNotification",
+  "Read",
+  "ReadMcpResourceTool",
+  "RemoteTrigger",
+  "ScheduleWakeup",
+  "SendMessage",
+  "ShareOnboardingGuide",
   "Skill",
   "Task",
+  "TaskCreate",
+  "TaskGet",
+  "TaskList",
+  "TaskOutput",
+  "TaskStop",
+  "TaskUpdate",
+  "TeamCreate",
+  "TeamDelete",
   "TodoWrite",
-  "ExitPlanMode"
+  "ToolSearch",
+  "WaitForMcpServers",
+  "WebFetch",
+  "WebSearch",
+  "Workflow",
+  "Write"
 ]);
 const LEGACY_BASH_PROGRAMS = new Set([
   "awk",
@@ -325,7 +354,7 @@ export function validatePolicyIr(policyLike) {
   if (isPlainObject(policyLike.defaults)) {
     const defaultsExtras = extraKeys(policyLike.defaults, ["decision", "conflictResolution"]);
     if (defaultsExtras.length) errors.push(`Unknown defaults field(s): ${defaultsExtras.join(", ")}`);
-    if (!DEFAULT_DECISIONS.has(policyLike.defaults.decision)) errors.push("defaults.decision must be allow or deny");
+    if (!DEFAULT_DECISIONS.has(policyLike.defaults.decision)) errors.push("defaults.decision must be allow, deny, or hold");
     if (!CONFLICT_RESOLUTIONS.has(policyLike.defaults.conflictResolution)) errors.push("defaults.conflictResolution must be deny_overrides");
   }
 
@@ -471,11 +500,25 @@ export function evaluatePolicyIr({ policy, toolName, toolParams }) {
   if (permit) {
     return { allowed: true, matchedRule: permit };
   }
-  const allowed = normalized.defaults.decision === "allow";
+  if (normalized.defaults.decision === "allow") {
+    return { allowed: true };
+  }
+  if (normalized.defaults.decision === "hold") {
+    return {
+      allowed: false,
+      reason: `ArmorClaude policy default hold: no statement matched tool ${toolName}. Active default is hold.`,
+      matchedRule: {
+        id: "default-hold",
+        effect: "require_approval",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "*" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: []
+      }
+    };
+  }
   return {
-    allowed,
-    reason: allowed
-      ? undefined
-      : `ArmorClaude policy default deny: no statement matched tool ${toolName}. Active default is deny.`
+    allowed: false,
+    reason: `ArmorClaude policy default deny: no statement matched tool ${toolName}. Active default is deny.`
   };
 }

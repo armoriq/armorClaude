@@ -55,6 +55,23 @@ async function seedPolicy(config, rules = []) {
   });
 }
 
+async function seedIrPolicy(config, overrides = {}) {
+  await savePolicyState(config.policyFile, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    updatedBy: "test",
+    policy: {
+      schemaVersion: "armor.policy.v1",
+      kind: "PolicyProfile",
+      metadata: { name: "test-policy", description: "" },
+      defaults: { decision: "deny", conflictResolution: "deny_overrides" },
+      statements: [],
+      ...overrides
+    },
+    history: []
+  });
+}
+
 // ---------------------------------------------------------------------------
 // isArmorPolicyCommand detection
 // ---------------------------------------------------------------------------
@@ -92,6 +109,7 @@ test("/armor policy help returns usage text", async () => {
   assert.ok(out.includes("ArmorClaude Policy Commands"));
   assert.ok(out.includes("/armor policy list"));
   assert.ok(out.includes("/armor policy view"));
+  assert.ok(out.includes("/armor policy default <allow|deny|hold>"));
   assert.ok(out.includes("legacy /armor-policy is intentionally unsupported"));
 });
 
@@ -175,6 +193,56 @@ test("/armor yes applies the current staged policy proposal", async () => {
   const listOut = await handleArmorPolicyCommand("/armor policy list", config);
   assert.ok(listOut.includes("BLOCK"));
   assert.ok(listOut.includes("Bash"));
+});
+
+test("/armor policy default allow stages and confirms default allow", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedIrPolicy(config);
+
+  const out = await handleArmorPolicyCommand("/armor policy default allow", config);
+  assert.ok(out.includes("Proposed: set default policy decision to allow"));
+  assert.ok(out.includes("- DEFAULT BLOCK unmatched tools"));
+  assert.ok(out.includes("+ DEFAULT ALLOW unmatched tools"));
+  assert.ok(out.includes("\"path\": \"/defaults\""));
+  assert.ok(out.includes("/armor yes"));
+
+  const pending = JSON.parse(await readFile(path.join(tmp, "policy-pending.json"), "utf8"));
+  assert.equal(pending.reason, "default allow");
+  assert.equal(pending.proposedPolicy.defaults.decision, "allow");
+
+  const confirmOut = await handleArmorPolicyCommand(`/armor policy confirm ${pending.proposalId}`, config);
+  assert.ok(confirmOut.includes("Policy updated"));
+  const viewOut = await handleArmorPolicyCommand("/armor policy view", config);
+  assert.equal(JSON.parse(viewOut).defaults.decision, "allow");
+});
+
+test("/armor policy default hold stages approval default and /armor yes applies it", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedIrPolicy(config);
+
+  const out = await handleArmorPolicyCommand("/armor policy default hold", config);
+  assert.ok(out.includes("unmatched tools will ask for approval"));
+  assert.ok(out.includes("+ DEFAULT ASK unmatched tools"));
+  assert.ok(out.includes("ASK Default hold asks for approval"));
+
+  const confirmOut = await handleArmorPolicyCommand("/armor yes", config);
+  assert.ok(confirmOut.includes("Policy updated"));
+  const listOut = await handleArmorPolicyCommand("/armor policy list", config);
+  assert.ok(listOut.includes("DEFAULT ASK unmatched tools"));
+  const viewOut = await handleArmorPolicyCommand("/armor policy view", config);
+  assert.equal(JSON.parse(viewOut).defaults.decision, "hold");
+});
+
+test("/armor policy default rejects unsupported decisions without staging", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedIrPolicy(config);
+
+  const out = await handleArmorPolicyCommand("/armor policy default maybe", config);
+  assert.ok(out.includes("Unknown default decision"));
+  await assert.rejects(readFile(path.join(tmp, "policy-pending.json"), "utf8"));
 });
 
 test("/armor policy add parses natural-language multi-rule changes", async () => {
@@ -272,6 +340,91 @@ test("/armor policy add allows all bash phrasing", async () => {
   assert.ok(out.includes("All Bash commands are allowed"));
 });
 
+test("/armor policy add preserves explicit modern Claude tools in mixed natural language", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedIrPolicy(config, {
+    statements: [
+      {
+        id: "allow-read-tools",
+        effect: "permit",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", in: ["Read", "Grep", "Glob"] },
+        resource: { type: "workspace", scope: "current" },
+        conditions: []
+      },
+      {
+        id: "allow-bash-except-denied-programs",
+        effect: "permit",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "Bash" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: [{ field: "bash.program", op: "not_in", value: ["gcloud", "psql"] }]
+      },
+      {
+        id: "forbid-cloud-db-admin",
+        effect: "forbid",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "Bash" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: [{ field: "bash.program", op: "in", value: ["gcloud", "psql"] }]
+      }
+    ]
+  });
+
+  const out = await handleArmorPolicyCommand(
+    "/armor policy add \"allow all bash commands except gcloud, allow psql, allow Edit, Write, Agent, and Skill tools\"",
+    config
+  );
+  assert.ok(out.includes("Drafted from natural language. Not staged."));
+  assert.ok(out.includes("Agent"));
+  assert.ok(out.includes("Skill"));
+  assert.ok(out.includes("Allowed Bash program change: psql."));
+  assert.ok(out.includes("Denied Bash program change: gcloud."));
+
+  const draftId = out.match(/draft_[a-f0-9]{8}/)?.[0];
+  const drafts = JSON.parse(await readFile(path.join(tmp, "policy-drafts.json"), "utf8"));
+  const draft = drafts.drafts[draftId];
+  const toolAllow = draft.policy.statements.find((statement) => statement.effect === "permit" && !statement.conditions.length && Array.isArray(statement.action.in));
+  assert.ok(toolAllow);
+  assert.deepEqual(toolAllow.action.in, ["Read", "Grep", "Glob", "Write", "Edit", "MultiEdit", "Agent", "Skill"]);
+  const bashAllow = draft.policy.statements.find((statement) => statement.id === "allow-bash-except-denied-programs");
+  assert.deepEqual(bashAllow.conditions, [
+    { field: "bash.program", op: "not_in", value: ["gcloud"] }
+  ]);
+  const forbid = draft.policy.statements.find((statement) => statement.id === "forbid-cloud-db-admin");
+  assert.deepEqual(forbid.conditions, [
+    { field: "bash.program", op: "in", value: ["gcloud"] }
+  ]);
+});
+
+test("/armor policy add supports explicit allow block and hold for modern Claude tools", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedPolicy(config);
+
+  const out = await handleArmorPolicyCommand(
+    "/armor policy add \"allow WebFetch, block WebSearch, hold Agent\"",
+    config
+  );
+  assert.ok(out.includes("Drafted from natural language. Not staged."));
+  assert.ok(out.includes("ALLOW"));
+  assert.ok(out.includes("BLOCK"));
+  assert.ok(out.includes("ASK"));
+
+  const draftId = out.match(/draft_[a-f0-9]{8}/)?.[0];
+  const drafts = JSON.parse(await readFile(path.join(tmp, "policy-drafts.json"), "utf8"));
+  const draft = drafts.drafts[draftId];
+  const allow = draft.policy.statements.find((statement) => statement.effect === "permit" && !statement.conditions.length);
+  const forbid = draft.policy.statements.find((statement) => statement.id === "forbid-tools");
+  const hold = draft.policy.statements.find((statement) => statement.id === "hold-tools");
+  assert.ok(allow.action.in.includes("WebFetch"));
+  assert.equal(forbid.effect, "forbid");
+  assert.equal(forbid.action.eq, "WebSearch");
+  assert.equal(hold.effect, "require_approval");
+  assert.equal(hold.action.eq, "Agent");
+});
+
 test("/armor policy add allow all bash except denied program keeps exception", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
@@ -302,6 +455,108 @@ test("/armor policy add allow all bash except denied program keeps exception", a
   ]);
 });
 
+test("/armor policy add treats expect as except before denied Bash programs", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedPolicy(config);
+
+  const out = await handleArmorPolicyCommand(
+    "/armor policy add \"all read tools allow and bash allow expect gcloud and psql command\"",
+    config
+  );
+  assert.ok(out.includes("Drafted from natural language. Not staged."));
+  assert.ok(out.includes("allow-bash-except-denied-programs"));
+  assert.ok(out.includes("forbid-cloud-db-admin"));
+  assert.ok(out.includes("interpreted 'expect' as 'except'"));
+  assert.ok(!out.includes("allow-safe-bash-inspection: Bash when bash.program in [gcloud, psql]"));
+
+  const draftId = out.match(/draft_[a-f0-9]{8}/)?.[0];
+  const drafts = JSON.parse(await readFile(path.join(tmp, "policy-drafts.json"), "utf8"));
+  const draft = drafts.drafts[draftId];
+  const bashAllow = draft.policy.statements.find((statement) => statement.id === "allow-bash-except-denied-programs");
+  assert.deepEqual(bashAllow.conditions, [
+    { field: "bash.program", op: "not_in", value: ["gcloud", "psql"] }
+  ]);
+  const forbid = draft.policy.statements.find((statement) => statement.id === "forbid-cloud-db-admin");
+  assert.deepEqual(forbid.conditions, [
+    { field: "bash.program", op: "in", value: ["gcloud", "psql"] }
+  ]);
+});
+
+test("/armor policy add names profile and labels paired Bash exception guardrail", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedPolicy(config);
+
+  const out = await handleArmorPolicyCommand(
+    "/armor policy add \"all read tools allow and bash allow expect gcloud and psql command and name this profile as intern_policy\"",
+    config
+  );
+  assert.ok(out.includes("ALLOW allow-bash-except-denied-programs: Bash when bash.program not_in [gcloud, psql] (paired BLOCK guardrail: forbid-cloud-db-admin)"));
+  assert.ok(out.includes("BLOCK forbid-cloud-db-admin: Bash when bash.program in [gcloud, psql] (guardrail for allow-bash-except-denied-programs)"));
+  assert.ok(out.includes("Exceptions are explicitly blocked by guardrail forbid-cloud-db-admin."));
+
+  const draftId = out.match(/draft_[a-f0-9]{8}/)?.[0];
+  const drafts = JSON.parse(await readFile(path.join(tmp, "policy-drafts.json"), "utf8"));
+  const draft = drafts.drafts[draftId];
+  assert.equal(draft.policy.metadata.name, "intern_policy");
+});
+
+test("/armor policy add allow Bash program preserves unrelated denied programs", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedIrPolicy(config, {
+    statements: [
+      {
+        id: "allow-read-tools",
+        effect: "permit",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", in: ["Read", "Grep", "Glob"] },
+        resource: { type: "workspace", scope: "current" },
+        conditions: []
+      },
+      {
+        id: "allow-bash-except-denied-programs",
+        effect: "permit",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "Bash" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: [{ field: "bash.program", op: "not_in", value: ["gcloud", "psql"] }]
+      },
+      {
+        id: "forbid-cloud-db-admin",
+        effect: "forbid",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "Bash" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: [{ field: "bash.program", op: "in", value: ["gcloud", "psql"] }]
+      }
+    ]
+  });
+
+  const out = await handleArmorPolicyCommand(
+    "/armor policy add \"allow psql in bash tools\"",
+    config
+  );
+  assert.ok(out.includes("Drafted from natural language. Not staged."));
+  assert.ok(out.includes("Additive draft"));
+  assert.ok(out.includes("ALLOW allow-bash-except-denied-programs: Bash when bash.program not_in [gcloud] (paired BLOCK guardrail: forbid-cloud-db-admin)"));
+  assert.ok(out.includes("BLOCK forbid-cloud-db-admin: Bash when bash.program in [gcloud] (guardrail for allow-bash-except-denied-programs)"));
+  assert.ok(!out.includes("+ ALLOW allow-safe-bash-inspection: Bash when bash.program in [psql]"));
+
+  const draftId = out.match(/draft_[a-f0-9]{8}/)?.[0];
+  const drafts = JSON.parse(await readFile(path.join(tmp, "policy-drafts.json"), "utf8"));
+  const draft = drafts.drafts[draftId];
+  const bashAllow = draft.policy.statements.find((statement) => statement.id === "allow-bash-except-denied-programs");
+  assert.deepEqual(bashAllow.conditions, [
+    { field: "bash.program", op: "not_in", value: ["gcloud"] }
+  ]);
+  const forbid = draft.policy.statements.find((statement) => statement.id === "forbid-cloud-db-admin");
+  assert.deepEqual(forbid.conditions, [
+    { field: "bash.program", op: "in", value: ["gcloud"] }
+  ]);
+});
+
 test("/armor policy add draft diff uses canonical policy review for legacy Bash program rules", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
@@ -314,8 +569,10 @@ test("/armor policy add draft diff uses canonical policy review for legacy Bash 
     "/armor policy add \"allow all bash except gcloud\"",
     config
   );
-  assert.ok(out.includes("- ALLOW policy1: Bash when bash.program in [ls]"));
+  assert.ok(out.includes("ALLOW policy1: Bash when bash.program in [ls]"));
+  assert.ok(out.includes("+ BLOCK forbid-cloud-db-admin: Bash when bash.program in [gcloud]"));
   assert.ok(!out.includes("- policy1: allow ls"));
+  assert.ok(!out.includes("- ALLOW policy1: Bash when bash.program in [ls]"));
 });
 
 test("/armor policy add unquoted all bash except denied program is also draft-only", async () => {
@@ -359,6 +616,22 @@ test("/armor policy add rejects unknown non-program tools instead of staging", a
   await assert.rejects(readFile(path.join(tmp, "policy-pending.json"), "utf8"));
 });
 
+test("/armor policy add stages deterministic modern Claude tools", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedPolicy(config);
+
+  const out = await handleArmorPolicyCommand("/armor policy add allow Agent and Skill", config);
+  assert.ok(out.includes("Proposed policy changes"));
+  assert.ok(out.includes("Agent"));
+  assert.ok(out.includes("Skill"));
+
+  const pending = JSON.parse(await readFile(path.join(tmp, "policy-pending.json"), "utf8"));
+  const actions = pending.proposedPolicy.statements.map((statement) => statement.action.eq);
+  assert.ok(actions.includes("Agent"));
+  assert.ok(actions.includes("Skill"));
+});
+
 test("/armor policy add can omit explicit forbid when prompt asks to remove it", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
@@ -400,6 +673,37 @@ test("/armor policy revise removes a draft statement deterministically", async (
   const draft = drafts.drafts[newDraftId];
   assert.ok(draft);
   assert.equal(draft.policy.statements.some((statement) => statement.id === "forbid-cloud-db-admin"), false);
+});
+
+test("/armor policy revise can block Bash programs in an existing draft", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedPolicy(config);
+
+  const out = await handleArmorPolicyCommand(
+    "/armor policy add \"allow gcloud and psql through Bash\"",
+    config
+  );
+  const draftId = out.match(/draft_[a-f0-9]{8}/)?.[0];
+  assert.ok(draftId);
+
+  const revisedOut = await handleArmorPolicyCommand(
+    `/armor policy revise ${draftId} "block gcloud and psql in bash tool"`,
+    config
+  );
+  assert.ok(revisedOut.includes("Draft revised. Not staged."));
+  assert.ok(revisedOut.includes("forbid-cloud-db-admin"));
+  assert.ok(revisedOut.includes("- ALLOW allow-safe-bash-inspection: Bash when bash.program in [gcloud, psql]"));
+  const newDraftId = revisedOut.match(/New draft: (draft_[a-f0-9]{8})/)?.[1];
+
+  const drafts = JSON.parse(await readFile(path.join(tmp, "policy-drafts.json"), "utf8"));
+  const draft = drafts.drafts[newDraftId];
+  assert.ok(draft);
+  assert.equal(draft.policy.statements.some((statement) => statement.id === "allow-safe-bash-inspection"), false);
+  const forbid = draft.policy.statements.find((statement) => statement.id === "forbid-cloud-db-admin");
+  assert.deepEqual(forbid.conditions, [
+    { field: "bash.program", op: "in", value: ["gcloud", "psql"] }
+  ]);
 });
 
 test("/armor policy revise returns draft not found for mistyped draft id", async () => {
@@ -559,11 +863,12 @@ test("/armor policy draft validate treats prompt injection text as display-only"
 });
 
 test("buildPolicyIntentAst separates tools from Bash programs and records confidence", () => {
-  const ast = buildPolicyIntentAst("allow all bash except gcloud and psql, allow ls curl through bash");
+  const ast = buildPolicyIntentAst("allow all bash except gcloud and psql, allow ls curl through bash, allow Agent and Skill");
   assert.equal(ast.version, "armor.policy.intent.v1");
   assert.equal(ast.confidence, "risky_exact");
   assert.deepEqual(ast.bash.deniedPrograms, ["gcloud", "psql"]);
   assert.deepEqual(ast.bash.allowedPrograms, ["ls", "curl"]);
+  assert.deepEqual(ast.tools.allowed, ["Agent", "Skill"]);
   assert.ok(ast.riskWarnings.some((warning) => warning.includes("RISK Bash is broadly allowed except")));
 });
 
@@ -606,12 +911,40 @@ test("buildPolicyIntentAst golden corpus covers common policy phrases", () => {
       check: (ast) => assert.deepEqual(ast.fileTools, ["Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"])
     },
     {
+      text: "allow Agent and Skill tools",
+      check: (ast) => assert.deepEqual(ast.tools.allowed, ["Agent", "Skill"])
+    },
+    {
+      text: "block WebSearch but allow WebFetch",
+      check: (ast) => {
+        assert.deepEqual(ast.tools.denied, ["WebSearch"]);
+        assert.deepEqual(ast.tools.allowed, ["WebFetch"]);
+      }
+    },
+    {
+      text: "require approval for Agent and Skill",
+      check: (ast) => assert.deepEqual(ast.tools.held, ["Agent", "Skill"])
+    },
+    {
+      text: "allow all bash commands except gcloud, allow psql, allow Edit, Write, Agent, and Skill tools",
+      check: (ast) => {
+        assert.deepEqual(ast.bash.deniedPrograms, ["gcloud"]);
+        assert.deepEqual(ast.bash.allowedPrograms, ["psql"]);
+        assert.deepEqual(ast.fileTools, ["Read", "Grep", "Glob", "Write", "Edit", "MultiEdit"]);
+        assert.deepEqual(ast.tools.allowed, ["Agent", "Skill"]);
+      }
+    },
+    {
       text: "default allow",
       check: (ast) => assert.equal(ast.defaults.decision, "allow")
     },
     {
       text: "default deny",
       check: (ast) => assert.equal(ast.defaults.decision, "deny")
+    },
+    {
+      text: "default hold",
+      check: (ast) => assert.equal(ast.defaults.decision, "hold")
     }
   ];
   for (const entry of cases) entry.check(buildPolicyIntentAst(entry.text));

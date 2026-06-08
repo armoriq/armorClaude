@@ -22,7 +22,7 @@ const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if da
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
 const SPAWN_RETRY_DELAY_MS = 150;
 const SPAWN_RETRIES = 3;
-const EXPECTED_DAEMON_VERSION = "0.2.12";
+const EXPECTED_DAEMON_VERSION = "0.2.17";
 
 let nextReqId = 1;
 function makeReqId() {
