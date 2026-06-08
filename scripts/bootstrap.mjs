@@ -10,7 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.dirname(__dirname);
 const installedMarker = path.join(pluginRoot, "node_modules", ".armorclaude-installed");
 const packageFiles = [
-  path.join(pluginRoot, "node_modules", "@armoriq", "sdk", "package.json"),
+  path.join(pluginRoot, "node_modules", "@armoriq", "sdk-dev", "package.json"),
   path.join(pluginRoot, "node_modules", "zod", "package.json"),
   path.join(pluginRoot, "node_modules", "@modelcontextprotocol", "sdk", "package.json"),
 ];
@@ -34,7 +34,7 @@ if (!installedOk()) {
   process.stderr.write("[armorclaude] installing dependencies (one-time)...\n");
   const result = spawnSync(
     "npm",
-    ["install", "--omit=dev", "--silent", "--no-audit", "--no-fund"],
+    ["install", "--omit=dev", "--ignore-scripts", "--silent", "--no-audit", "--no-fund"],
     {
       cwd: pluginRoot,
       stdio: ["ignore", "ignore", "inherit"],
