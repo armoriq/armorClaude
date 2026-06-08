@@ -1,0 +1,1 @@
+../../commands/armor-policy.md

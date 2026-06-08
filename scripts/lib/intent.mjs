@@ -7,6 +7,7 @@ import {
   readString,
   sha256Hex,
 } from "./common.mjs";
+import { compilePolicyForSdkIntent } from "./policy-compiler.mjs";
 
 const { ArmorIQClient } = armoriqSdk;
 const sdkClientCache = new Map();
@@ -559,7 +560,10 @@ export async function requestIntent(config, payload) {
     ...payload.metadata,
   };
   const capture = client.capturePlan(config.llmId, payload.prompt || "", plan, metadata);
-  const token = await client.getIntentToken(capture, payload.policy, payload.validitySeconds);
+  const sdkPolicy = payload.policy
+    ? compilePolicyForSdkIntent(payload.policy, payload.policy_hash)
+    : undefined;
+  const token = await client.getIntentToken(capture, sdkPolicy, payload.validitySeconds);
   const tokenRaw = JSON.stringify(token);
   const parsedFromToken = extractPlanFromIntentToken(tokenRaw);
   return {

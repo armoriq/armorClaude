@@ -74,7 +74,7 @@ armorClaude/
 ├── scripts/
 │   ├── bootstrap.mjs             # Auto-installs npm deps on first run
 │   ├── hook-router.mjs           # Hook entrypoint (dispatches events)
-│   ├── policy-mcp.mjs            # MCP server (policy_update, policy_read, register_intent_plan)
+│   ├── policy-mcp.mjs            # MCP server (policy_read, register_intent_plan)
 │   └── lib/
 │       ├── engine.mjs            # Main handlers for all hook events
 │       ├── config.mjs            # Configuration (env vars + userConfig)
@@ -173,16 +173,27 @@ A directive injected via `UserPromptSubmit` instructs Claude to call `register_i
 
 ## Policy Commands
 
-From the chat prompt:
-- `Policy list` — show all rules
-- `Policy get <id>` — show specific rule
-- `Policy delete <id>` — remove rule
-- `Policy reset` — clear all rules
-- `Policy new: block web_fetch for payment data` — create rule
-- `Policy update <id>: allow write` — modify rule
-- `Policy prioritize <id> <position>` — reorder
+Policy mutation is human-only. Commands run in the `UserPromptSubmit` hook before Claude's LLM sees the prompt; Claude can read policy through MCP but cannot update it.
 
-MCP tools: `policy_update`, `policy_read`
+Primary commands:
+- `/armor` — show policy command help
+- `/armor policy list` — show all rules
+- `/armor policy add allow Read and Grep, deny Write, hold Bash` — stage deterministic policy changes
+- `/armor policy confirm [proposal-id]` — apply a staged proposal
+- `/armor policy cancel [proposal-id]` — discard a staged proposal
+- `/armor yes` — apply the current staged proposal
+- `/armor no` — discard the current staged proposal
+- `/armor policy rebind` — reissue the crypto policy token for the current policy
+- `/armor profile save <name>` — save the current policy as a profile
+- `/armor mcp approve <server>` — approve an MCP server
+
+Rules staged with `hold` / `require_approval` use Claude Code's native tool approval UI at `PreToolUse` time after ArmorClaude policy and intent checks pass. Unknown MCP servers also use native approval for a one-time tool call; use `/armor mcp approve <server>` only when you want to trust that server persistently.
+
+Legacy `/armor-policy ...` is intentionally unsupported. Use `/armor ...` only.
+
+Beginner guide: [ArmorClaude Policy Guide](./POLICY_GUIDE.md)
+
+MCP tools: `policy_read`, `register_intent_plan`, and Trust Update tools. There is intentionally no `policy_update` MCP tool.
 
 ## Security Model
 
