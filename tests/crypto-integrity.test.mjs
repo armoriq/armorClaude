@@ -92,6 +92,45 @@ test("loadConfig: cryptoPolicyEnabled is tied to apiKey presence", () => {
   assert.equal(config.cryptoPolicyEnabled, Boolean(config.apiKey));
 });
 
+test("loadConfig: dev branch defaults to staging endpoints", () => {
+  const config = loadConfig({});
+  assert.equal(config.armoriqEnv, "staging");
+  assert.equal(config.useProduction, false);
+  assert.equal(config.backendEndpoint, "https://staging-api.armoriq.ai");
+  assert.equal(config.csrgEndpoint, "https://iap-staging.armoriq.ai");
+});
+
+test("loadConfig: ARMORIQ_ENV=staging uses only staging endpoints", () => {
+  const config = loadConfig({
+    ARMORIQ_ENV: "staging",
+    ARMORIQ_BACKEND_URL: "https://example.invalid",
+    ARMORIQ_CSRG_URL: "https://example.invalid"
+  });
+  assert.equal(config.armoriqEnv, "staging");
+  assert.equal(config.backendEndpoint, "https://staging-api.armoriq.ai");
+  assert.equal(config.csrgEndpoint, "https://iap-staging.armoriq.ai");
+});
+
+test("loadConfig: ARMORIQ_ENV=production uses production endpoints", () => {
+  const config = loadConfig({ ARMORIQ_ENV: "production" });
+  assert.equal(config.armoriqEnv, "production");
+  assert.equal(config.useProduction, true);
+  assert.equal(config.backendEndpoint, "https://api.armoriq.ai");
+  assert.equal(config.csrgEndpoint, "https://iap.armoriq.ai");
+});
+
+test("loadConfig: ARMORIQ_ENV=development allows local endpoint overrides", () => {
+  const config = loadConfig({
+    ARMORIQ_ENV: "development",
+    ARMORIQ_BACKEND_URL: "http://127.0.0.1:3000",
+    ARMORIQ_CSRG_URL: "http://127.0.0.1:8080"
+  });
+  assert.equal(config.armoriqEnv, "local");
+  assert.equal(config.useProduction, false);
+  assert.equal(config.backendEndpoint, "http://127.0.0.1:3000");
+  assert.equal(config.csrgEndpoint, "http://127.0.0.1:8080");
+});
+
 // ---------------------------------------------------------------------------
 // /armor policy confirm with crypto enabled
 // ---------------------------------------------------------------------------
