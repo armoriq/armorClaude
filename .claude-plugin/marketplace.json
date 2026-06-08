@@ -14,7 +14,7 @@
       "name": "armorclaude",
       "source": "./",
       "description": "Intent-based security enforcement for Claude Code: declared plans, policy rules, intent-drift blocking, CSRG cryptographic proofs, and audit logging. Production-hardcoded URLs (api.armoriq.ai + iap.armoriq.ai).",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "category": "security",
       "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp"],
       "homepage": "https://armoriq.ai",
@@ -29,7 +29,7 @@
         "ref": "dev"
       },
       "description": "Intent-based security enforcement for Claude Code — dev variant. Staging/local toggleable via ARMORIQ_ENV (development → 127.0.0.1; default → staging-api.armoriq.ai). Tracks the dev branch HEAD; install only if you're contributing to armorClaude or running a local stack.",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "category": "security",
       "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp", "dev"],
       "homepage": "https://armoriq.ai",
