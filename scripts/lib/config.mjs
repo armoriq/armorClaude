@@ -14,6 +14,16 @@ function pluginOpt(env, pluginKey, legacyKey) {
   return "";
 }
 
+function normalizeArmoriqEnv(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (["production", "prod"].includes(normalized)) return "production";
+  if (["staging", "stage"].includes(normalized)) return "staging";
+  if (["development", "dev", "local", "test"].includes(normalized)) return "local";
+  return "";
+}
+
 /**
  * armorClaude config — main branch (production).
  *
@@ -21,13 +31,14 @@ function pluginOpt(env, pluginKey, legacyKey) {
  *   env vars                → paths + debug
  *   everything else         → hardcoded to the tested-good default
  *
- * Production-hardcoded. No staging/local switch — `main` ships against
- * api.armoriq.ai + iap.armoriq.ai unconditionally. The dev branch keeps
- * the ARMORIQ_ENV toggle for local development; main is the
- * end-user-facing artifact and must be unambiguously production.
+ * Dev-branch default: staging. Main must keep production-hardcoded behavior
+ * before release, but the dev plugin must never send staging keys to the
+ * production API by accident.
  *
- * Operators who really need a different value can edit this file —
- * scripts/lib/config.mjs IS the config now.
+ * ARMORIQ_ENV:
+ *   staging/default -> staging-api.armoriq.ai + iap-staging.armoriq.ai
+ *   production/prod -> api.armoriq.ai + iap.armoriq.ai
+ *   development/local/test -> local URLs, overridable for local stacks only
  */
 export function loadConfig(env = process.env) {
   // ── Paths ──
@@ -43,14 +54,25 @@ export function loadConfig(env = process.env) {
   // File-based flag avoids shell env var gymnastics on Windows.
   // Delete ~/.armoriq/local-mode to restore production mode.
   const localModeFile = path.join(homedir(), ".armoriq", "local-mode");
-  const localMock = parseBoolean(env.ARMORIQ_LOCAL_MOCK, false) || existsSync(localModeFile);
-  const backendEndpoint = localMock
-    ? env.ARMORIQ_BACKEND_URL?.trim() || "http://localhost:8000"
-    : "https://customer-api.armoriq.ai";
-  const csrgEndpoint = localMock
-    ? env.ARMORIQ_CSRG_URL?.trim() || "http://localhost:8000"
-    : "https://customer-iap.armoriq.ai";
-  const useProduction = !localMock;
+  const requestedEnv = normalizeArmoriqEnv(env.ARMORIQ_ENV) || "staging";
+  const localMock =
+    parseBoolean(env.ARMORIQ_LOCAL_MOCK, false) ||
+    existsSync(localModeFile) ||
+    requestedEnv === "local";
+  const activeEnv = localMock ? "local" : requestedEnv;
+  const backendEndpoint =
+    activeEnv === "local"
+      ? env.ARMORIQ_BACKEND_URL?.trim() || "http://localhost:8000"
+      : activeEnv === "production"
+        ? "https://api.armoriq.ai"
+        : "https://staging-api.armoriq.ai";
+  const csrgEndpoint =
+    activeEnv === "local"
+      ? env.ARMORIQ_CSRG_URL?.trim() || "http://localhost:8000"
+      : activeEnv === "production"
+        ? "https://iap.armoriq.ai"
+        : "https://iap-staging.armoriq.ai";
+  const useProduction = activeEnv === "production";
 
   // ── The one userConfig field: api_key. UI primary, legacy env fallback. ──
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
@@ -70,6 +92,7 @@ export function loadConfig(env = process.env) {
     dataDir,
     policyFile,
     runtimeFile,
+    armoriqEnv: activeEnv,
     useProduction,
     backendEndpoint,
     csrgEndpoint,
@@ -97,10 +120,17 @@ export function loadConfig(env = process.env) {
     //   activeSessions shows the real count on the dashboard.
     csrgVerifyEnabled: localMock,
     requireCsrgProofs: false,
-    cryptoPolicyEnabled: false,
+    cryptoPolicyEnabled: Boolean(apiKey),
     strictParamCheck: false, // advisory — LLM params are predictions
     policyUpdateEnabled: true,
     policyUpdateAllowList: ["*"],
+    mcpDenyByDefault: true,
+    enforcementEngine: env.ARMORCLAUDE_ENFORCEMENT_ENGINE?.trim() || "local",
+    opaPdpUrl: env.ARMORCLAUDE_OPA_PDP_URL?.trim() || "",
+    opaCacheTtlMs: 10000,
+    opaTimeoutMs: 3000,
+    opaCircuitBreakerThreshold: 15,
+    opaCircuitResetMs: 10000,
 
     // Identity — backend derives real identity from API key.
     llmId: "claude-code",
@@ -120,7 +150,6 @@ export function loadConfig(env = process.env) {
     // Always-on legacy flags (kept for downstream call-site compatibility).
     useSdkIntent: true,
     planningEnabled: true,
-    contextHintsEnabled: true,
 
     debug: parseBoolean(env.ARMORCLAUDE_DEBUG, false),
   };

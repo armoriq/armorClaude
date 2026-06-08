@@ -4,13 +4,16 @@ import { readJson, writeJson } from "./fs-store.mjs";
 const MAX_SESSION_AGE_SECONDS = 60 * 60 * 24;
 
 export async function loadRuntimeState(runtimeFilePath) {
-  const initial = { sessions: {} };
+  const initial = { sessions: {}, mcpRegistry: {} };
   const raw = await readJson(runtimeFilePath, initial);
-  const sessions =
-    raw && typeof raw === "object" && raw.sessions && typeof raw.sessions === "object"
-      ? raw.sessions
-      : {};
-  return { sessions };
+  const sessions = raw && typeof raw === "object" && raw.sessions && typeof raw.sessions === "object"
+    ? raw.sessions
+    : {};
+  const mcpRegistry = raw && typeof raw === "object" && raw.mcpRegistry && typeof raw.mcpRegistry === "object"
+    ? raw.mcpRegistry
+    : {};
+  const discoveredTools = Array.isArray(raw?.discoveredTools) ? raw.discoveredTools : [];
+  return { sessions, mcpRegistry, discoveredTools };
 }
 
 export function getSession(runtimeState, sessionId) {

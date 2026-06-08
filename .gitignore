@@ -1,1 +1,8 @@
 node_modules/
+.in_use/
+
+# Generated report artifacts
+*Report*.html
+*Report*.md
+*Report*.pdf
+report-style.css

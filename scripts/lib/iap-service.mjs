@@ -94,6 +94,7 @@ export function createIapService(config) {
         skipped: false,
         allowed: data.allowed !== false,
         reason: typeof data.reason === "string" ? data.reason : "",
+        policyValidation: extractPolicyValidation(data, tokenObj),
         tokenRaw,
         plan: isPlainObject(data.plan) ? data.plan : parsedFromResponse?.plan || fallbackPlan,
         expiresAt: Number.isFinite(data.expiresAt) ? data.expiresAt : parsedFromResponse?.expiresAt,
@@ -233,6 +234,22 @@ function extractPlanFromResponse(tokenRaw) {
   } catch {
     return null;
   }
+}
+
+function extractPolicyValidation(data, tokenObj) {
+  const candidates = [
+    data?.policyValidation,
+    data?.policy_validation,
+    data?.token?.policyValidation,
+    data?.token?.policy_validation,
+    tokenObj?.policyValidation,
+    tokenObj?.policy_validation,
+    tokenObj?.rawToken?.policyValidation,
+    tokenObj?.rawToken?.policy_validation,
+    tokenObj?.rawToken?.token?.policyValidation,
+    tokenObj?.rawToken?.token?.policy_validation
+  ];
+  return candidates.find((candidate) => isPlainObject(candidate)) || undefined;
 }
 
 function parseStepIndexFromPath(path) {

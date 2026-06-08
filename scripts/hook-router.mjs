@@ -7,7 +7,8 @@ import {
   handleSessionEnd,
   handleSessionStart,
   handleStop,
-  handleUserPromptSubmit,
+  handleUserPromptExpansion,
+  handleUserPromptSubmit
 } from "./lib/engine.mjs";
 import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 
@@ -75,6 +76,9 @@ async function main() {
       break;
     case "UserPromptSubmit":
       output = await handleUserPromptSubmit(input, config);
+      break;
+    case "UserPromptExpansion":
+      output = await handleUserPromptExpansion(input, config);
       break;
     case "PreToolUse":
       output = await handlePreToolUse(input, config);

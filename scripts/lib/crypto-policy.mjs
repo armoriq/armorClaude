@@ -12,8 +12,9 @@
  * State is persisted to disk because hooks are stateless short-lived processes.
  */
 
-import { postJson, sha256Hex } from "./common.mjs";
+import { isPlainObject, postJson, sha256Hex } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
+import { canonicalPolicyHash, normalizePolicyIr, POLICY_IR_VERSION } from "./policy-ir.mjs";
 import path from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,14 @@ export function computePolicyDigest(rules) {
   return sha256Hex(`policy|${canonical}`);
 }
 
+export function computeCryptoPolicyDigest(policyState) {
+  const policy = policyState?.policy || policyState;
+  if (isPlainObject(policy) && policy.schemaVersion === POLICY_IR_VERSION) {
+    return canonicalPolicyHash(policy);
+  }
+  return computePolicyDigest(policy?.rules || []);
+}
+
 // ---------------------------------------------------------------------------
 // Service factory
 // ---------------------------------------------------------------------------
@@ -52,6 +61,7 @@ export function computePolicyDigest(rules) {
 export function createCryptoPolicyService(config) {
   const csrgEndpoint = config.csrgEndpoint || "";
   const timeoutMs = config.timeoutMs || 30000;
+  const maxRetries = Math.max(0, Number.isFinite(config.maxRetries) ? config.maxRetries : 0);
   const stateFilePath = path.join(config.dataDir, "crypto-policy-state.json");
 
   return {
@@ -59,10 +69,11 @@ export function createCryptoPolicyService(config) {
      * Issue a new CSRG policy token with policy embedded in Merkle tree.
      */
     async issuePolicyToken(policyState, identity, validitySeconds = 3600) {
-      const digest = computePolicyDigest(policyState.policy?.rules || []);
+      const digest = computeCryptoPolicyDigest(policyState);
 
       const policyMetadata = {
-        rules: policyState.policy?.rules || [],
+        schema_version: policyState.policy?.schemaVersion,
+        statements: policyState.policy?.statements || [],
         version: policyState.version || 0,
         updated_at: policyState.updatedAt || new Date().toISOString(),
         updated_by: policyState.updatedBy,
@@ -86,11 +97,12 @@ export function createCryptoPolicyService(config) {
         validity_seconds: validitySeconds,
       };
 
-      const response = await postJson(
+      const response = await postJsonWithRetry(
         `${csrgEndpoint}/intent`,
         request,
         { "Content-Type": "application/json" },
-        timeoutMs
+        timeoutMs,
+        maxRetries
       );
 
       if (!response.ok || !response.data) {
@@ -199,40 +211,34 @@ export function createCryptoPolicyService(config) {
 // ---------------------------------------------------------------------------
 
 /**
- * Convert policy rules into a plan structure for CSRG hashing.
- * Each rule becomes a step with action "policy_rule:<id>".
- * Matches ArmorClaw's CryptoPolicyService.buildPolicyPlan().
+ * Convert canonical policy IR statements into a plan structure for CSRG
+ * hashing. The token binds the exact IR statement set; legacy flat rules are
+ * accepted only through normalizePolicyIr's one-time migration path.
  */
 function buildPolicyPlan(policy) {
-  const rules = Array.isArray(policy?.rules) ? policy.rules : [];
-
-  const steps = rules.map((rule) => ({
-    action: `policy_rule:${rule.id}`,
+  const ir = normalizePolicyIr(policy);
+  const steps = ir.statements.map((statement) => ({
+    action: `policy_statement:${statement.id}`,
     mcp: "armoriq-policy",
-    description: `Rule: ${rule.action} ${rule.tool}${rule.dataClass ? ` for ${rule.dataClass}` : ""}`,
+    description: `Policy statement: ${statement.effect} ${actionDescription(statement.action)}`,
     metadata: {
-      rule_id: rule.id,
-      rule_action: rule.action,
-      rule_tool: rule.tool,
-      rule_data_class: rule.dataClass,
-      rule_params: rule.params,
-      rule_scope: rule.scope,
-    },
+      statement_id: statement.id,
+      statement_effect: statement.effect,
+      action: statement.action,
+      resource: statement.resource,
+      conditions: statement.conditions
+    }
   }));
 
   if (steps.length === 0) {
     steps.push({
-      action: "policy_rule:allow-all",
+      action: "policy_default",
       mcp: "armoriq-policy",
-      description: "Default: allow all",
+      description: `Default policy decision: ${ir.defaults.decision}`,
       metadata: {
-        rule_id: "allow-all",
-        rule_action: "allow",
-        rule_tool: "*",
-        rule_data_class: undefined,
-        rule_params: undefined,
-        rule_scope: undefined,
-      },
+        default_decision: ir.defaults.decision,
+        conflict_resolution: ir.defaults.conflictResolution
+      }
     });
   }
 
@@ -241,6 +247,49 @@ function buildPolicyPlan(policy) {
     metadata: {
       goal: "ArmorIQ policy enforcement",
       policy_type: "crypto-bound",
-    },
+      policy_schema: POLICY_IR_VERSION
+    }
   };
+}
+
+function actionDescription(action) {
+  if (!isPlainObject(action)) return "*";
+  if (typeof action.eq === "string") return action.eq;
+  if (Array.isArray(action.in)) return action.in.join(",");
+  return "*";
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetriableHttpStatus(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function describePostError(error, url, timeoutMs) {
+  if (error?.name === "AbortError") {
+    return `Request to ${url} timed out after ${timeoutMs}ms`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function postJsonWithRetry(url, payload, headers, timeoutMs, maxRetries) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    try {
+      const response = await postJson(url, payload, headers, timeoutMs);
+      if (response.ok || !isRetriableHttpStatus(response.status) || attempt >= maxRetries) {
+        return response;
+      }
+      lastError = new Error(response.text || `CSRG /intent failed with status ${response.status}`);
+    } catch (error) {
+      lastError = new Error(describePostError(error, url, timeoutMs));
+      if (attempt >= maxRetries) {
+        throw lastError;
+      }
+    }
+    await sleep(75 * (attempt + 1));
+  }
+  throw lastError || new Error("CSRG /intent failed");
 }

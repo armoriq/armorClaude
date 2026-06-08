@@ -6,10 +6,13 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { handlePreToolUse } from "../scripts/lib/engine.mjs";
 import {
   checkIntentTokenPlan,
+  getSdkClient,
   parseCsrgProofHeaders,
-  resolveCsrgProofsFromToken,
+  requestIntent,
+  resolveCsrgProofsFromToken
 } from "../scripts/lib/intent.mjs";
 import { createIapService } from "../scripts/lib/iap-service.mjs";
+import { computePolicyHash, loadPolicyState } from "../scripts/lib/policy.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
   return {
@@ -221,6 +224,67 @@ test("checkToolAgainstPlan still blocks tool-name drift even when permissive", a
   assert.match(r.reason, /tool not in plan/i);
 });
 
+test("requestIntent compiles ArmorClaude IR to SDK/CSRG policy shape", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  const config = buildConfig(tmp, {
+    apiKey: "ak_test_policy_compile",
+    userId: "sdk-policy-user"
+  });
+  const client = getSdkClient(config);
+  const originalCapture = client.capturePlan;
+  const originalIssue = client.getIntentToken;
+  let capturedPolicy;
+  client.capturePlan = (_llm, _prompt, plan, metadata) => ({ plan, metadata });
+  client.getIntentToken = async (capture, policy, validitySeconds) => {
+    capturedPolicy = policy;
+    return {
+      tokenId: "tok-policy",
+      planHash: "hash-policy",
+      issuedAt: Date.now() / 1000,
+      expiresAt: Date.now() / 1000 + validitySeconds,
+      policy,
+      rawToken: { plan: capture.plan },
+      stepProofs: [],
+      totalSteps: capture.plan.steps.length
+    };
+  };
+
+  try {
+    await requestIntent(config, {
+      prompt: "list db tables",
+      plan: { steps: [{ action: "Bash" }] },
+      session_id: "sdk-policy",
+      policy_hash: "policy-hash-1",
+      policy: {
+        schemaVersion: "armor.policy.v1",
+        kind: "PolicyProfile",
+        metadata: { name: "allow-bash", description: "" },
+        defaults: { decision: "deny", conflictResolution: "deny_overrides" },
+        statements: [
+          {
+            id: "allow-all-bash",
+            effect: "permit",
+            principal: { type: "agent", id: "claude-code" },
+            action: { type: "tool", eq: "Bash" },
+            resource: { type: "workspace", scope: "current" },
+            conditions: []
+          }
+        ]
+      },
+      validitySeconds: 60
+    });
+  } finally {
+    client.capturePlan = originalCapture;
+    if (originalIssue) client.getIntentToken = originalIssue;
+  }
+
+  assert.deepEqual(capturedPolicy.allow, ["*"]);
+  assert.deepEqual(capturedPolicy.deny, []);
+  assert.deepEqual(capturedPolicy.allowed_tools, ["Bash"]);
+  assert.equal(capturedPolicy.metadata.source, "armorclaude");
+  assert.equal(capturedPolicy.metadata.policyHash, "policy-hash-1");
+});
+
 test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplicate tools", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, {
@@ -239,6 +303,7 @@ test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplic
       { path: "/steps/[1]/action", proof: [{ position: "left", sibling_hash: "s1" }] },
     ],
   };
+  const policyHash = computePolicyHash((await loadPolicyState(config.policyFile)).policy);
 
   await writeFile(
     config.runtimeFile,
@@ -248,9 +313,11 @@ test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplic
           s1: {
             intentTokenRaw: JSON.stringify(token),
             plan: token.plan,
-            updatedAt: Math.floor(Date.now() / 1000),
-          },
-        },
+            policyHash,
+            intentPolicyCompilerVersion: "sdk-csrg-policy-v1",
+            updatedAt: Math.floor(Date.now() / 1000)
+          }
+        }
       },
       null,
       2

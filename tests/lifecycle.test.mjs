@@ -478,7 +478,7 @@ test("Phase 4 A2: Stop hook does NOT refresh when token is fresh", async () => {
 test("ArmorClaude's own MCP tools are never drift-blocked (deadlock prevention)", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-deadlock-"));
   // Active plan that does NOT include register_intent_plan or any of the
-  // plugin's own tools. Without the whitelist, the plugin would deadlock —
+  // plugin's own tools. Without the allowlist, the plugin would deadlock ---
   // the agent couldn't even call register_intent_plan to escape.
   // (autoReanchor removed; ignore the field — buildConfig falls back to defaults)
   const config = buildConfig(tmp, {});
@@ -493,7 +493,6 @@ test("ArmorClaude's own MCP tools are never drift-blocked (deadlock prevention)"
   const pluginPrefixed = [
     "mcp__plugin_armorclaude_armorclaude-policy__register_intent_plan",
     "mcp__plugin_armorclaude_armorclaude-policy__policy_read",
-    "mcp__plugin_armorclaude_armorclaude-policy__policy_update",
     "mcp__plugin_armorclaude_armorclaude-policy__trust_revoke",
     "mcp__plugin_armorclaude_armorclaude-policy__trust_reanchor",
     "mcp__plugin_armorclaude_armorclaude-policy__trust_delegate",
@@ -505,7 +504,6 @@ test("ArmorClaude's own MCP tools are never drift-blocked (deadlock prevention)"
   const baseTools = [
     "register_intent_plan",
     "policy_read",
-    "policy_update",
     "trust_revoke",
     "trust_reanchor",
     "trust_delegate",
@@ -523,6 +521,10 @@ test("ArmorClaude's own MCP tools are never drift-blocked (deadlock prevention)"
     );
     // Allow path returns null (no deny output). A deny would set
     // hookSpecificOutput.permissionDecision = "deny".
-    assert.equal(out, null, `${tool} should pass the whitelist (got: ${JSON.stringify(out)})`);
+    assert.equal(
+      out,
+      null,
+      `${tool} should pass the allowlist (got: ${JSON.stringify(out)})`
+    );
   }
 });

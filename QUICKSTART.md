@@ -60,21 +60,28 @@ That's intent enforcement, with no backend, no API key, no extra LLM call.
 In Claude Code, type:
 
 ```
-Policy new: deny WebFetch
+/armor policy add deny WebFetch
 ```
 
 ArmorClaude blocks the prompt and acknowledges:
 
 ```
-Policy rule added: deny WebFetch
+Proposed policy change:
++ policy1: deny WebFetch
+```
+
+Confirm it:
+
+```
+/armor yes
 ```
 
 From now on, every WebFetch call is denied at the `PreToolUse` hook — regardless of whether it was in the plan.
 
-List rules:
+List the active policy:
 
 ```
-Policy list
+/armor policy list
 ```
 
 ## 5. (Optional) Connect to ArmorIQ for backend audit + CSRG
@@ -128,6 +135,7 @@ Or set it via `/plugin` → configure → `mode: monitor`.
 
 ## Where to go next
 
+- Beginner policy guide: [POLICY_GUIDE.md](./POLICY_GUIDE.md)
 - Full hook + config reference: [README.md](./README.md)
 - Architecture deep-dive: [design.md](./design.md)
 - Source: <https://github.com/armoriq/armorClaude>

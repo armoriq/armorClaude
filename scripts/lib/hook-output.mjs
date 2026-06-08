@@ -8,6 +8,16 @@ export function denyPreTool(reason) {
   };
 }
 
+export function askPreTool(reason) {
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "ask",
+      permissionDecisionReason: reason
+    }
+  };
+}
+
 /**
  * Phase 4 A3: actionable deny output.
  *

@@ -14,7 +14,7 @@
 
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +22,7 @@ const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if da
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
 const SPAWN_RETRY_DELAY_MS = 150;
 const SPAWN_RETRIES = 3;
+const EXPECTED_DAEMON_VERSION = "0.2.17";
 
 let nextReqId = 1;
 function makeReqId() {
@@ -66,16 +67,22 @@ async function spawnDaemon(socketPath, dataDir, config) {
     ARMORCLAUDE_RUNTIME_FILE: config?.runtimeFile || path.join(dataDir, "runtime.json"),
     ARMORCLAUDE_POLICY_FILE: config?.policyFile || path.join(dataDir, "policy.json"),
   };
-  const child = spawn(process.execPath, [daemonScript], {
+  mkdirSync(dataDir, { recursive: true });
+  const nodeBin = existsSync(process.execPath) ? process.execPath : "node";
+  const child = spawn(nodeBin, [daemonScript], {
     detached: true,
     stdio: "ignore",
     cwd: dataDir,
     env: childEnv,
   });
+  let spawnError = null;
+  child.once("error", (err) => { spawnError = err; });
   child.unref();
 
   for (let i = 0; i < SPAWN_RETRIES; i++) {
+    if (spawnError) throw spawnError;
     await new Promise((r) => setTimeout(r, SPAWN_RETRY_DELAY_MS));
+    if (spawnError) throw spawnError;
     if (existsSync(socketPath)) {
       try {
         const sock = await connectOnce(socketPath);
@@ -86,6 +93,46 @@ async function spawnDaemon(socketPath, dataDir, config) {
     }
   }
   throw new Error("daemon spawn did not become reachable");
+}
+
+async function shutdownDaemon(socketPath) {
+  let sock;
+  try {
+    sock = await connectOnce(socketPath);
+    await exchange(sock, { type: "shutdown", reqId: makeReqId() });
+  } catch {
+    // Best effort. If shutdown fails, the next connect/spawn path falls back
+    // to in-process hook handling instead of silently trusting stale code.
+  } finally {
+    try { sock?.end(); } catch {}
+    try { sock?.destroy(); } catch {}
+  }
+}
+
+async function ensureFreshDaemonSocket(socketPath, config) {
+  let sock;
+  try {
+    sock = await connectOnce(socketPath);
+  } catch (err) {
+    if (err?.code === "ENOENT" || err?.code === "ECONNREFUSED") {
+      return spawnDaemon(socketPath, config.dataDir, config);
+    }
+    throw err;
+  }
+
+  try {
+    const ping = await exchange(sock, { type: "ping", reqId: makeReqId() });
+    if (ping?.version === EXPECTED_DAEMON_VERSION) {
+      return sock;
+    }
+  } catch {
+    // Treat an unpingable daemon as stale/unhealthy and replace it below.
+  }
+
+  try { sock.end(); } catch {}
+  try { sock.destroy(); } catch {}
+  await shutdownDaemon(socketPath);
+  return spawnDaemon(socketPath, config.dataDir, config);
 }
 
 /**
@@ -141,16 +188,7 @@ export async function dispatchViaDaemon({ event, input, config }) {
   const socketPath = path.join(config.dataDir, "daemon.sock");
   const debug = !!config?.debug;
   const t0 = debug ? Date.now() : 0;
-  let sock;
-  try {
-    sock = await connectOnce(socketPath);
-  } catch (err) {
-    if (err?.code === "ENOENT" || err?.code === "ECONNREFUSED") {
-      sock = await spawnDaemon(socketPath, config.dataDir, config);
-    } else {
-      throw err;
-    }
-  }
+  const sock = await ensureFreshDaemonSocket(socketPath, config);
   const tConnected = debug ? Date.now() : 0;
   try {
     const reqId = makeReqId();

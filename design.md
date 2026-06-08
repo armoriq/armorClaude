@@ -47,7 +47,7 @@ Core idea: an AI agent declares what it intends to do before doing it, and every
 │       ▼                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐            │
 │  │ PreToolUse Hook — ENFORCEMENT POINT                      │            │
-│  │  1. Whitelist: allow register_intent_plan, ExitPlanMode  │            │
+│  │  1. Allowlist: allow register_intent_plan, ExitPlanMode  │            │
 │  │  2. Consume pending-plan.json if present                 │            │
 │  │  3. Static policy evaluation (allow/deny rules)          │            │
 │  │  4. Crypto policy digest verification (optional)         │            │
@@ -118,7 +118,7 @@ Monitor mode (`ARMORCLAUDE_MODE=monitor`) logs these events but allows tool call
 ```
 scripts/
 ├── hook-router.mjs          Stdin/stdout dispatcher — routes hook events to handlers
-├── policy-mcp.mjs           MCP server: policy_update, policy_read, register_intent_plan
+├── policy-mcp.mjs           MCP server: policy_read, register_intent_plan, trust update tools
 └── lib/
     ├── engine.mjs            Hook handlers: SessionStart, UserPromptSubmit, PreToolUse,
     │                         PostToolUse, PostToolUseFailure, Stop, SessionEnd
@@ -142,11 +142,25 @@ scripts/
 |-------|---------|---------|
 | `SessionStart` | Initialize session, prune stale sessions | Lifecycle |
 | `UserPromptSubmit` | Policy commands; inject plan directive | Pre-processing |
-| `PreToolUse` | **Enforcement**: whitelist, consume plan, policy, intent, proofs | Gate |
+| `PreToolUse` | **Enforcement**: allowlist, consume plan, policy, intent, proofs | Gate |
 | `PostToolUse` | Audit log (success) | Compliance |
 | `PostToolUseFailure` | Audit log (failure) | Compliance |
 | `Stop` | Token expiry warning | Turn cleanup |
 | `SessionEnd` | Remove session state | Lifecycle |
+
+## Policy Authoring UX
+
+Policy mutation is deliberately outside Claude's tool path. The primary human command is `/armor policy ...`; `/armor policy ...` remains as a legacy alias. These commands are consumed by the `UserPromptSubmit` hook with `blockPrompt()`, so Claude's LLM never receives the mutation request.
+
+The plugin skill path is non-authoritative. If a tab-completed `/armorclaude:armor` skill expansion is attempted, `UserPromptExpansion` blocks it and points the user back to `/armor policy ...`. The skill file itself is help-only and must not mutate policy.
+
+Natural-language policy additions are parsed deterministically by the hook, for example:
+
+```
+/armor policy add allow Read and Grep, deny Write, hold Bash
+```
+
+The hook stages a JSON proposal containing `proposalId`, `baseVersion`, `proposalHash`, `expiresAt`, and `proposedRules`. Confirm applies only the currently staged proposal and refuses stale or tampered proposals. Claude may read policy through `policy_read`, but there is intentionally no policy-write MCP tool.
 
 ## State Management
 
@@ -167,7 +181,7 @@ Hooks are stateless short-lived processes (new Node process per event). All stat
 | Plan API key | Uses agent's runtime.modelAuth | None needed (session LLM) |
 | Hook system | OpenClaw events (llm_input, before_tool_call) | Claude Code hooks (UserPromptSubmit, PreToolUse) |
 | State management | In-memory Maps (long-lived process) | File-based JSON (stateless hook processes) |
-| Policy tool | Inline tool registration | MCP server (policy_update, register_intent_plan) |
+| Policy tool | Inline tool registration | Human-only `/armor policy` hook commands; MCP is read/intent/trust only |
 | Intent capture | ArmorIQ SDK (capturePlan + getIntentToken) | Same SDK, triggered from MCP tool handler |
 | CSRG proofs | Full (verifyStep, verifyWithCsrg) | Full (same, via iap-service.mjs) |
 | Audit logging | createAuditLog in IAPVerificationService | Same, triggered from PostToolUse hook |
