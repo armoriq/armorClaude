@@ -29,10 +29,10 @@ export async function seedBuiltinProfiles(config) {
         description: tmpl.description,
         createdAt: new Date().toISOString(),
         createdBy: "builtin",
-        orgId: "local"
+        orgId: "local",
       },
       version: 1,
-      policy
+      policy,
     });
   }
 }
@@ -43,14 +43,18 @@ function normalizeProfileData(data, fallbackName = "profile") {
   const policy = data.policy?.schemaVersion
     ? normalizePolicyIr(data.policy)
     : legacyRulesToPolicyIr(
-        Array.isArray(data.policy?.rules) ? data.policy.rules : Array.isArray(data.rules) ? data.rules : [],
+        Array.isArray(data.policy?.rules)
+          ? data.policy.rules
+          : Array.isArray(data.rules)
+            ? data.rules
+            : [],
         { name: data.profile.name || fallbackName, description },
         { decision: "deny" }
       );
   return {
     profile: data.profile,
     version: data.version || 1,
-    policy
+    policy,
   };
 }
 
@@ -91,7 +95,11 @@ export async function saveProfile(config, name, description, policyLike) {
   const version = existing ? (existing.version || 0) + 1 : 1;
   const policy = policyLike?.schemaVersion
     ? normalizePolicyIr(policyLike)
-    : legacyRulesToPolicyIr(Array.isArray(policyLike) ? policyLike : policyLike?.rules || [], { name, description }, { decision: "deny" });
+    : legacyRulesToPolicyIr(
+        Array.isArray(policyLike) ? policyLike : policyLike?.rules || [],
+        { name, description },
+        { decision: "deny" }
+      );
   const data = {
     profile: {
       name,
@@ -99,10 +107,10 @@ export async function saveProfile(config, name, description, policyLike) {
       createdAt: existing?.profile?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       createdBy: "user",
-      orgId: "local"
+      orgId: "local",
     },
     version,
-    policy
+    policy,
   };
   await writeJson(profilePath(config, name), data);
   return data;

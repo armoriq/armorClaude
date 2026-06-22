@@ -9,7 +9,7 @@ import {
   getSdkClient,
   parseCsrgProofHeaders,
   requestIntent,
-  resolveCsrgProofsFromToken
+  resolveCsrgProofsFromToken,
 } from "../scripts/lib/intent.mjs";
 import { createIapService } from "../scripts/lib/iap-service.mjs";
 import { computePolicyHash, loadPolicyState } from "../scripts/lib/policy.mjs";
@@ -228,7 +228,7 @@ test("requestIntent compiles ArmorClaude IR to SDK/CSRG policy shape", async () 
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, {
     apiKey: "ak_test_policy_compile",
-    userId: "sdk-policy-user"
+    userId: "sdk-policy-user",
   });
   const client = getSdkClient(config);
   const originalCapture = client.capturePlan;
@@ -245,7 +245,7 @@ test("requestIntent compiles ArmorClaude IR to SDK/CSRG policy shape", async () 
       policy,
       rawToken: { plan: capture.plan },
       stepProofs: [],
-      totalSteps: capture.plan.steps.length
+      totalSteps: capture.plan.steps.length,
     };
   };
 
@@ -267,11 +267,11 @@ test("requestIntent compiles ArmorClaude IR to SDK/CSRG policy shape", async () 
             principal: { type: "agent", id: "claude-code" },
             action: { type: "tool", eq: "Bash" },
             resource: { type: "workspace", scope: "current" },
-            conditions: []
-          }
-        ]
+            conditions: [],
+          },
+        ],
       },
-      validitySeconds: 60
+      validitySeconds: 60,
     });
   } finally {
     client.capturePlan = originalCapture;
@@ -315,9 +315,9 @@ test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplic
             plan: token.plan,
             policyHash,
             intentPolicyCompilerVersion: "sdk-csrg-policy-v1",
-            updatedAt: Math.floor(Date.now() / 1000)
-          }
-        }
+            updatedAt: Math.floor(Date.now() / 1000),
+          },
+        },
       },
       null,
       2

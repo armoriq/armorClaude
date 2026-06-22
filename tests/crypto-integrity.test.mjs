@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
@@ -49,9 +49,9 @@ function buildConfig(tmpDir, overrides = {}) {
       maxChars: 2000,
       maxDepth: 4,
       maxKeys: 50,
-      maxItems: 50
+      maxItems: 50,
     },
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -61,7 +61,7 @@ async function seedPolicy(config, rules = []) {
     updatedAt: new Date().toISOString(),
     updatedBy: "test",
     policy: { rules },
-    history: []
+    history: [],
   });
 }
 
@@ -82,7 +82,7 @@ function startMockCsrg(handler) {
 test("loadConfig auto-enables cryptoPolicyEnabled when apiKey is set", () => {
   const config = loadConfig({
     CLAUDE_PLUGIN_OPTION_API_KEY: "test-key-1234567890",
-    ARMORIQ_ENV: "development"
+    ARMORIQ_ENV: "development",
   });
   assert.equal(config.cryptoPolicyEnabled, true);
 });
@@ -104,7 +104,7 @@ test("loadConfig: ARMORIQ_ENV=staging uses only staging endpoints", () => {
   const config = loadConfig({
     ARMORIQ_ENV: "staging",
     ARMORIQ_BACKEND_URL: "https://example.invalid",
-    ARMORIQ_CSRG_URL: "https://example.invalid"
+    ARMORIQ_CSRG_URL: "https://example.invalid",
   });
   assert.equal(config.armoriqEnv, "staging");
   assert.equal(config.backendEndpoint, "https://staging-api.armoriq.ai");
@@ -123,7 +123,7 @@ test("loadConfig: ARMORIQ_ENV=development allows local endpoint overrides", () =
   const config = loadConfig({
     ARMORIQ_ENV: "development",
     ARMORIQ_BACKEND_URL: "http://127.0.0.1:3000",
-    ARMORIQ_CSRG_URL: "http://127.0.0.1:8080"
+    ARMORIQ_CSRG_URL: "http://127.0.0.1:8080",
   });
   assert.equal(config.armoriqEnv, "local");
   assert.equal(config.useProduction, false);
@@ -143,18 +143,20 @@ test("confirm issues crypto policy token when cryptoPolicyEnabled and CSRG reach
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({
-        token: "mock-token",
-        policy_digest: "mock-digest",
-        step_proofs: []
-      }));
+      res.end(
+        JSON.stringify({
+          token: "mock-token",
+          policy_digest: "mock-digest",
+          step_proofs: [],
+        })
+      );
     });
   });
   try {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "crypto-test-"));
     const config = buildConfig(tmp, {
       cryptoPolicyEnabled: true,
-      csrgEndpoint: url
+      csrgEndpoint: url,
     });
     await seedPolicy(config);
 
@@ -182,7 +184,7 @@ test("confirm gracefully handles crypto token failure", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "crypto-test-"));
     const config = buildConfig(tmp, {
       cryptoPolicyEnabled: true,
-      csrgEndpoint: url
+      csrgEndpoint: url,
     });
     await seedPolicy(config);
 
@@ -208,7 +210,7 @@ test("reset confirm applies empty default-deny fail-closed when crypto token iss
     const tmp = await mkdtemp(path.join(os.tmpdir(), "crypto-test-"));
     const config = buildConfig(tmp, {
       cryptoPolicyEnabled: true,
-      csrgEndpoint: url
+      csrgEndpoint: url,
     });
     await seedPolicy(config, [{ id: "allow-bash", action: "allow", tool: "Bash" }]);
 
@@ -249,7 +251,7 @@ test("crypto policy token issuance retries a transient timeout", async () => {
       cryptoPolicyEnabled: true,
       csrgEndpoint: url,
       timeoutMs: 25,
-      maxRetries: 1
+      maxRetries: 1,
     });
     await seedPolicy(config);
 
@@ -274,7 +276,7 @@ test("/armor no never calls crypto token issuance and leaves policy unchanged", 
     const tmp = await mkdtemp(path.join(os.tmpdir(), "crypto-test-"));
     const config = buildConfig(tmp, {
       cryptoPolicyEnabled: true,
-      csrgEndpoint: url
+      csrgEndpoint: url,
     });
     await seedPolicy(config);
 
@@ -295,17 +297,19 @@ test("/armor policy rebind reissues crypto token for current policy", async () =
   const { server, url } = await startMockCsrg((req, res) => {
     csrgCalled = true;
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      token: "mock-token",
-      policy_digest: "mock-digest",
-      step_proofs: []
-    }));
+    res.end(
+      JSON.stringify({
+        token: "mock-token",
+        policy_digest: "mock-digest",
+        step_proofs: [],
+      })
+    );
   });
   try {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "crypto-test-"));
     const config = buildConfig(tmp, {
       cryptoPolicyEnabled: true,
-      csrgEndpoint: url
+      csrgEndpoint: url,
     });
     await seedPolicy(config, [{ id: "allow-bash", action: "allow", tool: "Bash" }]);
 
@@ -349,7 +353,7 @@ test("confirm pushes to backend in OPA mode", async () => {
     const config = buildConfig(tmp, {
       enforcementEngine: "opa",
       apiKey: "test-key",
-      backendEndpoint: url
+      backendEndpoint: url,
     });
     await seedPolicy(config);
 
