@@ -117,6 +117,7 @@ export function createAuditWal(opts) {
 
       rows.sort(compareForOrder);
       const stripped = rows.map((row) => {
+        // eslint-disable-next-line no-unused-vars -- destructured to strip these fields from `rest`
         const { _seq, _enqueuedAt, ...rest } = row;
         return rest;
       });
@@ -182,7 +183,9 @@ export function createAuditWal(opts) {
         await unlink(path.join(archiveDir, entry.name));
         deleted.push(entry.name);
       } catch (err) {
-        process.stderr.write(`[audit-wal] failed to delete ${entry.name}: ${err?.message ?? err}\n`);
+        process.stderr.write(
+          `[audit-wal] failed to delete ${entry.name}: ${err?.message ?? err}\n`
+        );
       }
     }
     return deleted;

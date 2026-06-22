@@ -226,8 +226,8 @@ function buildPolicyPlan(policy) {
       statement_effect: statement.effect,
       action: statement.action,
       resource: statement.resource,
-      conditions: statement.conditions
-    }
+      conditions: statement.conditions,
+    },
   }));
 
   if (steps.length === 0) {
@@ -237,8 +237,8 @@ function buildPolicyPlan(policy) {
       description: `Default policy decision: ${ir.defaults.decision}`,
       metadata: {
         default_decision: ir.defaults.decision,
-        conflict_resolution: ir.defaults.conflictResolution
-      }
+        conflict_resolution: ir.defaults.conflictResolution,
+      },
     });
   }
 
@@ -247,8 +247,8 @@ function buildPolicyPlan(policy) {
     metadata: {
       goal: "ArmorIQ policy enforcement",
       policy_type: "crypto-bound",
-      policy_schema: POLICY_IR_VERSION
-    }
+      policy_schema: POLICY_IR_VERSION,
+    },
   };
 }
 

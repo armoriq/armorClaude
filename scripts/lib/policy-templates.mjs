@@ -5,7 +5,7 @@ function statement(id, effect, action, conditions = []) {
     principal: { type: "agent", id: "claude-code" },
     action,
     resource: { type: "workspace", scope: "current" },
-    conditions
+    conditions,
   };
 }
 
@@ -15,7 +15,7 @@ function policy(name, description, defaults, statements) {
     kind: "PolicyProfile",
     metadata: { name, description },
     defaults: { decision: defaults.decision, conflictResolution: "deny_overrides" },
-    statements
+    statements,
   };
 }
 
@@ -28,7 +28,7 @@ export const POLICY_TEMPLATES = {
       "Everything permitted — intent planning still enforced",
       { decision: "allow" },
       [statement("allow-all", "permit", { type: "tool", eq: "*" })]
-    )
+    ),
   },
   "strict-read-only": {
     name: "Strict Read-Only",
@@ -38,7 +38,7 @@ export const POLICY_TEMPLATES = {
       "Only Read/Grep/Glob allowed. Bash/Write/Edit denied.",
       { decision: "deny" },
       [statement("allow-read-tools", "permit", { type: "tool", in: ["Read", "Grep", "Glob"] })]
-    )
+    ),
   },
   balanced: {
     name: "Balanced",
@@ -49,9 +49,12 @@ export const POLICY_TEMPLATES = {
       { decision: "allow" },
       [
         statement("allow-read-tools", "permit", { type: "tool", in: ["Read", "Grep", "Glob"] }),
-        statement("hold-bash-write-edit", "require_approval", { type: "tool", in: ["Bash", "Write", "Edit", "MultiEdit"] })
+        statement("hold-bash-write-edit", "require_approval", {
+          type: "tool",
+          in: ["Bash", "Write", "Edit", "MultiEdit"],
+        }),
       ]
-    )
+    ),
   },
   lockdown: {
     name: "Lockdown",
@@ -61,8 +64,8 @@ export const POLICY_TEMPLATES = {
       "All tools require approval. Nothing auto-allowed.",
       { decision: "deny" },
       [statement("hold-all", "require_approval", { type: "tool", eq: "*" })]
-    )
-  }
+    ),
+  },
 };
 
 export function getTemplateNames() {

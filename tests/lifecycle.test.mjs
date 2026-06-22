@@ -521,10 +521,6 @@ test("ArmorClaude's own MCP tools are never drift-blocked (deadlock prevention)"
     );
     // Allow path returns null (no deny output). A deny would set
     // hookSpecificOutput.permissionDecision = "deny".
-    assert.equal(
-      out,
-      null,
-      `${tool} should pass the allowlist (got: ${JSON.stringify(out)})`
-    );
+    assert.equal(out, null, `${tool} should pass the allowlist (got: ${JSON.stringify(out)})`);
   }
 });

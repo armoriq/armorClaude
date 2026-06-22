@@ -6,7 +6,12 @@ import path from "node:path";
 import http from "node:http";
 import { handlePreToolUse, handleUserPromptSubmit } from "../scripts/lib/engine.mjs";
 import { checkToolAgainstPlan } from "../scripts/lib/intent.mjs";
-import { computePolicyHash, evaluatePolicy, loadPolicyState, savePolicyState } from "../scripts/lib/policy.mjs";
+import {
+  computePolicyHash,
+  evaluatePolicy,
+  loadPolicyState,
+  savePolicyState,
+} from "../scripts/lib/policy.mjs";
 import { readJson, writeJson } from "../scripts/lib/fs-store.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
@@ -88,18 +93,21 @@ test("savePolicyState persists canonical IR without legacy rules mirror", async 
           principal: { type: "agent", id: "claude-code" },
           action: { type: "tool", in: ["Read", "Grep", "Glob"] },
           resource: { type: "workspace", scope: "current" },
-          conditions: []
-        }
-      ]
+          conditions: [],
+        },
+      ],
     },
-    history: []
+    history: [],
   });
   const raw = await readJson(policyFile, null);
   assert.equal(raw.policy.rules, undefined);
   assert.deepEqual(raw.policy.statements[0].action, { type: "tool", in: ["Read", "Grep", "Glob"] });
   const loaded = await loadPolicyState(policyFile);
   assert.equal(loaded.policy.rules, undefined);
-  assert.deepEqual(loaded.policy.statements[0].action, { type: "tool", in: ["Read", "Grep", "Glob"] });
+  assert.deepEqual(loaded.policy.statements[0].action, {
+    type: "tool",
+    in: ["Read", "Grep", "Glob"],
+  });
 });
 
 test("checkToolAgainstPlan rejects tool drift", () => {
@@ -123,7 +131,11 @@ test("handleUserPromptSubmit no longer processes policy commands (removed for se
     },
     config
   );
-  assert.notEqual(output?.decision, "block", "Policy commands should no longer be blocked/processed by UserPromptSubmit");
+  assert.notEqual(
+    output?.decision,
+    "block",
+    "Policy commands should no longer be blocked/processed by UserPromptSubmit"
+  );
 });
 
 test("handlePreToolUse denies when policy blocks tool", async () => {
@@ -137,7 +149,7 @@ test("handlePreToolUse denies when policy blocks tool", async () => {
       updatedAt: new Date().toISOString(),
       updatedBy: "test",
       policy: { rules: [{ id: "policy1", action: "deny", tool: "write" }] },
-      history: []
+      history: [],
     }),
     "utf8"
   );
@@ -165,7 +177,7 @@ test("handlePreToolUse asks with Claude Code native UI when policy requires appr
       updatedAt: new Date().toISOString(),
       updatedBy: "test",
       policy: { rules: [{ id: "hold-bash", action: "require_approval", tool: "Bash" }] },
-      history: []
+      history: [],
     }),
     "utf8"
   );
@@ -175,12 +187,15 @@ test("handlePreToolUse asks with Claude Code native UI when policy requires appr
       hook_event_name: "PreToolUse",
       session_id: "session-hold-bash",
       tool_name: "Bash",
-      tool_input: { command: "ls" }
+      tool_input: { command: "ls" },
     },
     config
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
-  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /requires approval: hold-bash/);
+  assert.match(
+    output?.hookSpecificOutput?.permissionDecisionReason || "",
+    /requires approval: hold-bash/
+  );
 });
 
 test("handlePreToolUse asks for held read-only tools instead of bypassing policy fast-path", async () => {
@@ -194,7 +209,7 @@ test("handlePreToolUse asks for held read-only tools instead of bypassing policy
       updatedAt: new Date().toISOString(),
       updatedBy: "test",
       policy: { rules: [{ id: "hold-read", action: "require_approval", tool: "Read" }] },
-      history: []
+      history: [],
     }),
     "utf8"
   );
@@ -204,12 +219,15 @@ test("handlePreToolUse asks for held read-only tools instead of bypassing policy
       hook_event_name: "PreToolUse",
       session_id: "session-hold-read",
       tool_name: "Read",
-      tool_input: { file_path: "README.md" }
+      tool_input: { file_path: "README.md" },
     },
     config
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
-  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /requires approval: hold-read/);
+  assert.match(
+    output?.hookSpecificOutput?.permissionDecisionReason || "",
+    /requires approval: hold-read/
+  );
 });
 
 test("handlePreToolUse asks through native UI for default hold unmatched tools", async () => {
@@ -227,9 +245,9 @@ test("handlePreToolUse asks through native UI for default hold unmatched tools",
         kind: "PolicyProfile",
         metadata: { name: "default-hold", description: "" },
         defaults: { decision: "hold", conflictResolution: "deny_overrides" },
-        statements: []
+        statements: [],
       },
-      history: []
+      history: [],
     }),
     "utf8"
   );
@@ -239,7 +257,7 @@ test("handlePreToolUse asks through native UI for default hold unmatched tools",
       hook_event_name: "PreToolUse",
       session_id: "session-default-hold",
       tool_name: "Write",
-      tool_input: { file_path: "a.txt", content: "hello" }
+      tool_input: { file_path: "a.txt", content: "hello" },
     },
     config
   );
@@ -262,9 +280,9 @@ test("handlePreToolUse lets Claude coordination tools bypass user policy default
         kind: "PolicyProfile",
         metadata: { name: "default-deny", description: "" },
         defaults: { decision: "deny", conflictResolution: "deny_overrides" },
-        statements: []
+        statements: [],
       },
-      history: []
+      history: [],
     }),
     "utf8"
   );
@@ -274,7 +292,7 @@ test("handlePreToolUse lets Claude coordination tools bypass user policy default
       hook_event_name: "PreToolUse",
       session_id: "session-toolsearch-default-deny",
       tool_name: "ToolSearch",
-      tool_input: { query: "anything" }
+      tool_input: { query: "anything" },
     },
     config
   );
@@ -293,12 +311,15 @@ test("handlePreToolUse blocks direct policy file writes before policy/intent che
       {
         hook_event_name: "PreToolUse",
         session_id: "policy-write-guard",
-        ...target
+        ...target,
       },
       config
     );
     assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
-    assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /direct modification/i);
+    assert.match(
+      output?.hookSpecificOutput?.permissionDecisionReason || "",
+      /direct modification/i
+    );
   }
 });
 
@@ -316,7 +337,7 @@ test("handlePreToolUse blocks Bash policy-management bypasses", async () => {
         hook_event_name: "PreToolUse",
         session_id: "policy-bash-guard",
         tool_name: "Bash",
-        tool_input: { command }
+        tool_input: { command },
       },
       config
     );
@@ -344,8 +365,8 @@ test("handlePreToolUse denies IR Bash program forbids with env-prefixed command"
           resource: { type: "workspace", scope: "current" },
           conditions: [
             { field: "bash.program", op: "in", value: ["ls"] },
-            { field: "bash.hasWriteRedirection", op: "eq", value: false }
-          ]
+            { field: "bash.hasWriteRedirection", op: "eq", value: false },
+          ],
         },
         {
           id: "deny-psql-gcloud",
@@ -353,11 +374,11 @@ test("handlePreToolUse denies IR Bash program forbids with env-prefixed command"
           principal: { type: "agent", id: "claude-code" },
           action: { type: "tool", eq: "Bash" },
           resource: { type: "workspace", scope: "current" },
-          conditions: [{ field: "bash.program", op: "in", value: ["psql", "gcloud"] }]
-        }
-      ]
+          conditions: [{ field: "bash.program", op: "in", value: ["psql", "gcloud"] }],
+        },
+      ],
     },
-    history: []
+    history: [],
   });
   const output = await handlePreToolUse(
     {
@@ -365,8 +386,8 @@ test("handlePreToolUse denies IR Bash program forbids with env-prefixed command"
       session_id: "policy-bash-ir-deny",
       tool_name: "Bash",
       tool_input: {
-        command: "PGPASSWORD='secret' psql -h 127.0.0.1 -U postgres -d app -c \"\\dt\""
-      }
+        command: "PGPASSWORD='secret' psql -h 127.0.0.1 -U postgres -d app -c \"\\dt\"",
+      },
     },
     config
   );
@@ -386,7 +407,7 @@ test("handlePreToolUse invalidates stale intent token when policy hash changes b
     const config = buildConfig(tmp, {
       intentRequired: false,
       verifyStepEndpoint: `${url}/iap/verify-step`,
-      csrgVerifyEnabled: true
+      csrgVerifyEnabled: true,
     });
     await writeJson(config.policyFile, {
       version: 2,
@@ -403,11 +424,11 @@ test("handlePreToolUse invalidates stale intent token when policy hash changes b
             principal: { type: "agent", id: "claude-code" },
             action: { type: "tool", eq: "Bash" },
             resource: { type: "workspace", scope: "current" },
-            conditions: []
-          }
-        ]
+            conditions: [],
+          },
+        ],
       },
-      history: []
+      history: [],
     });
     await writeJson(config.runtimeFile, {
       sessions: {
@@ -415,10 +436,10 @@ test("handlePreToolUse invalidates stale intent token when policy hash changes b
           intentTokenRaw: JSON.stringify({ tokenId: "old", plan: { steps: [{ action: "Bash" }] } }),
           policyHash: "old-policy-hash",
           intentPolicyCompilerVersion: "sdk-csrg-policy-v1",
-          expiresAt: Math.floor(Date.now() / 1000) + 600
-        }
+          expiresAt: Math.floor(Date.now() / 1000) + 600,
+        },
       },
-      mcpRegistry: {}
+      mcpRegistry: {},
     });
 
     const output = await handlePreToolUse(
@@ -426,8 +447,11 @@ test("handlePreToolUse invalidates stale intent token when policy hash changes b
         hook_event_name: "PreToolUse",
         session_id: "stale",
         tool_name: "Bash",
-        intentTokenRaw: JSON.stringify({ tokenId: "old-from-resumed-input", plan: { steps: [{ action: "Bash" }] } }),
-        tool_input: { command: "psql -c '\\dt'" }
+        intentTokenRaw: JSON.stringify({
+          tokenId: "old-from-resumed-input",
+          plan: { steps: [{ action: "Bash" }] },
+        }),
+        tool_input: { command: "psql -c '\\dt'" },
       },
       config
     );
@@ -443,14 +467,16 @@ test("handlePreToolUse invalidates tokens minted by an old intent policy compile
   const { server, url } = await startMockServer((req, res) => {
     verifyCalled = true;
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ allowed: false, reason: "old compiler token should not be verified" }));
+    res.end(
+      JSON.stringify({ allowed: false, reason: "old compiler token should not be verified" })
+    );
   });
   try {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
     const config = buildConfig(tmp, {
       intentRequired: false,
       verifyStepEndpoint: `${url}/iap/verify-step`,
-      csrgVerifyEnabled: true
+      csrgVerifyEnabled: true,
     });
     const policy = {
       schemaVersion: "armor.policy.v1",
@@ -464,22 +490,33 @@ test("handlePreToolUse invalidates tokens minted by an old intent policy compile
           principal: { type: "agent", id: "claude-code" },
           action: { type: "tool", eq: "Bash" },
           resource: { type: "workspace", scope: "current" },
-          conditions: []
-        }
-      ]
+          conditions: [],
+        },
+      ],
     };
-    const policyHash = computePolicyHash({ ...policy, rules: [{ id: "allow-all-bash", action: "allow", tool: "Bash" }] });
-    await writeJson(config.policyFile, { version: 1, updatedAt: new Date().toISOString(), policy, history: [] });
+    const policyHash = computePolicyHash({
+      ...policy,
+      rules: [{ id: "allow-all-bash", action: "allow", tool: "Bash" }],
+    });
+    await writeJson(config.policyFile, {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      policy,
+      history: [],
+    });
     await writeJson(config.runtimeFile, {
       sessions: {
         oldCompiler: {
-          intentTokenRaw: JSON.stringify({ jwtToken: "old", plan: { steps: [{ action: "Bash" }] } }),
+          intentTokenRaw: JSON.stringify({
+            jwtToken: "old",
+            plan: { steps: [{ action: "Bash" }] },
+          }),
           plan: { steps: [{ action: "Bash" }] },
           policyHash,
-          expiresAt: Math.floor(Date.now() / 1000) + 600
-        }
+          expiresAt: Math.floor(Date.now() / 1000) + 600,
+        },
       },
-      mcpRegistry: {}
+      mcpRegistry: {},
     });
 
     const output = await handlePreToolUse(
@@ -487,7 +524,7 @@ test("handlePreToolUse invalidates tokens minted by an old intent policy compile
         hook_event_name: "PreToolUse",
         session_id: "oldCompiler",
         tool_name: "Bash",
-        tool_input: { command: "psql -c '\\dt'" }
+        tool_input: { command: "psql -c '\\dt'" },
       },
       config
     );
@@ -504,16 +541,18 @@ test("handlePreToolUse invalidates tokens minted by an old intent policy compile
 test("handlePreToolUse reports remote IAP policy validation denials distinctly", async () => {
   const { server, url } = await startMockServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      allowed: false,
-      reason: "Policy denied path /steps/[0]/tool",
-      policyValidation: {
-        decision_source: "native",
-        denied_tools: ["Bash"],
-        allowed_tools: ["Read"],
-        matched_policies: []
-      }
-    }));
+    res.end(
+      JSON.stringify({
+        allowed: false,
+        reason: "Policy denied path /steps/[0]/tool",
+        policyValidation: {
+          decision_source: "native",
+          denied_tools: ["Bash"],
+          allowed_tools: ["Read"],
+          matched_policies: [],
+        },
+      })
+    );
   });
   try {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
@@ -521,7 +560,7 @@ test("handlePreToolUse reports remote IAP policy validation denials distinctly",
       intentRequired: false,
       verifyStepEndpoint: `${url}/iap/verify-step`,
       csrgVerifyEnabled: true,
-      requireCsrgProofs: false
+      requireCsrgProofs: false,
     });
     const policy = {
       schemaVersion: "armor.policy.v1",
@@ -535,28 +574,36 @@ test("handlePreToolUse reports remote IAP policy validation denials distinctly",
           principal: { type: "agent", id: "claude-code" },
           action: { type: "tool", eq: "Bash" },
           resource: { type: "workspace", scope: "current" },
-          conditions: []
-        }
-      ]
+          conditions: [],
+        },
+      ],
     };
-    const policyHash = computePolicyHash({ ...policy, rules: [{ id: "allow-all-bash", action: "allow", tool: "Bash" }] });
+    const policyHash = computePolicyHash({
+      ...policy,
+      rules: [{ id: "allow-all-bash", action: "allow", tool: "Bash" }],
+    });
     const plan = { steps: [{ action: "Bash" }], metadata: { goal: "db check" } };
-    await writeJson(config.policyFile, { version: 1, updatedAt: new Date().toISOString(), policy, history: [] });
+    await writeJson(config.policyFile, {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      policy,
+      history: [],
+    });
     await writeJson(config.runtimeFile, {
       sessions: {
         remote: {
           intentTokenRaw: JSON.stringify({
             jwtToken: "jwt-abc",
             plan,
-            policyValidation: { decision_source: "native", denied_tools: ["Bash"] }
+            policyValidation: { decision_source: "native", denied_tools: ["Bash"] },
           }),
           plan,
           policyHash,
           intentPolicyCompilerVersion: "sdk-csrg-policy-v1",
-          expiresAt: Math.floor(Date.now() / 1000) + 600
-        }
+          expiresAt: Math.floor(Date.now() / 1000) + 600,
+        },
       },
-      mcpRegistry: {}
+      mcpRegistry: {},
     });
 
     const output = await handlePreToolUse(
@@ -564,7 +611,7 @@ test("handlePreToolUse reports remote IAP policy validation denials distinctly",
         hook_event_name: "PreToolUse",
         session_id: "remote",
         tool_name: "Bash",
-        tool_input: { command: "psql -c '\\dt'" }
+        tool_input: { command: "psql -c '\\dt'" },
       },
       config
     );

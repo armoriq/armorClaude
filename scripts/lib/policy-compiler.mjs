@@ -33,7 +33,7 @@ function clientRuleForStatement(statement) {
     blockedTools,
     enforcementAction: legacyAction(statement.effect),
     conditions: statement.conditions,
-    resource: statement.resource
+    resource: statement.resource,
   };
 }
 
@@ -44,7 +44,7 @@ export function compileToOpaInput(policy, toolName, toolParams) {
     policyName: statement.id,
     priority: idx + 1,
     statement,
-    clientRule: clientRuleForStatement(statement)
+    clientRule: clientRuleForStatement(statement),
   }));
 
   return {
@@ -52,19 +52,19 @@ export function compileToOpaInput(policy, toolName, toolParams) {
     policy: {
       schemaVersion: ir.schemaVersion,
       defaults: ir.defaults,
-      statements: ir.statements
+      statements: ir.statements,
     },
     context: {
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     },
     resource: {
       toolName,
       resourceType: "tool",
-      params: toolParams || {}
+      params: toolParams || {},
     },
     subject: {
-      source: "armorclaude"
-    }
+      source: "armorclaude",
+    },
   };
 }
 
@@ -75,7 +75,7 @@ export function compilePolicyForBundle(policy) {
     schemaVersion: ir.schemaVersion,
     defaults: ir.defaults,
     statements: ir.statements,
-    compiledAt: new Date().toISOString()
+    compiledAt: new Date().toISOString(),
   };
 }
 
@@ -108,8 +108,8 @@ export function compilePolicyForSdkIntent(policy, policyHash = "") {
     metadata: {
       source: "armorclaude",
       schemaVersion: ir.schemaVersion,
-      policyHash
-    }
+      policyHash,
+    },
   };
 }
 

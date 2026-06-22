@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus, listMcpServers } from "../scripts/lib/tool-registry.mjs";
+import {
+  parseToolIdentity,
+  getMcpServerStatus,
+  setMcpServerStatus,
+  listMcpServers,
+} from "../scripts/lib/tool-registry.mjs";
 import { handlePreToolUse } from "../scripts/lib/engine.mjs";
 import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.mjs";
 import { loadRuntimeState, saveRuntimeState } from "../scripts/lib/runtime-state.mjs";
@@ -42,9 +47,9 @@ function buildConfig(tmpDir, overrides = {}) {
       maxChars: 2000,
       maxDepth: 4,
       maxKeys: 50,
-      maxItems: 50
+      maxItems: 50,
     },
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -130,7 +135,7 @@ test("handlePreToolUse asks before running an unknown external MCP tool", async 
       hook_event_name: "PreToolUse",
       session_id: "mcp-1",
       tool_name: "mcp__github__create_issue",
-      tool_input: { title: "test" }
+      tool_input: { title: "test" },
     },
     config
   );
@@ -151,7 +156,7 @@ test("handlePreToolUse denies explicitly denied MCP server", async () => {
       hook_event_name: "PreToolUse",
       session_id: "mcp-2",
       tool_name: "mcp__evil-server__steal_data",
-      tool_input: {}
+      tool_input: {},
     },
     config
   );
@@ -170,12 +175,15 @@ test("handlePreToolUse allows approved MCP server tool", async () => {
       hook_event_name: "PreToolUse",
       session_id: "mcp-3",
       tool_name: "mcp__github__create_issue",
-      tool_input: { title: "test" }
+      tool_input: { title: "test" },
     },
     config
   );
-  assert.notEqual(output?.hookSpecificOutput?.permissionDecision, "deny",
-    "Approved MCP server tools should not be denied by the MCP gate");
+  assert.notEqual(
+    output?.hookSpecificOutput?.permissionDecision,
+    "deny",
+    "Approved MCP server tools should not be denied by the MCP gate"
+  );
 });
 
 test("handlePreToolUse still allows ArmorClaude's own MCP tools", async () => {
@@ -186,7 +194,7 @@ test("handlePreToolUse still allows ArmorClaude's own MCP tools", async () => {
       hook_event_name: "PreToolUse",
       session_id: "mcp-4",
       tool_name: "mcp__armorclaude-policy__register_intent_plan",
-      tool_input: {}
+      tool_input: {},
     },
     config
   );
@@ -201,7 +209,7 @@ test("handlePreToolUse allows builtin tools through MCP gate", async () => {
       hook_event_name: "PreToolUse",
       session_id: "mcp-5",
       tool_name: "Read",
-      tool_input: { file_path: "test.txt" }
+      tool_input: { file_path: "test.txt" },
     },
     config
   );
@@ -216,7 +224,7 @@ test("MCP gate registers pending server on first encounter", async () => {
       hook_event_name: "PreToolUse",
       session_id: "mcp-6",
       tool_name: "mcp__new-server__some_tool",
-      tool_input: {}
+      tool_input: {},
     },
     config
   );
@@ -234,12 +242,15 @@ test("MCP gate is disabled when mcpDenyByDefault is false", async () => {
       hook_event_name: "PreToolUse",
       session_id: "mcp-7",
       tool_name: "mcp__unknown-server__some_tool",
-      tool_input: {}
+      tool_input: {},
     },
     config
   );
-  assert.notEqual(output?.hookSpecificOutput?.permissionDecision, "deny",
-    "MCP gate should not deny when mcpDenyByDefault is false");
+  assert.notEqual(
+    output?.hookSpecificOutput?.permissionDecision,
+    "deny",
+    "MCP gate should not deny when mcpDenyByDefault is false"
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -284,7 +295,7 @@ test("end-to-end: unknown MCP asks → approve → tool allowed", async () => {
       hook_event_name: "PreToolUse",
       session_id: "e2e-1",
       tool_name: "mcp__github__list_repos",
-      tool_input: {}
+      tool_input: {},
     },
     config
   );
@@ -297,7 +308,7 @@ test("end-to-end: unknown MCP asks → approve → tool allowed", async () => {
       hook_event_name: "PreToolUse",
       session_id: "e2e-1",
       tool_name: "mcp__github__list_repos",
-      tool_input: {}
+      tool_input: {},
     },
     config
   );
