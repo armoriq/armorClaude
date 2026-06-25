@@ -6,3 +6,6 @@ node_modules/
 *Report*.md
 *Report*.pdf
 report-style.css
+
+# Internal docs (not for public repo)
+internal-docs/

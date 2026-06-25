@@ -20,21 +20,6 @@
       "homepage": "https://armoriq.ai/tools/armorclaude",
       "license": "MIT",
       "author": { "name": "ArmorIQ", "email": "license@armoriq.io" }
-    },
-    {
-      "name": "armorclaude-dev",
-      "source": {
-        "source": "github",
-        "repo": "armoriq/armorClaude",
-        "ref": "dev"
-      },
-      "description": "Intent-based security enforcement for Claude Code — dev variant. Staging/local toggleable via ARMORIQ_ENV (development → 127.0.0.1; default → staging-api.armoriq.ai). Tracks the dev branch HEAD; install only if you're contributing to armorClaude or running a local stack.",
-      "version": "0.2.4",
-      "category": "security",
-      "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp", "dev"],
-      "homepage": "https://armoriq.ai/tools/armorclaude",
-      "license": "MIT",
-      "author": { "name": "ArmorIQ", "email": "license@armoriq.io" }
     }
   ]
 }
