@@ -17,7 +17,7 @@
       "version": "0.2.4",
       "category": "security",
       "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp"],
-      "homepage": "https://armoriq.ai",
+      "homepage": "https://armoriq.ai/tools/armorclaude",
       "license": "MIT",
       "author": { "name": "ArmorIQ", "email": "license@armoriq.io" }
     },
@@ -32,7 +32,7 @@
       "version": "0.2.4",
       "category": "security",
       "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp", "dev"],
-      "homepage": "https://armoriq.ai",
+      "homepage": "https://armoriq.ai/tools/armorclaude",
       "license": "MIT",
       "author": { "name": "ArmorIQ", "email": "license@armoriq.io" }
     }
