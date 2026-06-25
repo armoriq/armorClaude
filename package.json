@@ -3,7 +3,8 @@
   "version": "0.2.4",
   "private": true,
   "type": "module",
-  "description": "ArmorIQ enforcement plugin scaffold for Claude Code",
+  "description": "ArmorIQ intent-based security enforcement for Claude Code",
+  "license": "MIT",
   "scripts": {
     "test": "node --test",
     "check": "node --test",
