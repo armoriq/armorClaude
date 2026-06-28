@@ -180,7 +180,7 @@ test("handlePreToolUse asks with Claude Code native UI when policy requires appr
     config
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
-  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /requires approval: hold-bash/);
+  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /policy rule hold-bash/);
 });
 
 test("handlePreToolUse asks for held read-only tools instead of bypassing policy fast-path", async () => {
@@ -209,7 +209,7 @@ test("handlePreToolUse asks for held read-only tools instead of bypassing policy
     config
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
-  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /requires approval: hold-read/);
+  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /policy rule hold-read/);
 });
 
 test("handlePreToolUse asks through native UI for default hold unmatched tools", async () => {
@@ -244,7 +244,7 @@ test("handlePreToolUse asks through native UI for default hold unmatched tools",
     config
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
-  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /default hold/);
+  assert.match(output?.hookSpecificOutput?.permissionDecisionReason || "", /hold unmatched actions for review/);
 });
 
 test("handlePreToolUse lets Claude coordination tools bypass user policy default deny", async () => {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
 import { isPlainObject, normalizeToolName } from "./common.mjs";
 
 export const POLICY_IR_VERSION = "armor.policy.v1";
@@ -465,7 +466,23 @@ function conditionValue(field, toolName, toolParams = {}) {
   return undefined;
 }
 
-function conditionMatches(condition, toolName, toolParams) {
+// Resolve a file path against the workspace root and report whether it lands
+// inside that root. Both relative and absolute paths are handled: relative
+// paths are resolved against the root, absolute paths are compared directly.
+// If the workspace root is unknown we return false (treat as "outside"), which
+// is the fail-safe answer — an out-of-workspace write should require approval
+// rather than be silently permitted.
+function pathWithinWorkspace(filePath, workspaceRoot) {
+  if (typeof filePath !== "string" || !filePath) return false;
+  if (typeof workspaceRoot !== "string" || !workspaceRoot) return false;
+  const root = path.resolve(workspaceRoot);
+  const resolved = path.isAbsolute(filePath)
+    ? path.resolve(filePath)
+    : path.resolve(root, filePath);
+  return resolved === root || resolved.startsWith(root + path.sep);
+}
+
+function conditionMatches(condition, toolName, toolParams, context = {}) {
   const actual = conditionValue(condition.field, toolName, toolParams);
   const expected = condition.value;
   switch (condition.op) {
@@ -475,26 +492,85 @@ function conditionMatches(condition, toolName, toolParams) {
     case "matches": return typeof expected === "string" && new RegExp(expected).test(String(actual));
     case "not_matches": return typeof expected === "string" && !new RegExp(expected).test(String(actual));
     case "starts_with": return typeof expected === "string" && String(actual).startsWith(expected);
-    case "within_workspace": return typeof actual === "string" && !actual.startsWith("/") && !actual.includes("..");
+    case "within_workspace": {
+      // `value: true`  → condition matches when the path IS inside the workspace
+      // `value: false` → condition matches when the path is OUTSIDE the workspace
+      // Default to requiring "inside" when no explicit value is given.
+      const want = expected === false ? false : true;
+      return pathWithinWorkspace(actual, context.workspaceRoot) === want;
+    }
     default: return false;
   }
 }
 
-function statementMatches(statement, toolName, toolParams) {
+function statementMatches(statement, toolName, toolParams, context) {
   if (!selectorMatches(statement.action, toolName)) return false;
-  return statement.conditions.every((condition) => conditionMatches(condition, toolName, toolParams));
+  return statement.conditions.every((condition) => conditionMatches(condition, toolName, toolParams, context));
 }
 
-export function evaluatePolicyIr({ policy, toolName, toolParams }) {
+// Registry of plain-language explainers for policy conditions, so an approval
+// prompt can tell the user *why* it is asking rather than just citing a rule
+// id. Each describer receives (condition, actual, ctx) and returns a clause, or
+// a falsy value to fall through. Keys are matched most-specific first:
+//   1. "<field>:<op>"  (e.g. "file.path:within_workspace")
+//   2. "<field>"       (e.g. "bash.program")
+// Add a new explanation by adding an entry here, or at runtime via
+// registerConditionDescriber() — no need to touch the approval flow itself.
+const CONDITION_DESCRIBERS = {
+  "file.path:within_workspace": (condition, actual) =>
+    condition.value === false
+      ? `it writes to a path outside the workspace (${actual || "unknown path"})`
+      : `it writes inside the workspace (${actual || "unknown path"})`,
+  "file.path": (condition, actual) => `the file path is "${actual}"`,
+  "bash.program": (condition, actual) => `it runs "${actual}"`,
+  "bash.raw": (condition) => `the command matches a guarded pattern (${condition.value})`,
+  "network.host": (condition, actual) => `it contacts host "${actual}"`,
+};
+
+// Register (or override) a condition describer. `key` is "<field>" or
+// "<field>:<op>". Lets other modules extend approval messaging without editing
+// this file.
+export function registerConditionDescriber(key, describer) {
+  if (typeof key === "string" && typeof describer === "function") {
+    CONDITION_DESCRIBERS[key] = describer;
+  }
+}
+
+// Render a single matched condition as a plain-language clause via the registry,
+// falling back to a generic "<field> <op>" description.
+function describeCondition(condition, toolName, toolParams) {
+  const actual = conditionValue(condition.field, toolName, toolParams);
+  const describer =
+    CONDITION_DESCRIBERS[`${condition.field}:${condition.op}`] ||
+    CONDITION_DESCRIBERS[condition.field];
+  if (describer) {
+    const text = describer(condition, actual, { toolName, toolParams });
+    if (text) return text;
+  }
+  return `${condition.field} ${condition.op}`;
+}
+
+// Build the human-readable reason shown when a statement requires approval.
+function explainApproval(statement, toolName, toolParams) {
+  const tool = toolName || "this tool";
+  const clauses = (statement.conditions || [])
+    .map((condition) => describeCondition(condition, toolName, toolParams))
+    .filter(Boolean);
+  const why = clauses.length ? ` because ${clauses.join(" and ")}` : "";
+  return `ArmorClaude needs your approval to run ${tool}${why} (policy rule ${statement.id}).`;
+}
+
+export function evaluatePolicyIr({ policy, toolName, toolParams, workspaceRoot }) {
   const normalized = normalizePolicyIr(policy);
-  const matches = normalized.statements.filter((statement) => statementMatches(statement, toolName, toolParams || {}));
+  const context = { workspaceRoot: typeof workspaceRoot === "string" ? workspaceRoot : "" };
+  const matches = normalized.statements.filter((statement) => statementMatches(statement, toolName, toolParams || {}, context));
   const forbid = matches.find((statement) => statement.effect === "forbid");
   if (forbid) {
     return { allowed: false, reason: `ArmorClaude policy forbid: ${forbid.id}`, matchedRule: forbid };
   }
   const approval = matches.find((statement) => statement.effect === "require_approval");
   if (approval) {
-    return { allowed: false, reason: `ArmorClaude policy requires approval: ${approval.id}`, matchedRule: approval };
+    return { allowed: false, reason: explainApproval(approval, toolName, toolParams), matchedRule: approval };
   }
   const permit = matches.find((statement) => statement.effect === "permit");
   if (permit) {
@@ -506,7 +582,7 @@ export function evaluatePolicyIr({ policy, toolName, toolParams }) {
   if (normalized.defaults.decision === "hold") {
     return {
       allowed: false,
-      reason: `ArmorClaude policy default hold: no statement matched tool ${toolName}. Active default is hold.`,
+      reason: `ArmorClaude needs your approval to run ${toolName || "this tool"} because no policy rule explicitly allows it and the default is to hold unmatched actions for review.`,
       matchedRule: {
         id: "default-hold",
         effect: "require_approval",
