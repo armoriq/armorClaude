@@ -78,6 +78,20 @@ export function blockPrompt(reason) {
   };
 }
 
+/**
+ * Reply to a handled `/armor` slash command.
+ *
+ * Mechanically this is still a `block` decision — that's the only hook output
+ * that keeps the command text away from the LLM while showing our own output.
+ * Claude Code's UI prints a fixed "operation blocked by hook:" prefix for any
+ * block, which reads as an error even though the command succeeded. We can't
+ * suppress that prefix, but we can lead the reason with a subtle tag so the
+ * message reads as a normal, handled command rather than a failure.
+ */
+export function armorReply(reason) {
+  return blockPrompt(`(ArmorClaude — handled OK)\n${reason}`);
+}
+
 export function addPromptContext(context, hookEventName = "UserPromptSubmit") {
   return {
     hookSpecificOutput: {
