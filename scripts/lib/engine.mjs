@@ -1,5 +1,5 @@
 import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
-import { addPromptContext, askPreTool, blockPrompt, denyPreTool, denyPreToolWithHint } from "./hook-output.mjs";
+import { addPromptContext, armorReply, askPreTool, blockPrompt, denyPreTool, denyPreToolWithHint } from "./hook-output.mjs";
 import { isArmorPolicyCommand, handleArmorPolicyCommand } from "./armor-policy-commands.mjs";
 import { getTemplateNames } from "./policy-templates.mjs";
 import {
@@ -376,7 +376,7 @@ export async function handleUserPromptExpansion(input, config) {
   const prompt = typeof input?.prompt === "string" ? input.prompt.trim() : "";
   if (isArmorPolicyCommand(prompt)) {
     const response = await handleArmorPolicyCommand(prompt, config);
-    return blockPrompt(response);
+    return armorReply(response);
   }
 
   const commandName = typeof input?.command_name === "string" ? input.command_name.trim() : "";
@@ -384,7 +384,7 @@ export async function handleUserPromptExpansion(input, config) {
   const normalizedCommand = commandName.toLowerCase().replace(/^\/+/, "");
   if (["armor", "armorclaude:armor"].includes(normalizedCommand)) {
     const response = await handleArmorPolicyCommand(`/armor ${commandArgs}`.trim(), config);
-    return blockPrompt(response);
+    return armorReply(response);
   }
   if (["armor-policy", "armorclaude:armor-policy"].includes(normalizedCommand)) {
     return blockPrompt(legacyArmorPolicyMessage());
@@ -407,7 +407,7 @@ export async function handleUserPromptSubmit(input, config) {
   // --- /armor commands: human-only, policy-immune ---
   if (isArmorPolicyCommand(prompt)) {
     const response = await handleArmorPolicyCommand(prompt, config);
-    return blockPrompt(response);
+    return armorReply(response);
   }
   if (/^\s*\/(?:armor-policy|armorclaude:armor-policy)\b/i.test(prompt)) {
     return blockPrompt(legacyArmorPolicyMessage());
