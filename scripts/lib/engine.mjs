@@ -214,7 +214,7 @@ function policyDecisionRequiresApproval(policyDecision) {
   return action === "require_approval" || effect === "require_approval";
 }
 
-async function evaluateConfiguredPolicy(config, policyState, toolName, toolInput) {
+async function evaluateConfiguredPolicy(config, policyState, toolName, toolInput, workspaceRoot) {
   if (config.enforcementEngine === "opa" && config.opaPdpUrl) {
     const opaInput = compileToOpaInput(policyState.policy, toolName, toolInput);
     return await evaluateOpa(config, opaInput);
@@ -222,8 +222,21 @@ async function evaluateConfiguredPolicy(config, policyState, toolName, toolInput
   return evaluatePolicy({
     policy: policyState.policy,
     toolName,
-    toolParams: toolInput
+    toolParams: toolInput,
+    workspaceRoot
   });
+}
+
+// Determine the workspace root for path-scoped policy conditions
+// (e.g. within_workspace). Prefer the explicit project dir from the hook
+// payload / Claude Code env over process.cwd(), because the long-lived daemon
+// runs with cwd set to the plugin data dir, not the user's project.
+function resolveWorkspaceRoot(input) {
+  const fromEnv = typeof process.env.CLAUDE_PROJECT_DIR === "string"
+    ? process.env.CLAUDE_PROJECT_DIR.trim()
+    : "";
+  const fromInput = input && typeof input.cwd === "string" ? input.cwd.trim() : "";
+  return fromEnv || fromInput || "";
 }
 
 function preToolPolicyOutput(policyDecision, toolName) {
@@ -568,7 +581,7 @@ export async function handlePreToolUse(input, config) {
   ]);
   if (readOnlyPolicyTools.has(norm)) {
     const safePolicyState = await loadPolicyState(config.policyFile);
-    const safePolicyDecision = await evaluateConfiguredPolicy(config, safePolicyState, toolName, toolInput);
+    const safePolicyDecision = await evaluateConfiguredPolicy(config, safePolicyState, toolName, toolInput, resolveWorkspaceRoot(input));
     const safePolicyOutput = preToolPolicyOutput(safePolicyDecision, toolName);
     if (safePolicyOutput) return safePolicyOutput;
     return null;
@@ -729,7 +742,7 @@ export async function handlePreToolUse(input, config) {
   }
 
   // --- Policy evaluation: dispatch based on enforcement engine ---
-  let policyDecision = await evaluateConfiguredPolicy(config, policyState, toolName, toolInput);
+  let policyDecision = await evaluateConfiguredPolicy(config, policyState, toolName, toolInput, resolveWorkspaceRoot(input));
   const requiresUserApproval = policyDecisionRequiresApproval(policyDecision);
   if (!policyDecision.allowed && !requiresUserApproval) {
     return denyPreTool(policyDecision.reason || "ArmorClaude policy denied");

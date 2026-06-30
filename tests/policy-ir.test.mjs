@@ -180,7 +180,8 @@ test("evaluatePolicyIr maps default hold to approval for unmatched tools", () =>
   });
   const held = evaluatePolicyIr({ policy, toolName: "Write", toolParams: { file_path: "a.txt" } });
   assert.equal(held.allowed, false);
-  assert.match(held.reason, /default hold: no statement matched tool Write/);
+  assert.match(held.reason, /needs your approval to run Write/);
+  assert.match(held.reason, /hold unmatched actions for review/);
   assert.equal(held.matchedRule.effect, "require_approval");
   assert.equal(held.matchedRule.id, "default-hold");
 });

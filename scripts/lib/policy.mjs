@@ -159,9 +159,9 @@ export function detectDataClasses(toolName, toolParams) {
   return classes;
 }
 
-export function evaluatePolicy({ policy, toolName, toolParams }) {
+export function evaluatePolicy({ policy, toolName, toolParams, workspaceRoot }) {
   const normalizedPolicy = normalizePolicy(policy);
   const dataClasses = detectDataClasses(toolName, toolParams);
-  const decision = evaluatePolicyIr({ policy: normalizedPolicy, toolName, toolParams });
+  const decision = evaluatePolicyIr({ policy: normalizedPolicy, toolName, toolParams, workspaceRoot });
   return { ...decision, dataClasses: Array.from(dataClasses) };
 }
