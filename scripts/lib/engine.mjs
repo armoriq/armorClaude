@@ -61,7 +61,7 @@ function shouldDeny(config) {
 }
 
 function legacyArmorPolicyMessage() {
-  return "Legacy /armor-policy is intentionally unsupported. Use /armor policy ... instead.";
+  return "Legacy /armor-policy is intentionally unsupported. Use /armorclaude:armor policy ... instead.";
 }
 
 function mergeIntentIntoSession(session, intentResponse, config) {
@@ -376,10 +376,10 @@ export async function handleSessionStart(input, config) {
       onboardingMsg =
         "\n\nWelcome to ArmorClaude! No policy is configured yet.\n" +
         "Choose a template to get started:\n\n" +
-        templates.map((t) => `  /armor policy template ${t}`).join("\n") +
+        templates.map((t) => `  /armorclaude:armor policy template ${t}`).join("\n") +
         "\n\nOr add individual rules:\n" +
-        "  /armor policy add allow Read and Grep, deny Write, hold Bash\n\n" +
-        "Type /armor for all commands.";
+        "  /armorclaude:armor policy add allow Read and Grep, deny Write, hold Bash\n\n" +
+        "Type /armorclaude:armor for all commands.";
       await mkdir(config.dataDir, { recursive: true });
       await writeFile(onboardingFlag, new Date().toISOString(), "utf8");
     }
@@ -536,7 +536,7 @@ export async function handlePreToolUse(input, config) {
       )
     ) {
       return denyPreTool(
-        "ArmorClaude: direct modification of policy files is blocked. Use /armor policy commands."
+        "ArmorClaude: direct modification of policy files is blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
@@ -551,14 +551,14 @@ export async function handlePreToolUse(input, config) {
       )
     ) {
       return denyPreTool(
-        "ArmorClaude: policy management is human-only. Type /armor policy in the terminal."
+        "ArmorClaude: policy management is human-only. Type /armorclaude:armor policy in the terminal."
       );
     }
     const WRITE_OPS =
       /\b(>|>>|tee|mv|cp|rm|sed\s+-i|awk\s.*>|chmod|cat\s*<<|echo.*>|truncate|dd\b)/;
     if (PROTECTED_PATHS.some((p) => cmd.includes(path.basename(p))) && WRITE_OPS.test(cmd)) {
       return denyPreTool(
-        "ArmorClaude: shell write commands targeting policy files are blocked. Use /armor policy commands."
+        "ArmorClaude: shell write commands targeting policy files are blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
@@ -627,12 +627,12 @@ export async function handlePreToolUse(input, config) {
         mcpApprovalReason =
           `ArmorClaude: MCP server "${server}" is not approved. ` +
           "Approve this one tool call in Claude Code, or type " +
-          `/armor mcp approve ${server} to trust this server persistently.`;
+          `/armorclaude:armor mcp approve ${server} to trust this server persistently.`;
       }
       if (entry?.status === "denied") {
         return denyPreTool(
           `ArmorClaude: MCP server "${server}" is denied by policy. ` +
-            `Type /armor policy mcp approve ${server} to change this.`
+            `Type /armorclaude:armor policy mcp approve ${server} to change this.`
         );
       }
     }
