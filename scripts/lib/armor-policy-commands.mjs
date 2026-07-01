@@ -2286,9 +2286,23 @@ export async function handleArmorPolicyCommand(prompt, config) {
     }
 
     case "template": {
-      const tmpl = getTemplate(parsed.name);
+      let tmpl = getTemplate(parsed.name);
+      // Fall back to seeded profile on disk so new bundles work without a
+      // daemon version bump — profiles are seeded at startup from templates.
       if (!tmpl) {
-        return `Unknown template: ${parsed.name}\nAvailable: ${getTemplateNames().join(", ")}`;
+        const seeded = await loadProfile(config, parsed.name);
+        if (seeded?.policy) {
+          tmpl = {
+            name: seeded.profile?.name ?? parsed.name,
+            description: seeded.profile?.description ?? "",
+            policy: seeded.policy,
+          };
+        }
+      }
+      if (!tmpl) {
+        const seededNames = (await listProfiles(config)).map((p) => p.name);
+        const allNames = [...new Set([...getTemplateNames(), ...seededNames])];
+        return `Unknown template: ${parsed.name}\nAvailable: ${allNames.join(", ")}`;
       }
       const state = await loadPolicyState(config.policyFile);
       const proposedPolicy = normalizePolicyIr(tmpl.policy);
