@@ -12,7 +12,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "build": "echo 'no build step'",
-    "prepare": "husky"
+    "prepare": "husky",
+    "postinstall": "node scripts/install.mjs"
   },
   "engines": {
     "node": ">=20.19.0"
