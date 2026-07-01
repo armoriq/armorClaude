@@ -1998,6 +1998,7 @@ function helpText() {
     "  /armorclaude:armor yes                           — apply current staged change",
     "  /armorclaude:armor no                            — discard current staged change",
     "  /armorclaude:armor policy export                 — dump policy as JSON",
+    "  /armorclaude:armor policy sync                   — push active policy to the dashboard (requires backend API key configured)",
     "",
     "  /armorclaude:armor mcp list                     — show detected MCPs",
     "  /armorclaude:armor mcp approve <server>         — approve an MCP server",
@@ -2392,14 +2393,13 @@ export async function handleArmorPolicyCommand(prompt, config) {
       }
       await clearPending(config);
 
-      // OPA mode: push compiled bundle to backend
-      if (config.enforcementEngine === "opa" && config.apiKey) {
-        try {
-          const { syncPolicy: syncToBackend } = await import("./backend-client.mjs");
-          await syncToBackend(config, nextState);
-        } catch {
-          // fire-and-forget — local policy is authoritative
-        }
+      // Push policy to backend for all engines (local is the default) when a
+      // backend is configured. Fire-and-forget: local policy is authoritative,
+      // and armor commands run under a long-lived daemon that outlives this
+      // call, so a detached promise flushes without blocking confirmation.
+      // Matches the hasBackend() check in backend-client.mjs.
+      if (config.apiKey && config.backendEndpoint) {
+        syncPolicyToBackend(config, nextState).catch(() => {});
       }
 
       return `Policy updated to v${nextState.version}. ${pending.reason}${profileNote}${cryptoNote}`;
