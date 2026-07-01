@@ -17,8 +17,8 @@ function toTextResult(text, extra = {}) {
     content: [{ type: "text", text }],
     structuredContent: {
       message: text,
-      ...extra
-    }
+      ...extra,
+    },
   };
 }
 
@@ -39,7 +39,11 @@ function coercePlanArgs(args) {
   if (args.plan !== undefined) {
     let unwrapped = args.plan;
     if (typeof unwrapped === "string") {
-      try { unwrapped = JSON.parse(unwrapped); } catch { /* fall through */ }
+      try {
+        unwrapped = JSON.parse(unwrapped);
+      } catch {
+        /* fall through */
+      }
     }
     if (unwrapped && typeof unwrapped === "object") {
       args = { ...unwrapped, ...args };
@@ -48,7 +52,11 @@ function coercePlanArgs(args) {
   }
   // Coerce stringified arrays/objects on known fields.
   if (typeof args.steps === "string") {
-    try { args = { ...args, steps: JSON.parse(args.steps) }; } catch { /* leave as-is */ }
+    try {
+      args = { ...args, steps: JSON.parse(args.steps) };
+    } catch {
+      /* leave as-is */
+    }
   }
   return args;
 }
@@ -62,7 +70,7 @@ async function loadStateAndConfig() {
 async function run() {
   const server = new McpServer({
     name: "armorclaude-policy",
-    version: "0.1.0"
+    version: "0.1.0",
   });
 
   server.registerTool(
@@ -71,8 +79,8 @@ async function run() {
       title: "Policy Read",
       description: "Read current ArmorClaude policy state",
       inputSchema: {
-        id: z.string().optional()
-      }
+        id: z.string().optional(),
+      },
     },
     async (args) => {
       const { state } = await loadStateAndConfig();
@@ -85,7 +93,7 @@ async function run() {
       }
       return toTextResult(JSON.stringify(state, null, 2), {
         version: state.version,
-        policy: state.policy
+        policy: state.policy,
       });
     }
   );
@@ -106,16 +114,20 @@ async function run() {
       // whole plan wrapped in a `plan` field). The handler below coerces
       // them to the canonical shape before validating with INTENT_PLAN_ZOD.
       inputSchema: {
-        goal: z.string().min(1).optional()
+        goal: z
+          .string()
+          .min(1)
+          .optional()
           .describe("One-line summary of what the plan accomplishes"),
-        steps: z.union([
-          z.array(PLAN_STEP_SCHEMA).min(1),
-          z.string().min(1)
-        ]).optional()
+        steps: z
+          .union([z.array(PLAN_STEP_SCHEMA).min(1), z.string().min(1)])
+          .optional()
           .describe("Ordered list of tool calls (array, or JSON-stringified array)"),
-        plan: z.union([INTENT_PLAN_ZOD, z.string().min(1)]).optional()
-          .describe("Alternative: pass the whole plan as an object or JSON string")
-      }
+        plan: z
+          .union([INTENT_PLAN_ZOD, z.string().min(1)])
+          .optional()
+          .describe("Alternative: pass the whole plan as an object or JSON string"),
+      },
     },
     async (args) => {
       // Claude sometimes serializes complex tool arguments as JSON strings
@@ -143,7 +155,7 @@ async function run() {
             policy_hash: policyHash,
             policy: policyState.policy,
             validitySeconds: config.validitySeconds,
-            metadata: { source: "claude-code", planning: "claude-registered" }
+            metadata: { source: "claude-code", planning: "claude-registered" },
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -152,9 +164,7 @@ async function run() {
       }
 
       const sessionId = process.env.CLAUDE_CODE_SESSION_ID || "";
-      const pendingFile = sessionId
-        ? `pending-plan.${sessionId}.json`
-        : "pending-plan.json";
+      const pendingFile = sessionId ? `pending-plan.${sessionId}.json` : "pending-plan.json";
       const pendingPath = path.join(config.dataDir, pendingFile);
       await writeJson(pendingPath, {
         sessionId: sessionId || undefined,
@@ -164,17 +174,17 @@ async function run() {
         expiresAt: intentResult.expiresAt,
         policyHash,
         intentPolicyCompilerVersion: INTENT_POLICY_COMPILER_VERSION,
-        registeredAt: Date.now()
+        registeredAt: Date.now(),
       });
 
       const tokenInfo = intentResult.tokenRaw
         ? `Token valid ${config.validitySeconds}s.`
         : "No ArmorIQ backend configured — plan stored locally.";
 
-      return toTextResult(
-        `Intent registered: ${plan.steps.length} steps. ${tokenInfo}`,
-        { steps: plan.steps.length, goal: parsed.data.goal }
-      );
+      return toTextResult(`Intent registered: ${plan.steps.length} steps. ${tokenInfo}`, {
+        steps: plan.steps.length,
+        goal: parsed.data.goal,
+      });
     }
   );
 
@@ -236,15 +246,15 @@ async function run() {
       description:
         "Sign and broadcast a revocation delta for the currently active " +
         "intent token. Within Δ (paper-measured ~55 ms) every PEP in the " +
-        "fleet refuses the token. Use when the user says \"stop\" or when " +
+        'fleet refuses the token. Use when the user says "stop" or when ' +
         "the plan has gone wrong.",
       inputSchema: {
         reason: z.string().min(1).describe("Why this revocation is happening"),
         cascade: z
           .boolean()
           .optional()
-          .describe("If true, also revoke any subtree-delegated child tokens")
-      }
+          .describe("If true, also revoke any subtree-delegated child tokens"),
+      },
     },
     async (args) => {
       const { config, runtimeState, sessionId, session } = await resolveActiveSession();
@@ -255,7 +265,7 @@ async function run() {
       if (!intentToken) {
         return toTextResult(
           "No parsed intent token on the active session — cannot revoke. " +
-          "Make sure a plan has been registered for this Claude Code session."
+            "Make sure a plan has been registered for this Claude Code session."
         );
       }
       const result = await revokeViaSdk({
@@ -263,13 +273,13 @@ async function run() {
         config,
         intentToken,
         reason: args.reason,
-        cascade: args.cascade
+        cascade: args.cascade,
       });
       appendTrustOp(runtimeState, sessionId, {
         operation: "Revoke",
         trustId: result.trustId,
         reason: args.reason,
-        ok: result.ok
+        ok: result.ok,
       });
       await saveRuntimeState(config.runtimeFile, runtimeState);
       if (!result.ok) {
@@ -278,10 +288,10 @@ async function run() {
       const cascadedNote = result.cascadedRevocations?.length
         ? ` (${result.cascadedRevocations.length} descendants cascaded)`
         : "";
-      return toTextResult(
-        `Token revoked. trustId=${result.trustId || "n/a"}${cascadedNote}`,
-        { trustId: result.trustId, cascaded: result.cascadedRevocations || [] }
-      );
+      return toTextResult(`Token revoked. trustId=${result.trustId || "n/a"}${cascadedNote}`, {
+        trustId: result.trustId,
+        cascaded: result.cascadedRevocations || [],
+      });
     }
   );
 
@@ -298,8 +308,8 @@ async function run() {
         reason: z
           .string()
           .optional()
-          .describe("Why the plan changed — surfaces in the audit timeline")
-      }
+          .describe("Why the plan changed — surfaces in the audit timeline"),
+      },
     },
     async (args) => {
       const parsed = INTENT_PLAN_ZOD.safeParse(args.updatedPlan);
@@ -320,7 +330,7 @@ async function run() {
         config,
         intentToken,
         updatedPlan,
-        reason: args.reason || "armorclaude:operator-reanchor"
+        reason: args.reason || "armorclaude:operator-reanchor",
       });
       appendTrustOp(runtimeState, sessionId, {
         operation: "ReAnchor",
@@ -328,7 +338,7 @@ async function run() {
         fromHash: result.fromHash,
         toHash: result.toHash,
         reason: args.reason,
-        ok: result.ok
+        ok: result.ok,
       });
       await saveRuntimeState(config.runtimeFile, runtimeState);
       if (!result.ok) {
@@ -349,11 +359,22 @@ async function run() {
         "Issue a subtree-bounded child token plus a Merkle inclusion proof. " +
         "The sub-agent receives authority confined to the named subtree path.",
       inputSchema: {
-        delegatePublicKey: z.string().min(1).describe("Public key of the sub-agent that will hold the child token"),
-        subtreePath: z.string().min(1).describe("Plan subtree this delegation covers, e.g. /steps/[1]"),
-        validitySeconds: z.number().int().positive().optional().describe("Override the default validity"),
-        targetAgent: z.string().optional().describe("Human-readable label for the sub-agent")
-      }
+        delegatePublicKey: z
+          .string()
+          .min(1)
+          .describe("Public key of the sub-agent that will hold the child token"),
+        subtreePath: z
+          .string()
+          .min(1)
+          .describe("Plan subtree this delegation covers, e.g. /steps/[1]"),
+        validitySeconds: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Override the default validity"),
+        targetAgent: z.string().optional().describe("Human-readable label for the sub-agent"),
+      },
     },
     async (args) => {
       const { config, runtimeState, sessionId, session } = await resolveActiveSession();
@@ -372,14 +393,14 @@ async function run() {
           delegatePublicKey: args.delegatePublicKey,
           subtreePath: args.subtreePath,
           validitySeconds: args.validitySeconds,
-          targetAgent: args.targetAgent
-        }
+          targetAgent: args.targetAgent,
+        },
       });
       appendTrustOp(runtimeState, sessionId, {
         operation: "Delegate",
         trustId: result.trustId,
         reason: `delegate to ${args.targetAgent || args.delegatePublicKey.slice(0, 16)}…`,
-        ok: result.ok
+        ok: result.ok,
       });
       await saveRuntimeState(config.runtimeFile, runtimeState);
       if (!result.ok) {
@@ -391,7 +412,9 @@ async function run() {
           trustId: result.trustId,
           delegationId: result.delegationId,
           subtreeRoot: result.subtreeRoot,
-          inclusionProofLength: Array.isArray(result.inclusionProof) ? result.inclusionProof.length : 0
+          inclusionProofLength: Array.isArray(result.inclusionProof)
+            ? result.inclusionProof.length
+            : 0,
         }
       );
     }

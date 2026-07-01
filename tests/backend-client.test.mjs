@@ -4,7 +4,13 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { autoRegisterMcp, pushProfile, pullProfiles, syncPolicy, syncMcpRegistry } from "../scripts/lib/backend-client.mjs";
+import {
+  autoRegisterMcp,
+  pushProfile,
+  pullProfiles,
+  syncPolicy,
+  syncMcpRegistry,
+} from "../scripts/lib/backend-client.mjs";
 import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.mjs";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
 import { saveProfile, loadProfile } from "../scripts/lib/policy-profiles.mjs";
@@ -43,9 +49,9 @@ function buildConfig(tmpDir, overrides = {}) {
       maxChars: 2000,
       maxDepth: 4,
       maxKeys: 50,
-      maxItems: 50
+      maxItems: 50,
     },
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -55,7 +61,7 @@ async function seedPolicy(config, rules = []) {
     updatedAt: new Date().toISOString(),
     updatedBy: "test",
     policy: { rules },
-    history: []
+    history: [],
   });
 }
 
@@ -131,14 +137,22 @@ test("autoRegisterMcp sends POST to /mcp/auto-register", async () => {
 
 test("pullProfiles parses backend response", async () => {
   const mockProfiles = [
-    { profile: { name: "org-lockdown", description: "Org lockdown" }, version: 1, policy: { rules: [] } }
+    {
+      profile: { name: "org-lockdown", description: "Org lockdown" },
+      version: 1,
+      policy: { rules: [] },
+    },
   ];
   const { server, url } = await startMockServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ profiles: mockProfiles }));
   });
   try {
-    const result = await pullProfiles({ apiKey: "test-key", backendEndpoint: url, timeoutMs: 5000 });
+    const result = await pullProfiles({
+      apiKey: "test-key",
+      backendEndpoint: url,
+      timeoutMs: 5000,
+    });
     assert.equal(result.ok, true);
     assert.equal(result.profiles.length, 1);
     assert.equal(result.profiles[0].profile.name, "org-lockdown");
@@ -161,7 +175,11 @@ test("syncPolicy sends policy state to /policies/sync", async () => {
   try {
     const result = await syncPolicy(
       { apiKey: "test-key", backendEndpoint: url, timeoutMs: 5000 },
-      { version: 3, policy: { rules: [{ id: "p1", action: "deny", tool: "Bash" }] }, updatedAt: "2026-05-26" }
+      {
+        version: 3,
+        policy: { rules: [{ id: "p1", action: "deny", tool: "Bash" }] },
+        updatedAt: "2026-05-26",
+      }
     );
     assert.equal(result.ok, true);
     assert.equal(receivedBody.version, 3);
@@ -218,7 +236,11 @@ test("/armor policy profile push with apiKey sends to backend", async () => {
 
 test("/armor policy profile pull with apiKey saves profiles locally", async () => {
   const mockProfiles = [
-    { profile: { name: "from-org", description: "Org profile" }, version: 1, policy: { rules: [{ id: "o1", action: "deny", tool: "Bash" }] } }
+    {
+      profile: { name: "from-org", description: "Org profile" },
+      version: 1,
+      policy: { rules: [{ id: "o1", action: "deny", tool: "Bash" }] },
+    },
   ];
   const { server, url } = await startMockServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });

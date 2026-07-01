@@ -50,9 +50,9 @@ function buildConfig(tmpDir, overrides = {}) {
       maxChars: 2000,
       maxDepth: 4,
       maxKeys: 50,
-      maxItems: 50
+      maxItems: 50,
     },
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -62,7 +62,7 @@ async function seedPolicy(config, rules = []) {
     updatedAt: new Date().toISOString(),
     updatedBy: "test",
     policy: { rules },
-    history: []
+    history: [],
   });
 }
 
@@ -81,11 +81,9 @@ function startMockOpa(handler) {
 // ---------------------------------------------------------------------------
 
 test("compileToOpaInput maps deny rule correctly", () => {
-  const input = compileToOpaInput(
-    [{ id: "p1", action: "deny", tool: "Bash" }],
-    "Bash",
-    { command: "ls" }
-  );
+  const input = compileToOpaInput([{ id: "p1", action: "deny", tool: "Bash" }], "Bash", {
+    command: "ls",
+  });
   assert.equal(input.policies.length, 1);
   assert.equal(input.policies[0].policyId, "p1");
   assert.deepEqual(input.policies[0].clientRule.blockedTools, ["Bash"]);
@@ -94,11 +92,7 @@ test("compileToOpaInput maps deny rule correctly", () => {
 });
 
 test("compileToOpaInput maps allow-all rule", () => {
-  const input = compileToOpaInput(
-    [{ id: "a1", action: "allow", tool: "*" }],
-    "Read",
-    {}
-  );
+  const input = compileToOpaInput([{ id: "a1", action: "allow", tool: "*" }], "Read", {});
   assert.deepEqual(input.policies[0].clientRule.allowedTools, ["*"]);
   assert.equal(input.policies[0].clientRule.enforcementAction, "allow");
 });
@@ -115,7 +109,7 @@ test("compileToOpaInput maps require_approval rule", () => {
 test("compilePolicyForBundle produces bundle format", () => {
   const bundle = compilePolicyForBundle([
     { id: "p1", action: "deny", tool: "Bash" },
-    { id: "p2", action: "allow", tool: "*" }
+    { id: "p2", action: "allow", tool: "*" },
   ]);
   assert.equal(bundle.statements.length, 2);
   assert.equal(bundle.rules, undefined);
@@ -180,13 +174,15 @@ test("evaluateOpa returns deny on OPA deny", async () => {
 test("evaluateOpa maps OPA hold decision to native approval", async () => {
   const { server, url } = await startMockOpa((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      result: {
-        decision: "hold",
-        reason: "opa_hold_bash",
-        matched_policy: "hold-bash"
-      }
-    }));
+    res.end(
+      JSON.stringify({
+        result: {
+          decision: "hold",
+          reason: "opa_hold_bash",
+          matched_policy: "hold-bash",
+        },
+      })
+    );
   });
   try {
     resetOpaClientState();
@@ -195,7 +191,12 @@ test("evaluateOpa maps OPA hold decision to native approval", async () => {
     await seedPolicy(config, [{ id: "h1", action: "require_approval", tool: "Bash" }]);
 
     const output = await handlePreToolUse(
-      { hook_event_name: "PreToolUse", session_id: "opa-hold", tool_name: "Bash", tool_input: { command: "ls" } },
+      {
+        hook_event_name: "PreToolUse",
+        session_id: "opa-hold",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      },
       config
     );
     assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
@@ -246,7 +247,7 @@ test("evaluateOpa circuit breaker opens after threshold failures", async () => {
     opaTimeoutMs: 100,
     opaCacheTtlMs: 100,
     opaCircuitBreakerThreshold: 3,
-    opaCircuitResetMs: 60000
+    opaCircuitResetMs: 60000,
   };
   const input = { resource: { toolName: "Bash" }, context: {}, policies: [], subject: {} };
   for (let i = 0; i < 3; i++) {
@@ -279,14 +280,24 @@ test("handlePreToolUse uses OPA when enforcementEngine=opa", async () => {
     await seedPolicy(config, [{ id: "p1", action: "deny", tool: "Bash" }]);
 
     const denyOutput = await handlePreToolUse(
-      { hook_event_name: "PreToolUse", session_id: "opa-1", tool_name: "Bash", tool_input: { command: "ls" } },
+      {
+        hook_event_name: "PreToolUse",
+        session_id: "opa-1",
+        tool_name: "Bash",
+        tool_input: { command: "ls" },
+      },
       config
     );
     assert.equal(denyOutput?.hookSpecificOutput?.permissionDecision, "deny");
 
     resetOpaClientState();
     const allowOutput = await handlePreToolUse(
-      { hook_event_name: "PreToolUse", session_id: "opa-1", tool_name: "Edit", tool_input: { file_path: "x.txt" } },
+      {
+        hook_event_name: "PreToolUse",
+        session_id: "opa-1",
+        tool_name: "Edit",
+        tool_input: { file_path: "x.txt" },
+      },
       config
     );
     assert.notEqual(allowOutput?.hookSpecificOutput?.permissionDecision, "deny");
@@ -301,7 +312,12 @@ test("handlePreToolUse uses local JSON when enforcementEngine=local", async () =
   await seedPolicy(config, [{ id: "p1", action: "deny", tool: "Bash" }]);
 
   const output = await handlePreToolUse(
-    { hook_event_name: "PreToolUse", session_id: "local-1", tool_name: "Bash", tool_input: { command: "ls" } },
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "local-1",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+    },
     config
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
@@ -313,7 +329,12 @@ test("handlePreToolUse falls back to local when OPA URL not set even if engine=o
   await seedPolicy(config, [{ id: "p1", action: "deny", tool: "Bash" }]);
 
   const output = await handlePreToolUse(
-    { hook_event_name: "PreToolUse", session_id: "fallback-1", tool_name: "Bash", tool_input: { command: "ls" } },
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "fallback-1",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+    },
     config
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");

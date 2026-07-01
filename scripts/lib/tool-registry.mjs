@@ -34,7 +34,7 @@ export function parseToolIdentity(toolName) {
       category: armorOwn ? "armorclaude-own" : "plugin-mcp",
       toolName: tool,
       serverName,
-      pluginName
+      pluginName,
     };
   }
 
@@ -45,7 +45,7 @@ export function parseToolIdentity(toolName) {
     return {
       category: armorOwn ? "armorclaude-own" : "external-mcp",
       toolName: tool,
-      serverName
+      serverName,
     };
   }
 
@@ -70,7 +70,7 @@ export function setMcpServerStatus(runtimeState, serverName, status) {
     serverName,
     status,
     updatedAt: Math.floor(Date.now() / 1000),
-    ...(registry[serverName] || {})
+    ...(registry[serverName] || {}),
   };
   registry[serverName].status = status;
   registry[serverName].updatedAt = Math.floor(Date.now() / 1000);

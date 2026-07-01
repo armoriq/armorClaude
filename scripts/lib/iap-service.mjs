@@ -247,7 +247,7 @@ function extractPolicyValidation(data, tokenObj) {
     tokenObj?.rawToken?.policyValidation,
     tokenObj?.rawToken?.policy_validation,
     tokenObj?.rawToken?.token?.policyValidation,
-    tokenObj?.rawToken?.token?.policy_validation
+    tokenObj?.rawToken?.token?.policy_validation,
   ];
   return candidates.find((candidate) => isPlainObject(candidate)) || undefined;
 }

@@ -1,5 +1,18 @@
-import { isPlainObject, normalizeToolName, nowEpochSeconds, redactSecrets, sanitizeParams } from "./common.mjs";
-import { addPromptContext, armorReply, askPreTool, blockPrompt, denyPreTool, denyPreToolWithHint } from "./hook-output.mjs";
+import {
+  isPlainObject,
+  normalizeToolName,
+  nowEpochSeconds,
+  redactSecrets,
+  sanitizeParams,
+} from "./common.mjs";
+import {
+  addPromptContext,
+  armorReply,
+  askPreTool,
+  blockPrompt,
+  denyPreTool,
+  denyPreToolWithHint,
+} from "./hook-output.mjs";
 import { isArmorPolicyCommand, handleArmorPolicyCommand } from "./armor-policy-commands.mjs";
 import { getTemplateNames } from "./policy-templates.mjs";
 import {
@@ -16,11 +29,7 @@ import {
   validateCsrgProofHeaders,
 } from "./intent.mjs";
 import { createIapService, reanchorViaSdk, revokeViaSdk } from "./iap-service.mjs";
-import {
-  computePolicyHash,
-  evaluatePolicy,
-  loadPolicyState
-} from "./policy.mjs";
+import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
 import { readJson } from "./fs-store.mjs";
@@ -116,7 +125,9 @@ function invalidateTokenOnKeyChange(session, config) {
 
 function invalidateTokenOnPolicyChange(session, currentPolicyHash) {
   if (!currentPolicyHash) return false;
-  const hasCachedIntentState = Boolean(session?.intentTokenRaw || session?.plan || session?.expiresAt);
+  const hasCachedIntentState = Boolean(
+    session?.intentTokenRaw || session?.plan || session?.expiresAt
+  );
   if (!hasCachedIntentState) return false;
   if (session.policyHash && session.policyHash === currentPolicyHash) return false;
   session.intentTokenRaw = "";
@@ -128,7 +139,9 @@ function invalidateTokenOnPolicyChange(session, currentPolicyHash) {
 }
 
 function invalidateTokenOnCompilerChange(session) {
-  const hasCachedIntentState = Boolean(session?.intentTokenRaw || session?.plan || session?.expiresAt);
+  const hasCachedIntentState = Boolean(
+    session?.intentTokenRaw || session?.plan || session?.expiresAt
+  );
   if (!hasCachedIntentState) return false;
   if (session.intentPolicyCompilerVersion === INTENT_POLICY_COMPILER_VERSION) return false;
   session.intentTokenRaw = "";
@@ -144,7 +157,7 @@ function hasInputIntentToken(input) {
     input?.intentTokenRaw,
     input?.intent_token_raw,
     input?.intent_token,
-    input?.intentToken
+    input?.intentToken,
   ].some((value) => typeof value === "string" && value.trim());
 }
 
@@ -155,7 +168,7 @@ function formatRemoteVerifyDeny(toolName, verifyResult) {
     : null;
   const parts = [
     `ArmorClaude remote IAP verify-step denied ${toolName}: ${reason}.`,
-    "Local ArmorClaude policy allowed the tool; the backend token/step verification layer denied it."
+    "Local ArmorClaude policy allowed the tool; the backend token/step verification layer denied it.",
   ];
   if (validation) {
     const details = [];
@@ -181,7 +194,9 @@ function formatRemoteVerifyDeny(toolName, verifyResult) {
       parts.push(`Backend policy validation: ${details.join("; ")}.`);
     }
   }
-  parts.push("Refresh the intent after policy changes, and if this persists, update/sync the ArmorIQ backend policy for this agent/workspace.");
+  parts.push(
+    "Refresh the intent after policy changes, and if this persists, update/sync the ArmorIQ backend policy for this agent/workspace."
+  );
   return parts.join(" ");
 }
 
@@ -222,7 +237,7 @@ async function evaluateConfiguredPolicy(config, policyState, toolName, toolInput
   return evaluatePolicy({
     policy: policyState.policy,
     toolName,
-    toolParams: toolInput
+    toolParams: toolInput,
   });
 }
 
@@ -230,7 +245,7 @@ function preToolPolicyOutput(policyDecision, toolName) {
   if (policyDecisionRequiresApproval(policyDecision)) {
     return askPreTool(
       policyDecision.reason ||
-      `ArmorClaude policy requires your approval before running ${toolName}.`
+        `ArmorClaude policy requires your approval before running ${toolName}.`
     );
   }
   if (!policyDecision.allowed) {
@@ -323,18 +338,20 @@ export async function handleSessionStart(input, config) {
 
   // --- Fire-and-forget: sync MCP registry from backend (if apiKey set) ---
   if (config.apiKey) {
-    syncMcpRegistry(config).then(async (result) => {
-      if (result.ok && result.servers.length) {
-        const { setMcpServerStatus: setStatus } = await import("./tool-registry.mjs");
-        const fresh = await loadRuntimeState(config.runtimeFile);
-        for (const s of result.servers) {
-          if (s.mcpName && s.status) {
-            setStatus(fresh, s.mcpName, s.status);
+    syncMcpRegistry(config)
+      .then(async (result) => {
+        if (result.ok && result.servers.length) {
+          const { setMcpServerStatus: setStatus } = await import("./tool-registry.mjs");
+          const fresh = await loadRuntimeState(config.runtimeFile);
+          for (const s of result.servers) {
+            if (s.mcpName && s.status) {
+              setStatus(fresh, s.mcpName, s.status);
+            }
           }
+          await saveRuntimeState(config.runtimeFile, fresh);
         }
-        await saveRuntimeState(config.runtimeFile, fresh);
-      }
-    }).catch(() => {});
+      })
+      .catch(() => {});
   }
 
   debugLog(config, `session started: ${sessionId}, mode=${config.mode}`);
@@ -345,15 +362,21 @@ export async function handleSessionStart(input, config) {
   // --- First-run onboarding: if no policy.json, show template picker ---
   const onboardingFlag = path.join(config.dataDir, "onboarding-shown");
   let onboardingMsg = "";
-  const policyExists = await stat(config.policyFile).then(() => true, () => false);
+  const policyExists = await stat(config.policyFile).then(
+    () => true,
+    () => false
+  );
   if (!policyExists) {
-    const flagExists = await stat(onboardingFlag).then(() => true, () => false);
+    const flagExists = await stat(onboardingFlag).then(
+      () => true,
+      () => false
+    );
     if (!flagExists) {
       const templates = getTemplateNames();
       onboardingMsg =
         "\n\nWelcome to ArmorClaude! No policy is configured yet.\n" +
         "Choose a template to get started:\n\n" +
-        templates.map(t => `  /armor policy template ${t}`).join("\n") +
+        templates.map((t) => `  /armor policy template ${t}`).join("\n") +
         "\n\nOr add individual rules:\n" +
         "  /armor policy add allow Read and Grep, deny Write, hold Bash\n\n" +
         "Type /armor for all commands.";
@@ -499,14 +522,19 @@ export async function handlePreToolUse(input, config) {
     path.join(config.dataDir, "policy-pending.json"),
     path.join(config.dataDir, "crypto-policy-state.json"),
     path.join(config.dataDir, "profiles"),
-    path.join(homedir(), ".armoriq", "credentials.json")
+    path.join(homedir(), ".armoriq", "credentials.json"),
   ];
   if (["write", "edit"].includes(norm)) {
     const target = toolInput?.file_path || toolInput?.path || "";
-    if (typeof target === "string" && PROTECTED_PATHS.some(p =>
-        path.resolve(target) === path.resolve(p) ||
-        target.includes("armorclaude/policy") ||
-        target.includes("armorclaude/profiles"))) {
+    if (
+      typeof target === "string" &&
+      PROTECTED_PATHS.some(
+        (p) =>
+          path.resolve(target) === path.resolve(p) ||
+          target.includes("armorclaude/policy") ||
+          target.includes("armorclaude/profiles")
+      )
+    ) {
       return denyPreTool(
         "ArmorClaude: direct modification of policy files is blocked. Use /armor policy commands."
       );
@@ -517,13 +545,18 @@ export async function handlePreToolUse(input, config) {
     // Block direct invocation of the policy handler via Node/Bash.
     // Claude could bypass the UserPromptSubmit hook by importing and calling
     // handleArmorPolicyCommand directly --- this guard closes that vector.
-    if (/armor-policy-commands|handleArmorPolicyCommand|armor-policy-cli|savePolicyState|writeJson|policy-pending|crypto-policy-state/i.test(cmd)) {
+    if (
+      /armor-policy-commands|handleArmorPolicyCommand|armor-policy-cli|savePolicyState|writeJson|policy-pending|crypto-policy-state/i.test(
+        cmd
+      )
+    ) {
       return denyPreTool(
         "ArmorClaude: policy management is human-only. Type /armor policy in the terminal."
       );
     }
-    const WRITE_OPS = /\b(>|>>|tee|mv|cp|rm|sed\s+-i|awk\s.*>|chmod|cat\s*<<|echo.*>|truncate|dd\b)/;
-    if (PROTECTED_PATHS.some(p => cmd.includes(path.basename(p))) && WRITE_OPS.test(cmd)) {
+    const WRITE_OPS =
+      /\b(>|>>|tee|mv|cp|rm|sed\s+-i|awk\s.*>|chmod|cat\s*<<|echo.*>|truncate|dd\b)/;
+    if (PROTECTED_PATHS.some((p) => cmd.includes(path.basename(p))) && WRITE_OPS.test(cmd)) {
       return denyPreTool(
         "ArmorClaude: shell write commands targeting policy files are blocked. Use /armor policy commands."
       );
@@ -553,22 +586,21 @@ export async function handlePreToolUse(input, config) {
     "todowrite",
     "listmcpresourcestool",
     "readmcpresourcetool",
-    "exitplanmode"
+    "exitplanmode",
   ]);
   if (coordinationTools.has(norm)) {
     return null;
   }
 
-  const readOnlyPolicyTools = new Set([
-    "read",
-    "grep",
-    "glob",
-    "websearch",
-    "webfetch",
-  ]);
+  const readOnlyPolicyTools = new Set(["read", "grep", "glob", "websearch", "webfetch"]);
   if (readOnlyPolicyTools.has(norm)) {
     const safePolicyState = await loadPolicyState(config.policyFile);
-    const safePolicyDecision = await evaluateConfiguredPolicy(config, safePolicyState, toolName, toolInput);
+    const safePolicyDecision = await evaluateConfiguredPolicy(
+      config,
+      safePolicyState,
+      toolName,
+      toolInput
+    );
     const safePolicyOutput = preToolPolicyOutput(safePolicyDecision, toolName);
     if (safePolicyOutput) return safePolicyOutput;
     return null;
@@ -600,7 +632,7 @@ export async function handlePreToolUse(input, config) {
       if (entry?.status === "denied") {
         return denyPreTool(
           `ArmorClaude: MCP server "${server}" is denied by policy. ` +
-          `Type /armor policy mcp approve ${server} to change this.`
+            `Type /armor policy mcp approve ${server} to change this.`
         );
       }
     }
@@ -691,9 +723,10 @@ export async function handlePreToolUse(input, config) {
     }
 
     upsertSession(runtimeState, sessionId, {
-      intentTokenRaw: pending.intentPolicyCompilerVersion === INTENT_POLICY_COMPILER_VERSION
-        ? pending.tokenRaw || ""
-        : "",
+      intentTokenRaw:
+        pending.intentPolicyCompilerVersion === INTENT_POLICY_COMPILER_VERSION
+          ? pending.tokenRaw || ""
+          : "",
       plan: pending.plan,
       allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
       expiresAt: pending.expiresAt,
@@ -756,9 +789,10 @@ export async function handlePreToolUse(input, config) {
     debugLog(config, "Policy hash changed; discarded cached intent token for fresh verification");
     upsertSession(runtimeState, sessionId, session);
   }
-  let intentTokenRaw = policyTokenInvalidated || (!session.policyHash && hasInputIntentToken(input))
-    ? ""
-    : readIntentTokenRaw(input, session);
+  let intentTokenRaw =
+    policyTokenInvalidated || (!session.policyHash && hasInputIntentToken(input))
+      ? ""
+      : readIntentTokenRaw(input, session);
   let localPlan = session.plan;
   let localExpiresAt = session.expiresAt;
   let remoteAllowed = false;
@@ -901,10 +935,7 @@ export async function handlePreToolUse(input, config) {
         remoteAllowed = verifyResult.allowed === true;
       }
       if (verifyResult.allowed === false) {
-        return denyOrAllow(
-          config,
-          formatRemoteVerifyDeny(toolName, verifyResult)
-        );
+        return denyOrAllow(config, formatRemoteVerifyDeny(toolName, verifyResult));
       }
       const merged = mergeIntentIntoSession(session, verifyResult, config);
       merged.policyHash = currentPolicyHash;
@@ -991,7 +1022,7 @@ export async function handlePreToolUse(input, config) {
   if (requiresUserApproval) {
     return askPreTool(
       policyDecision.reason ||
-      `ArmorClaude policy requires your approval before running ${toolName}.`
+        `ArmorClaude policy requires your approval before running ${toolName}.`
     );
   }
   return null;

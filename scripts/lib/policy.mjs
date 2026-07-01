@@ -5,7 +5,7 @@ import {
   canonicalPolicyHash,
   evaluatePolicyIr,
   legacyRulesToPolicyIr,
-  normalizePolicyIr
+  normalizePolicyIr,
 } from "./policy-ir.mjs";
 
 const POLICY_ACTIONS = new Set(["allow", "deny", "require_approval"]);
@@ -24,7 +24,7 @@ function normalizeRule(rule) {
   const normalized = {
     id,
     action,
-    tool
+    tool,
   };
   if (typeof rule.dataClass === "string" && POLICY_DATA_CLASSES.has(rule.dataClass.trim())) {
     normalized.dataClass = rule.dataClass.trim();
@@ -53,7 +53,7 @@ export async function loadPolicyState(policyFilePath) {
     version: 0,
     updatedAt: new Date().toISOString(),
     policy: normalizePolicyIr({ statements: [] }),
-    history: []
+    history: [],
   };
   const raw = await readJson(policyFilePath, initial);
   const state = isPlainObject(raw) ? raw : initial;
@@ -62,7 +62,7 @@ export async function loadPolicyState(policyFilePath) {
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : new Date().toISOString(),
     updatedBy: typeof state.updatedBy === "string" ? state.updatedBy : undefined,
     policy: normalizePolicy(state.policy || state),
-    history: Array.isArray(state.history) ? state.history : []
+    history: Array.isArray(state.history) ? state.history : [],
   };
 }
 
@@ -75,7 +75,9 @@ export function computePolicyHash(policy) {
   if (isPlainObject(policy) && policy.schemaVersion === "armor.policy.v1") {
     return canonicalPolicyHash(policy);
   }
-  return createHash("sha256").update(JSON.stringify(normalizePolicy(policy))).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify(normalizePolicy(policy)))
+    .digest("hex");
 }
 
 function extractStrings(value, depth, texts, keys) {

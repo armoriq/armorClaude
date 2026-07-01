@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { handleSessionStart } from "../scripts/lib/engine.mjs";
@@ -39,8 +39,8 @@ function buildConfig(tmpDir) {
       maxChars: 2000,
       maxDepth: 4,
       maxKeys: 50,
-      maxItems: 50
-    }
+      maxItems: 50,
+    },
   };
 }
 
@@ -65,11 +65,11 @@ test("onboarding sets flag file so it only shows once", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "onboarding-test-"));
   const config = buildConfig(tmp);
 
-  await handleSessionStart(
-    { hook_event_name: "SessionStart", session_id: "onboard-2a" },
-    config
+  await handleSessionStart({ hook_event_name: "SessionStart", session_id: "onboard-2a" }, config);
+  const flagExists = await stat(path.join(tmp, "onboarding-shown")).then(
+    () => true,
+    () => false
   );
-  const flagExists = await stat(path.join(tmp, "onboarding-shown")).then(() => true, () => false);
   assert.ok(flagExists, "onboarding-shown flag should be created");
 
   const output2 = await handleSessionStart(
@@ -89,7 +89,7 @@ test("no onboarding when policy.json already exists", async () => {
     updatedAt: new Date().toISOString(),
     updatedBy: "test",
     policy: { rules: [{ id: "p1", action: "allow", tool: "*" }] },
-    history: []
+    history: [],
   });
 
   const output = await handleSessionStart(
