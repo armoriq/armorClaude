@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { listProfiles, loadProfile, saveProfile, deleteProfile, seedBuiltinProfiles } from "../scripts/lib/policy-profiles.mjs";
+import {
+  listProfiles,
+  loadProfile,
+  saveProfile,
+  deleteProfile,
+  seedBuiltinProfiles,
+} from "../scripts/lib/policy-profiles.mjs";
 import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.mjs";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
 
@@ -40,8 +46,8 @@ function buildConfig(tmpDir) {
       maxChars: 2000,
       maxDepth: 4,
       maxKeys: 50,
-      maxItems: 50
-    }
+      maxItems: 50,
+    },
   };
 }
 
@@ -51,7 +57,7 @@ async function seedPolicy(config, rules = []) {
     updatedAt: new Date().toISOString(),
     updatedBy: "test",
     policy: { rules },
-    history: []
+    history: [],
   });
 }
 
@@ -64,7 +70,7 @@ test("seedBuiltinProfiles creates 4 template profiles", async () => {
   const config = buildConfig(tmp);
   await seedBuiltinProfiles(config);
   const files = await readdir(path.join(tmp, "profiles"));
-  const jsonFiles = files.filter(f => f.endsWith(".json"));
+  const jsonFiles = files.filter((f) => f.endsWith(".json"));
   assert.equal(jsonFiles.length, 4);
   assert.ok(jsonFiles.includes("balanced.json"));
   assert.ok(jsonFiles.includes("lockdown.json"));
@@ -75,7 +81,9 @@ test("seedBuiltinProfiles creates 4 template profiles", async () => {
 test("seedBuiltinProfiles does not overwrite existing profiles", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "profiles-test-"));
   const config = buildConfig(tmp);
-  await saveProfile(config, "balanced", "custom description", [{ id: "x", action: "deny", tool: "Bash" }]);
+  await saveProfile(config, "balanced", "custom description", [
+    { id: "x", action: "deny", tool: "Bash" },
+  ]);
   await seedBuiltinProfiles(config);
   const profile = await loadProfile(config, "balanced");
   assert.equal(profile.profile.description, "custom description");
@@ -89,7 +97,7 @@ test("listProfiles returns all profiles including builtins", async () => {
   const config = buildConfig(tmp);
   const profiles = await listProfiles(config);
   assert.equal(profiles.length, 4);
-  const names = profiles.map(p => p.profile.name).sort();
+  const names = profiles.map((p) => p.profile.name).sort();
   assert.deepEqual(names, ["all-allow", "balanced", "lockdown", "strict-read-only"]);
 });
 
@@ -110,7 +118,9 @@ test("saveProfile increments version on overwrite", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "profiles-test-"));
   const config = buildConfig(tmp);
   await saveProfile(config, "test-prof", "v1", []);
-  const v2 = await saveProfile(config, "test-prof", "v2", [{ id: "p1", action: "allow", tool: "*" }]);
+  const v2 = await saveProfile(config, "test-prof", "v2", [
+    { id: "p1", action: "allow", tool: "*" },
+  ]);
   assert.equal(v2.version, 2);
 });
 
@@ -159,7 +169,7 @@ test("/armor policy profile save saves current policy", async () => {
   const config = buildConfig(tmp);
   await seedPolicy(config, [
     { id: "p1", action: "allow", tool: "Read" },
-    { id: "p2", action: "deny", tool: "Bash" }
+    { id: "p2", action: "deny", tool: "Bash" },
   ]);
   const out = await handleArmorPolicyCommand("/armor policy profile save my-setup", config);
   assert.ok(out.includes("my-setup"));
@@ -247,7 +257,7 @@ test("round-trip: save custom → switch to template → switch back to custom",
   const config = buildConfig(tmp);
   await seedPolicy(config, [
     { id: "p1", action: "allow", tool: "Read" },
-    { id: "p2", action: "deny", tool: "Bash" }
+    { id: "p2", action: "deny", tool: "Bash" },
   ]);
 
   await handleArmorPolicyCommand("/armor policy profile save my-custom", config);

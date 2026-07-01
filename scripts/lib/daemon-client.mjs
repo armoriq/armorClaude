@@ -76,7 +76,9 @@ async function spawnDaemon(socketPath, dataDir, config) {
     env: childEnv,
   });
   let spawnError = null;
-  child.once("error", (err) => { spawnError = err; });
+  child.once("error", (err) => {
+    spawnError = err;
+  });
   child.unref();
 
   for (let i = 0; i < SPAWN_RETRIES; i++) {
@@ -104,8 +106,16 @@ async function shutdownDaemon(socketPath) {
     // Best effort. If shutdown fails, the next connect/spawn path falls back
     // to in-process hook handling instead of silently trusting stale code.
   } finally {
-    try { sock?.end(); } catch {}
-    try { sock?.destroy(); } catch {}
+    try {
+      sock?.end();
+    } catch {
+      /* noop */
+    }
+    try {
+      sock?.destroy();
+    } catch {
+      /* noop */
+    }
   }
 }
 
@@ -129,8 +139,16 @@ async function ensureFreshDaemonSocket(socketPath, config) {
     // Treat an unpingable daemon as stale/unhealthy and replace it below.
   }
 
-  try { sock.end(); } catch {}
-  try { sock.destroy(); } catch {}
+  try {
+    sock.end();
+  } catch {
+    /* noop */
+  }
+  try {
+    sock.destroy();
+  } catch {
+    /* noop */
+  }
   await shutdownDaemon(socketPath);
   return spawnDaemon(socketPath, config.dataDir, config);
 }

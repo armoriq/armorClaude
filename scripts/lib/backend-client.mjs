@@ -47,14 +47,14 @@ export async function pullProfiles(config) {
     const res = await fetch(endpoint(config, "/policies/profiles"), {
       method: "GET",
       headers: buildAuthHeaders(config),
-      signal: controller.signal
+      signal: controller.signal,
     });
     clearTimeout(timeout);
     const data = await res.json().catch(() => null);
     return {
       ok: res.ok,
       status: res.status,
-      profiles: Array.isArray(data?.profiles) ? data.profiles : Array.isArray(data) ? data : []
+      profiles: Array.isArray(data?.profiles) ? data.profiles : Array.isArray(data) ? data : [],
     };
   } catch (err) {
     return { ok: false, reason: String(err?.message || err), profiles: [] };
@@ -70,7 +70,7 @@ export async function syncPolicy(config, policyState) {
         version: policyState.version,
         policy: policyState.policy,
         source: "armorclaude",
-        updatedAt: policyState.updatedAt
+        updatedAt: policyState.updatedAt,
       },
       buildAuthHeaders(config),
       config.timeoutMs || 8000
@@ -89,14 +89,14 @@ export async function syncMcpRegistry(config) {
     const res = await fetch(endpoint(config, "/mcp/servers"), {
       method: "GET",
       headers: buildAuthHeaders(config),
-      signal: controller.signal
+      signal: controller.signal,
     });
     clearTimeout(timeout);
     const data = await res.json().catch(() => null);
     return {
       ok: res.ok,
       status: res.status,
-      servers: Array.isArray(data?.servers) ? data.servers : Array.isArray(data) ? data : []
+      servers: Array.isArray(data?.servers) ? data.servers : Array.isArray(data) ? data : [],
     };
   } catch (err) {
     return { ok: false, reason: String(err?.message || err), servers: [] };

@@ -13,8 +13,8 @@ export function askPreTool(reason) {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "ask",
-      permissionDecisionReason: reason
-    }
+      permissionDecisionReason: reason,
+    },
   };
 }
 

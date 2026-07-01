@@ -45,7 +45,7 @@ export async function evaluateOpa(config, opaInput) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input: opaInput }),
-      signal: controller.signal
+      signal: controller.signal,
     });
     clearTimeout(timer);
 
@@ -68,12 +68,14 @@ export async function evaluateOpa(config, opaInput) {
     const decision = {
       allowed: requiresApproval ? false : result.allow === true,
       reason: requiresApproval
-        ? (result.reason || "OPA policy requires approval")
-        : result.allow ? "opa_allow" : (result.reason || "opa_deny"),
+        ? result.reason || "OPA policy requires approval"
+        : result.allow
+          ? "opa_allow"
+          : result.reason || "opa_deny",
       matchedPolicy,
       matchedRule: requiresApproval
         ? { id: matchedPolicy || "opa-require-approval", effect: "require_approval" }
-        : null
+        : null,
     };
 
     cache.set(cacheKey, { decision, expiresAt: Date.now() + cacheTtl });

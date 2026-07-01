@@ -2,7 +2,7 @@ import path from "node:path";
 import { mkdir, readdir, unlink } from "node:fs/promises";
 import { readJson, writeJson } from "./fs-store.mjs";
 import { POLICY_TEMPLATES } from "./policy-templates.mjs";
-import { legacyRulesToPolicyIr, normalizePolicyIr } from "./policy-ir.mjs";
+import { legacyRulesToPolicyIr, normalizePolicyIr, canonicalPolicyHash } from "./policy-ir.mjs";
 
 function profilesDir(config) {
   return path.join(config.dataDir, "profiles");
@@ -21,18 +21,24 @@ export async function seedBuiltinProfiles(config) {
   for (const [key, tmpl] of Object.entries(POLICY_TEMPLATES)) {
     const filePath = profilePath(config, key);
     const existing = await readJson(filePath, null);
-    if (existing) continue;
     const policy = normalizePolicyIr(tmpl.policy);
+    const templateHash = canonicalPolicyHash(policy);
+    // Skip user-created profiles entirely — never overwrite them.
+    if (existing && existing.profile?.createdBy !== "builtin") continue;
+    // Skip builtins that are already up to date.
+    if (existing && existing.builtinHash === templateHash) continue;
     await writeJson(filePath, {
       profile: {
         name: key,
         description: tmpl.description,
-        createdAt: new Date().toISOString(),
+        createdAt: existing?.profile?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
         createdBy: "builtin",
-        orgId: "local"
+        orgId: "local",
       },
-      version: 1,
-      policy
+      version: (existing?.version || 0) + 1,
+      builtinHash: templateHash,
+      policy,
     });
   }
 }
@@ -43,14 +49,18 @@ function normalizeProfileData(data, fallbackName = "profile") {
   const policy = data.policy?.schemaVersion
     ? normalizePolicyIr(data.policy)
     : legacyRulesToPolicyIr(
-        Array.isArray(data.policy?.rules) ? data.policy.rules : Array.isArray(data.rules) ? data.rules : [],
+        Array.isArray(data.policy?.rules)
+          ? data.policy.rules
+          : Array.isArray(data.rules)
+            ? data.rules
+            : [],
         { name: data.profile.name || fallbackName, description },
         { decision: "deny" }
       );
   return {
     profile: data.profile,
     version: data.version || 1,
-    policy
+    policy,
   };
 }
 
@@ -91,7 +101,11 @@ export async function saveProfile(config, name, description, policyLike) {
   const version = existing ? (existing.version || 0) + 1 : 1;
   const policy = policyLike?.schemaVersion
     ? normalizePolicyIr(policyLike)
-    : legacyRulesToPolicyIr(Array.isArray(policyLike) ? policyLike : policyLike?.rules || [], { name, description }, { decision: "deny" });
+    : legacyRulesToPolicyIr(
+        Array.isArray(policyLike) ? policyLike : policyLike?.rules || [],
+        { name, description },
+        { decision: "deny" }
+      );
   const data = {
     profile: {
       name,
@@ -99,10 +113,10 @@ export async function saveProfile(config, name, description, policyLike) {
       createdAt: existing?.profile?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       createdBy: "user",
-      orgId: "local"
+      orgId: "local",
     },
     version,
-    policy
+    policy,
   };
   await writeJson(profilePath(config, name), data);
   return data;

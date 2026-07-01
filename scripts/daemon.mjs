@@ -33,6 +33,7 @@ import { createServer } from "node:net";
 import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./lib/config.mjs";
+import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
 import {
   handleSessionStart,
@@ -51,6 +52,9 @@ const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 
 let config = loadConfig();
 mkdirSync(config.dataDir, { recursive: true });
+// Seed built-in profiles eagerly so new templates are available immediately
+// after a daemon restart — no lazy first-access required.
+await seedBuiltinProfiles(config);
 
 const socketPath = path.join(config.dataDir, "daemon.sock");
 const pidPath = path.join(config.dataDir, "daemon.pid");
