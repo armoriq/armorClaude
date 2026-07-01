@@ -1994,6 +1994,7 @@ function helpText() {
     "  /armorclaude:armor yes                           — apply current staged change",
     "  /armorclaude:armor no                            — discard current staged change",
     "  /armorclaude:armor policy export                 — dump policy as JSON",
+    "  /armorclaude:armor policy sync                   — push active policy to the dashboard",
     "",
     "  /armorclaude:armor mcp list                     — show detected MCPs",
     "  /armorclaude:armor mcp approve <server>         — approve an MCP server",
@@ -2368,8 +2369,9 @@ export async function handleArmorPolicyCommand(prompt, config) {
       }
       await clearPending(config);
 
-      // OPA mode: push compiled bundle to backend
-      if (config.enforcementEngine === "opa" && config.apiKey) {
+      // Push policy to backend for all engines (local is the default)
+      // whenever an API key is configured.
+      if (config.apiKey) {
         try {
           const { syncPolicy: syncToBackend } = await import("./backend-client.mjs");
           await syncToBackend(config, nextState);
