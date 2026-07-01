@@ -11,6 +11,7 @@ import {
 } from "../scripts/lib/armor-policy-commands.mjs";
 import { handleUserPromptExpansion, handleUserPromptSubmit } from "../scripts/lib/engine.mjs";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
+import { saveProfile } from "../scripts/lib/policy-profiles.mjs";
 
 function buildConfig(tmpDir) {
   return {
@@ -1233,6 +1234,65 @@ test("/armor policy template rejects unknown template", async () => {
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor policy template nonexistent", config);
   assert.ok(out.includes("Unknown template"));
+});
+
+// Helper: create a profile on disk with a real (normalized) policy, then set
+// its createdBy. This simulates either a builtin profile shipped in a newer
+// bundle that the daemon's in-memory POLICY_TEMPLATES does not yet know about,
+// or a user-created profile. We go through saveProfile so the policy IR is
+// valid, then patch createdBy on disk (saveProfile always writes "user").
+async function writeProfileFile(config, name, createdBy) {
+  await saveProfile(config, name, `${createdBy} profile ${name}`, [
+    { id: "allow-read", action: "allow", tool: "Read" },
+    { id: "hold-bash", action: "hold", tool: "Bash" },
+  ]);
+  const file = path.join(config.dataDir, "profiles", `${name}.json`);
+  const data = JSON.parse(await readFile(file, "utf8"));
+  data.profile.createdBy = createdBy;
+  await writeFile(file, JSON.stringify(data, null, 2));
+}
+
+test("/armor policy template applies a seeded builtin profile absent from POLICY_TEMPLATES", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedPolicy(config);
+  // "future-builtin" is not a compiled-in template, but is present on disk as
+  // a builtin (as if seeded by a newer bundle).
+  await writeProfileFile(config, "future-builtin", "builtin");
+
+  const tmplOut = await handleArmorPolicyCommand("/armor policy template future-builtin", config);
+  assert.ok(tmplOut.includes("confirm"), `expected a proposal, got: ${tmplOut}`);
+  assert.ok(!tmplOut.includes("Unknown template"));
+
+  await handleArmorPolicyCommand("/armor policy confirm", config);
+  const listOut = await handleArmorPolicyCommand("/armor policy list", config);
+  assert.ok(listOut.includes("allow-read"));
+  assert.ok(listOut.includes("hold-bash"));
+});
+
+test("/armor policy template refuses a user-created profile", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedPolicy(config);
+  // A user-created profile on disk must NOT be applicable as a template.
+  await writeProfileFile(config, "my-custom", "user");
+
+  const out = await handleArmorPolicyCommand("/armor policy template my-custom", config);
+  assert.ok(out.includes("Unknown template"), `expected rejection, got: ${out}`);
+  // A user profile must not be advertised in the "Available" template list
+  // (the requested name still appears in the "Unknown template: <name>" line).
+  const available = out.split("Available:")[1] ?? "";
+  assert.ok(!available.includes("my-custom"), `user profile leaked into Available: ${out}`);
+});
+
+test("/armor policy template rejects path-traversal names", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp);
+  await seedPolicy(config);
+  for (const bad of ["../evil", "a/b", "..", "UPPER"]) {
+    const out = await handleArmorPolicyCommand(`/armor policy template ${bad}`, config);
+    assert.ok(out.includes("Unknown template"), `expected rejection for "${bad}", got: ${out}`);
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -17,6 +17,10 @@ import {
 const PENDING_FILE = "policy-pending.json";
 const DRAFTS_FILE = "policy-drafts.json";
 const PROPOSAL_TTL_MS = 30 * 60 * 1000;
+// Safe profile/template slug: lowercase alphanumeric, hyphen-separated.
+// Rejects path separators and "." so a template name can never traverse
+// outside the profiles directory (e.g. "../foo", "a/b").
+const SAFE_PROFILE_NAME = /^[a-z0-9][a-z0-9-]*$/;
 const KNOWN_CLAUDE_TOOLS = new Set([
   "*",
   "Agent",
@@ -2287,11 +2291,14 @@ export async function handleArmorPolicyCommand(prompt, config) {
 
     case "template": {
       let tmpl = getTemplate(parsed.name);
-      // Fall back to seeded profile on disk so new bundles work without a
-      // daemon version bump — profiles are seeded at startup from templates.
-      if (!tmpl) {
+      // Fall back to a seeded builtin profile on disk so new bundles work
+      // without a daemon version bump — profiles are seeded at startup from
+      // templates. Only builtins are eligible: user-created profiles must not
+      // be applicable via `policy template`, and the name must be a safe slug
+      // so we never resolve a path outside the profiles directory.
+      if (!tmpl && SAFE_PROFILE_NAME.test(parsed.name)) {
         const seeded = await loadProfile(config, parsed.name);
-        if (seeded?.policy) {
+        if (seeded?.policy && seeded.profile?.createdBy === "builtin") {
           tmpl = {
             name: seeded.profile?.name ?? parsed.name,
             description: seeded.profile?.description ?? "",
@@ -2300,7 +2307,10 @@ export async function handleArmorPolicyCommand(prompt, config) {
         }
       }
       if (!tmpl) {
-        const seededNames = (await listProfiles(config)).map((p) => p.name);
+        const seededNames = (await listProfiles(config))
+          .filter((p) => p.profile?.createdBy === "builtin")
+          .map((p) => p.profile?.name)
+          .filter(Boolean);
         const allNames = [...new Set([...getTemplateNames(), ...seededNames])];
         return `Unknown template: ${parsed.name}\nAvailable: ${allNames.join(", ")}`;
       }
