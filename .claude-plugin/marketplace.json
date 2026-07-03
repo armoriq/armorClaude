@@ -14,7 +14,7 @@
       "name": "armorclaude",
       "source": "./",
       "description": "Intent-based security enforcement for Claude Code: declared plans, policy rules, intent-drift blocking, CSRG cryptographic proofs, and audit logging. Production-hardcoded URLs (api.armoriq.ai + iap.armoriq.ai).",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "category": "security",
       "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp"],
       "homepage": "https://armoriq.ai/tools/armorclaude",
