@@ -2495,7 +2495,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
       const result = await pushProfileToBackend(config, profile);
       if (!result.ok)
         return `Failed to push profile "${parsed.name}": ${result.reason || `HTTP ${result.status}`}`;
-      return `Profile "${parsed.name}" pushed to organization.`;
+      return `Profile "${parsed.name}" staged as a proposal for your organization. Confirm it in the dashboard (Policies → Confirm) to activate.`;
     }
 
     case "profile-pull": {
@@ -2546,7 +2546,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
       const state = await loadPolicyState(config.policyFile);
       const result = await syncPolicyToBackend(config, state);
       if (!result.ok) return `Sync failed: ${result.reason || `HTTP ${result.status}`}`;
-      return `Policy v${state.version} synced to backend.`;
+      return `Policy v${state.version} staged as a proposal on the backend. Confirm it in the dashboard (Policies → Confirm) to activate.`;
     }
 
     default:
