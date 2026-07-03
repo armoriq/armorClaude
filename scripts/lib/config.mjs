@@ -76,15 +76,15 @@ export function loadConfig(env = process.env) {
 
   // ── The one userConfig field: api_key. UI primary, legacy env fallback. ──
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
-  if (!apiKey) {
-    try {
-      const creds = JSON.parse(
-        readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
-      );
-      if (typeof creds?.apiKey === "string") apiKey = creds.apiKey;
-    } catch {
-      // no credentials file — local-only mode
-    }
+  let orgId = env.ARMORIQ_ORG_ID?.trim() || "";
+  try {
+    const creds = JSON.parse(
+      readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
+    );
+    if (!apiKey && typeof creds?.apiKey === "string") apiKey = creds.apiKey;
+    if (!orgId && typeof creds?.orgId === "string") orgId = creds.orgId;
+  } catch {
+    // no credentials file — local-only mode
   }
 
   return {
@@ -102,6 +102,7 @@ export function loadConfig(env = process.env) {
     // In local mock mode use a placeholder key so engine.mjs apiKey guards pass.
     // The mock server ignores auth headers so the value doesn't matter.
     apiKey: apiKey || (localMock ? "local-mock-key-00000000000000000000" : ""),
+    orgId,
     auditEnabled: Boolean(apiKey) || localMock,
 
     // Hardcoded — every behaviour toggle uses the value we've tested into
