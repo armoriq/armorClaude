@@ -2594,6 +2594,75 @@ export async function handleArmorPolicyCommand(prompt, config) {
   }
 }
 
+/**
+ * Dashboard-authoritative sync: pull the org's CONFIRMED active policy from the
+ * backend and make it the local enforced policy. Called on session start.
+ *
+ * Fail-safe by construction: on ANY problem (no api key, network error, invalid
+ * remote policy, or crypto policy-token issuance failure) the local policy is
+ * left untouched — a failed pull never wipes or loosens enforcement. No-op when
+ * the remote policy already matches the local one.
+ *
+ * Returns { ok, changed, version?, reason? }.
+ */
+export async function syncActivePolicyFromBackend(config) {
+  if (!config.apiKey) return { ok: false, changed: false, reason: "no api key" };
+
+  const result = await pullProfilesFromBackend(config);
+  if (!result.ok)
+    return { ok: false, changed: false, reason: result.reason || `HTTP ${result.status}` };
+
+  const active = result.profiles.find((p) => p?.policy);
+  if (!active?.policy) return { ok: false, changed: false, reason: "no active org policy" };
+
+  const validated = validatePolicyIr(normalizePolicyIr(active.policy));
+  if (!validated.ok)
+    return {
+      ok: false,
+      changed: false,
+      reason: `invalid remote policy: ${validated.errors.join("; ")}`,
+    };
+  const remotePolicy = validated.policy;
+
+  const state = await loadPolicyState(config.policyFile);
+  if (canonicalPolicyHash(state.policy) === canonicalPolicyHash(remotePolicy)) {
+    return { ok: true, changed: false };
+  }
+
+  const now = new Date().toISOString();
+  const nextState = {
+    version: state.version + 1,
+    updatedAt: now,
+    updatedBy: "dashboard-sync",
+    policy: remotePolicy,
+    history: [
+      ...state.history,
+      {
+        version: state.version + 1,
+        updatedAt: now,
+        updatedBy: "dashboard-sync",
+        reason: "pulled confirmed org policy from dashboard",
+        policy: remotePolicy,
+      },
+    ],
+  };
+
+  // Re-issue the crypto policy token for the new policy, exactly like confirm.
+  // If issuance fails, do NOT overwrite local policy — keep enforcing the
+  // current one rather than switch to a policy we can't back with a token.
+  const cryptoResult = await issueCryptoPolicyTokenForState(config, nextState);
+  if (!cryptoResult.ok) {
+    return {
+      ok: false,
+      changed: false,
+      reason: `crypto token issuance failed: ${cryptoResult.error}`,
+    };
+  }
+
+  await savePolicyState(config.policyFile, nextState);
+  return { ok: true, changed: true, version: nextState.version };
+}
+
 async function stagePending(
   config,
   state,
