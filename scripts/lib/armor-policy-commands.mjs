@@ -5,6 +5,7 @@ import { readJson, writeJson } from "./fs-store.mjs";
 import { loadPolicyState, savePolicyState } from "./policy.mjs";
 import { canonicalPolicyHash, normalizePolicyIr, validatePolicyIr } from "./policy-ir.mjs";
 import { getTemplate, getTemplateNames } from "./policy-templates.mjs";
+import { mergePolicies } from "./policy-merge.mjs";
 import { listProfiles, loadProfile, saveProfile, deleteProfile } from "./policy-profiles.mjs";
 import { listMcpServers, setMcpServerStatus } from "./tool-registry.mjs";
 import { loadRuntimeState, saveRuntimeState } from "./runtime-state.mjs";
@@ -1849,8 +1850,16 @@ function parseCommand(prompt) {
   const removeMatch = rest.match(/^remove\s+(\S+)/i);
   if (removeMatch) return { cmd: "remove", id: removeMatch[1] };
 
-  const templateMatch = rest.match(/^template\s+(\S+)/i);
-  if (templateMatch) return { cmd: "template", name: templateMatch[1] };
+  // Accepts one or more bundle names (comma- or space-separated). Multiple
+  // bundles are merged (most-restrictive-wins) into a single policy.
+  const templateMatch = rest.match(/^template\s+(.+)/i);
+  if (templateMatch) {
+    const names = templateMatch[1]
+      .split(/[\s,]+/)
+      .map((n) => n.trim())
+      .filter(Boolean);
+    return { cmd: "template", names, name: names[0] };
+  }
 
   if (lower.startsWith("mcp ")) return parseMcpCommand(rest.slice(4).trim());
   if (lower.startsWith("profile ")) return parseProfileCommand(rest.slice(8).trim());
@@ -1992,7 +2001,7 @@ function helpText() {
     "  /armorclaude:armor policy rebind                 — reissue crypto binding for current policy",
     "  /armorclaude:armor policy remove <rule-id>       — propose removing a rule",
     "  /armorclaude:armor policy reset                  — propose clearing all rules",
-    "  /armorclaude:armor policy template <name>        — propose applying a template",
+    "  /armorclaude:armor policy template <name...>     — apply one template, or merge several (most-restrictive)",
     "  /armorclaude:armor policy confirm [proposal-id]  — apply staged change",
     "  /armorclaude:armor policy cancel [proposal-id]   — discard staged change",
     "  /armorclaude:armor yes                           — apply current staged change",
@@ -2291,41 +2300,72 @@ export async function handleArmorPolicyCommand(prompt, config) {
     }
 
     case "template": {
-      let tmpl = getTemplate(parsed.name);
-      // Fall back to a seeded builtin profile on disk so new bundles work
-      // without a daemon version bump — profiles are seeded at startup from
-      // templates. Only builtins are eligible: user-created profiles must not
-      // be applicable via `policy template`, and the name must be a safe slug
-      // so we never resolve a path outside the profiles directory.
-      if (!tmpl && SAFE_PROFILE_NAME.test(parsed.name)) {
-        const seeded = await loadProfile(config, parsed.name);
-        if (seeded?.policy && seeded.profile?.createdBy === "builtin") {
-          tmpl = {
-            name: seeded.profile?.name ?? parsed.name,
-            description: seeded.profile?.description ?? "",
-            policy: seeded.policy,
-          };
+      const names = parsed.names?.length ? parsed.names : [parsed.name].filter(Boolean);
+
+      // Resolve each requested bundle to a template. Falls back to a seeded
+      // builtin profile on disk so new bundles work without a daemon version
+      // bump. Only builtins are eligible, and the name must be a safe slug so we
+      // never resolve a path outside the profiles directory.
+      const resolve = async (nm) => {
+        let tmpl = getTemplate(nm);
+        if (!tmpl && SAFE_PROFILE_NAME.test(nm)) {
+          const seeded = await loadProfile(config, nm);
+          if (seeded?.policy && seeded.profile?.createdBy === "builtin") {
+            tmpl = {
+              name: seeded.profile?.name ?? nm,
+              description: seeded.profile?.description ?? "",
+              policy: seeded.policy,
+            };
+          }
         }
+        return tmpl;
+      };
+
+      const resolved = [];
+      const unknown = [];
+      for (const nm of names) {
+        const tmpl = await resolve(nm);
+        if (tmpl) resolved.push(tmpl);
+        else unknown.push(nm);
       }
-      if (!tmpl) {
+
+      if (unknown.length) {
         const seededNames = (await listProfiles(config))
           .filter((p) => p.profile?.createdBy === "builtin")
           .map((p) => p.profile?.name)
           .filter(Boolean);
         const allNames = [...new Set([...getTemplateNames(), ...seededNames])];
-        return `Unknown template: ${parsed.name}\nAvailable: ${allNames.join(", ")}`;
+        return `Unknown template${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}\nAvailable: ${allNames.join(", ")}`;
       }
+      if (!resolved.length) {
+        return `No template specified. Available: ${getTemplateNames().join(", ")}`;
+      }
+
       const state = await loadPolicyState(config.policyFile);
-      const proposedPolicy = normalizePolicyIr(tmpl.policy);
-      const pending = await stagePending(config, state, proposedPolicy, `template ${parsed.name}`, {
+      let proposedPolicy;
+      let summary;
+      let reason;
+      if (resolved.length === 1) {
+        proposedPolicy = normalizePolicyIr(resolved[0].policy);
+        summary = `Proposed: apply template "${resolved[0].name}" — ${resolved[0].description}`;
+        reason = `template ${resolved[0].name}`;
+      } else {
+        const picked = resolved.map((t) => t.name).join(", ");
+        proposedPolicy = mergePolicies(
+          resolved.map((t) => t.policy),
+          {
+            name: "custom-merged",
+            description: `Most-restrictive merge of: ${picked}`,
+          }
+        );
+        summary = `Proposed: merge ${resolved.length} bundles (most-restrictive) — ${picked}`;
+        reason = `template merge ${resolved.map((t) => t.name).join("+")}`;
+      }
+
+      const pending = await stagePending(config, state, proposedPolicy, reason, {
         type: "deterministic",
       });
-      return formatProposal(
-        pending,
-        state.policy,
-        proposedPolicy,
-        `Proposed: apply template "${tmpl.name}" — ${tmpl.description}`
-      );
+      return formatProposal(pending, state.policy, proposedPolicy, summary);
     }
 
     case "confirm": {
