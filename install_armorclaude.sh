@@ -196,6 +196,20 @@ finale() {
 
 EOF
 
+  section "Policy bundles (optional)"
+  cat <<EOF
+
+  Bundles are opt-in — nothing is applied until you pick one and
+  confirm it. Apply one, or merge several (most-restrictive-wins):
+
+    ${D}> /armorclaude:armor template balanced${N}
+    ${D}> /armorclaude:armor template quality-guardian,architect${N}
+
+  Available: all-allow, strict-read-only, balanced, lockdown,
+             architect, quality-guardian, velocity-machine, night-owl
+
+EOF
+
   section "Manage anytime"
   cat <<EOF
 
