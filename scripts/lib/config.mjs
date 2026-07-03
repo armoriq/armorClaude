@@ -74,8 +74,10 @@ export function loadConfig(env = process.env) {
         : "https://iap-staging.armoriq.ai";
   const useProduction = activeEnv === "production";
 
-  // ── The one userConfig field: api_key. UI primary, legacy env fallback. ──
+  // ── userConfig fields. UI primary, legacy env fallback. ──
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
+  // Optional default policy template applied (staged for confirm) on first run.
+  const defaultTemplate = pluginOpt(env, "DEFAULT_TEMPLATE");
   let orgId = env.ARMORIQ_ORG_ID?.trim() || "";
   try {
     const creds = JSON.parse(
@@ -104,6 +106,7 @@ export function loadConfig(env = process.env) {
     apiKey: apiKey || (localMock ? "local-mock-key-00000000000000000000" : ""),
     orgId,
     auditEnabled: Boolean(apiKey) || localMock,
+    defaultTemplate,
 
     // Hardcoded — every behaviour toggle uses the value we've tested into
     // the right default. To change one, edit this file.

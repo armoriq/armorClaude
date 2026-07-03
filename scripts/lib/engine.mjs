@@ -14,7 +14,7 @@ import {
   denyPreToolWithHint,
 } from "./hook-output.mjs";
 import { isArmorPolicyCommand, handleArmorPolicyCommand } from "./armor-policy-commands.mjs";
-import { getTemplateNames } from "./policy-templates.mjs";
+import { getTemplateNames, getTemplate } from "./policy-templates.mjs";
 import {
   checkIntentTokenPlan,
   checkToolAgainstPlan,
@@ -372,14 +372,30 @@ export async function handleSessionStart(input, config) {
       () => false
     );
     if (!flagExists) {
-      const templates = getTemplateNames();
-      onboardingMsg =
-        "\n\nWelcome to ArmorClaude! No policy is configured yet.\n" +
-        "Choose a template to get started:\n\n" +
-        templates.map((t) => `  /armorclaude:armor policy template ${t}`).join("\n") +
-        "\n\nOr add individual rules:\n" +
-        "  /armorclaude:armor policy add allow Read and Grep, deny Write, hold Bash\n\n" +
-        "Type /armorclaude:armor for all commands.";
+      const pick = config.defaultTemplate;
+      if (pick && getTemplate(pick)) {
+        // Configured default template: stage it as a proposal (never silently
+        // applied) via the same command path the user would run by hand. The
+        // returned text is the standard proposal, awaiting explicit confirm.
+        const proposal = await handleArmorPolicyCommand(`/armor template ${pick}`, config);
+        onboardingMsg =
+          `\n\nWelcome to ArmorClaude! Your configured default template "${pick}" ` +
+          `has been proposed (nothing is active until you confirm):\n\n${proposal}`;
+      } else {
+        const templates = getTemplateNames();
+        const invalidNote =
+          pick && !getTemplate(pick)
+            ? `\nConfigured default template "${pick}" is not recognized — pick one below.\n`
+            : "";
+        onboardingMsg =
+          "\n\nWelcome to ArmorClaude! No policy is configured yet.\n" +
+          invalidNote +
+          "Choose a template to get started:\n\n" +
+          templates.map((t) => `  /armorclaude:armor policy template ${t}`).join("\n") +
+          "\n\nOr add individual rules:\n" +
+          "  /armorclaude:armor policy add allow Read and Grep, deny Write, hold Bash\n\n" +
+          "Type /armorclaude:armor for all commands.";
+      }
       await mkdir(config.dataDir, { recursive: true });
       await writeFile(onboardingFlag, new Date().toISOString(), "utf8");
     }
