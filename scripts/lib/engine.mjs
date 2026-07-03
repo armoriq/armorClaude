@@ -13,7 +13,11 @@ import {
   denyPreTool,
   denyPreToolWithHint,
 } from "./hook-output.mjs";
-import { isArmorPolicyCommand, handleArmorPolicyCommand } from "./armor-policy-commands.mjs";
+import {
+  isArmorPolicyCommand,
+  handleArmorPolicyCommand,
+  syncActivePolicyFromBackend,
+} from "./armor-policy-commands.mjs";
 import { getTemplateNames, getTemplate } from "./policy-templates.mjs";
 import {
   checkIntentTokenPlan,
@@ -354,6 +358,25 @@ export async function handleSessionStart(input, config) {
       .catch(() => {});
   }
 
+  // --- Dashboard-authoritative sync: pull the confirmed org policy and make it
+  // the locally enforced policy, so the session enforces exactly what the
+  // dashboard shows. Awaited so it applies before any tool runs. Fail-safe:
+  // never throws and never wipes local policy on error (see the helper).
+  let syncNote = "";
+  if (config.apiKey) {
+    try {
+      const pulled = await syncActivePolicyFromBackend(config);
+      if (pulled.ok && pulled.changed) {
+        syncNote = ` Policy synced from dashboard (v${pulled.version}).`;
+        debugLog(config, `policy synced from backend: v${pulled.version}`);
+      } else if (!pulled.ok) {
+        debugLog(config, `policy sync skipped: ${pulled.reason}`);
+      }
+    } catch (err) {
+      debugLog(config, `policy sync error: ${err?.message || err}`);
+    }
+  }
+
   debugLog(config, `session started: ${sessionId}, mode=${config.mode}`);
 
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
@@ -402,7 +425,7 @@ export async function handleSessionStart(input, config) {
   }
 
   return addPromptContext(
-    `ArmorClaude active (${modeLabel}, intent=${intentLabel})${onboardingMsg}`,
+    `ArmorClaude active (${modeLabel}, intent=${intentLabel})${syncNote}${onboardingMsg}`,
     "SessionStart"
   );
 }
