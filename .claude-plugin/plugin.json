@@ -13,6 +13,11 @@
       "title": "ArmorIQ API Key",
       "description": "Your ArmorIQ API key (get one at https://armoriq.ai). Leave blank to run in local-only mode without backend audit/intent.",
       "sensitive": true
+    },
+    "default_template": {
+      "type": "string",
+      "title": "Default policy template",
+      "description": "Optional. One of: all-allow, strict-read-only, balanced, lockdown, architect, quality-guardian, velocity-machine, night-owl. On first run it is proposed (staged for your confirmation — never applied automatically). Leave blank to be shown the template picker instead."
     }
   }
 }
