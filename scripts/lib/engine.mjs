@@ -33,6 +33,7 @@ import {
   validateCsrgProofHeaders,
 } from "./intent.mjs";
 import { createIapService, reanchorViaSdk, revokeViaSdk } from "./iap-service.mjs";
+import armoriqSdk from "@armoriq/sdk";
 import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
@@ -309,6 +310,45 @@ async function emitAudit({ dto, config, iapService }) {
   }
   await iapService.createAuditLog(dto);
   return "sent (http)";
+}
+
+/**
+ * Best-effort: capture per-model token usage from the session transcript and
+ * report it to the dashboard via the SDK (`POST /dashboard/token-usage`). This
+ * is the single cross-tool path shared with ArmorCodex/Copilot:
+ * `summarizeTranscriptUsage` + `client.recordTokenUsage`.
+ *
+ * Stop fires every turn, so we debounce on the cumulative token total and only
+ * POST when it changed. The backend upsert SETS the per-(session,model) counts,
+ * so re-posting a cumulative total is idempotent and never double-counts.
+ * `product` is sent explicitly so attribution works even if the API key has
+ * product=NULL. `session.lastTokenTotal` is mutated in place; the caller
+ * persists it. Failures are swallowed — token telemetry never breaks the hook.
+ */
+async function reportTokenUsage(input, config, session, sessionId) {
+  if (!config.apiKey) return;
+  try {
+    const entries = armoriqSdk.summarizeTranscriptUsage(input?.transcript_path);
+    const total = entries.reduce(
+      (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
+      0
+    );
+    if (total > 0 && total !== session.lastTokenTotal) {
+      const result = await getSdkClient(config).recordTokenUsage({
+        product: config.productSlug,
+        sessionId,
+        entries,
+      });
+      if (result?.ok) session.lastTokenTotal = total;
+      debugLog(
+        config,
+        `[tokens] ${entries.length} model(s) total=${total} ${result?.ok ? "ok" : "failed:" + (result?.reason || "")}`
+      );
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    debugLog(config, `[tokens] usage report failed (non-fatal): ${msg}`);
+  }
 }
 
 /**
@@ -1332,8 +1372,13 @@ export async function handleStop(input, config) {
     }
   }
 
+  // Report cumulative token usage from the transcript at the turn boundary.
+  // Mutates session.lastTokenTotal in place (debounce marker) which we persist.
+  await reportTokenUsage(input, config, session, sessionId);
+
   upsertSession(runtimeState, sessionId, {
     lastStopAt: nowEpochSeconds(),
+    lastTokenTotal: session.lastTokenTotal,
   });
   await saveRuntimeState(config.runtimeFile, runtimeState);
   return null;

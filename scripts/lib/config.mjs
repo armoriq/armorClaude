@@ -102,8 +102,10 @@ export function loadConfig(env = process.env) {
 
     // userConfig-driven (the only one)
     // In local mock mode use a placeholder key so engine.mjs apiKey guards pass.
-    // The mock server ignores auth headers so the value doesn't matter.
-    apiKey: apiKey || (localMock ? "local-mock-key-00000000000000000000" : ""),
+    // The mock server ignores auth headers so the value doesn't matter, but it
+    // MUST match the @armoriq/sdk (>=0.4) key-format check (ak_test_/ak_live_/
+    // ak_claw_) or the SDK client constructor throws.
+    apiKey: apiKey || (localMock ? "ak_test_localmock000000000000" : ""),
     orgId,
     auditEnabled: Boolean(apiKey) || localMock,
     defaultTemplate,
@@ -137,6 +139,9 @@ export function loadConfig(env = process.env) {
     opaCircuitResetMs: 10000,
 
     // Identity — backend derives real identity from API key.
+    // productSlug is sent explicitly on dashboard telemetry (token usage) so
+    // per-product attribution works even if the API key has product=NULL.
+    productSlug: "armorclaude",
     llmId: "claude-code",
     mcpName: "claude-code",
     userId: "claude-user",
