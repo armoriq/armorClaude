@@ -12,3 +12,16 @@ test("observabilityEnabled true when daemon on + api key present", () => {
   assert.equal(cfg.observabilityEndpoint, "http://localhost:8080");
   assert.equal(cfg.observabilityProduct, "armorclaude");
 });
+
+import { isObsEnabled, __resetObsForTests } from "../scripts/lib/observability.mjs";
+
+test("isObsEnabled reflects config flag", () => {
+  assert.equal(isObsEnabled({ observabilityEnabled: true }), true);
+  assert.equal(isObsEnabled({ observabilityEnabled: false }), false);
+  assert.equal(isObsEnabled(undefined), false);
+});
+
+test("__resetObsForTests exists and is callable", () => {
+  __resetObsForTests();
+  assert.ok(true);
+});
