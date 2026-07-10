@@ -45,6 +45,7 @@ import {
   handleStop,
   handleSessionEnd,
 } from "./lib/engine.mjs";
+import { observeHook } from "./lib/observability.mjs";
 
 const DAEMON_VERSION = "0.2.17";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
@@ -393,6 +394,9 @@ async function handleLine(rawLine, socket) {
       const input = msg.input ?? {};
       const sessionId = typeof input.session_id === "string" ? input.session_id : "";
       const output = await withSessionLock(sessionId, () => dispatchHook(event, input));
+      // Additive, fail-open observability. Never awaited into the decision path
+      // above; runs after the handler with the decision output in hand.
+      await observeHook(event, input, output, config);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
       return;
     }

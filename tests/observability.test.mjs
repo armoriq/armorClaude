@@ -81,3 +81,9 @@ test("observeHook is a no-op when disabled and never throws", async () => {
   await observeHook("UserPromptSubmit", { session_id: "x", prompt: "y" }, null, { observabilityEnabled: false });
   assert.ok(true);
 });
+
+test("observeHook tolerates missing session_id", async () => {
+  __resetObsForTests();
+  await observeHook("PreToolUse", { tool_name: "x" }, null, { observabilityEnabled: true, observabilityEndpoint: "http://x", observabilityProduct: "armorclaude", apiKey: "ak_live_test0000000000000000000000000000", sanitize: {} });
+  assert.ok(true);
+});
