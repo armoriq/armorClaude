@@ -87,3 +87,51 @@ test("observeHook tolerates missing session_id", async () => {
   await observeHook("PreToolUse", { tool_name: "x" }, null, { observabilityEnabled: true, observabilityEndpoint: "http://x", observabilityProduct: "armorclaude", apiKey: "ak_live_test0000000000000000000000000000", sanitize: {} });
   assert.ok(true);
 });
+
+// Regression: the backend requires trace.userId/agentId to be a UUID or null.
+// armorClaude config uses logical ids ("claude-user"/"claude-code") which are
+// NOT UUIDs — those must be emitted as null, or the ingest POST 400s and every
+// trace is silently dropped.
+test("non-UUID config userId/agentId are emitted as null on the trace", { skip: !SDK_HAS_SPANS && "SDK <0.6.3" }, async () => {
+  __resetObsForTests();
+  const events = [];
+  armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+  const config = {
+    observabilityEnabled: true,
+    observabilityEndpoint: "http://localhost:8080",
+    observabilityProduct: "armorclaude",
+    apiKey: "ak_live_test0000000000000000000000000000",
+    userId: "claude-user",
+    agentId: "claude-code",
+    sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
+  };
+  const sid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  await observeHook("UserPromptSubmit", { session_id: sid, prompt: "hi" }, null, config);
+  await observeHook("SessionEnd", { session_id: sid }, null, config);
+  armoriqSdk.__setObservabilitySinkForTests(null);
+  const started = events.find((e) => e.kind === "trace_started");
+  assert.ok(started, "trace started");
+  assert.equal(started.trace.userId, null, "non-UUID userId must be null");
+  assert.equal(started.trace.agentId, null, "non-UUID agentId must be null");
+});
+
+// Regression: a raw string prompt must be captured (not turned into {}).
+test("iap.plan.start captures the prompt text", { skip: !SDK_HAS_SPANS && "SDK <0.6.3" }, async () => {
+  __resetObsForTests();
+  const events = [];
+  armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+  const config = {
+    observabilityEnabled: true,
+    observabilityEndpoint: "http://localhost:8080",
+    observabilityProduct: "armorclaude",
+    apiKey: "ak_live_test0000000000000000000000000000",
+    sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
+  };
+  const sid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  await observeHook("UserPromptSubmit", { session_id: sid, prompt: "Find Acme contacts" }, null, config);
+  await observeHook("SessionEnd", { session_id: sid }, null, config);
+  armoriqSdk.__setObservabilitySinkForTests(null);
+  const planStart = events.find((e) => e.kind === "span_recorded" && e.span.name === "iap.plan.start");
+  assert.ok(planStart, "iap.plan.start recorded");
+  assert.equal(planStart.span.attributes.prompt, "Find Acme contacts");
+});

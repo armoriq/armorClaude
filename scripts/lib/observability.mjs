@@ -59,9 +59,13 @@ function getOrInitRecorder(sessionId, config) {
     endpoint: config.observabilityEndpoint,
     apiKey: config.apiKey,
     product: config.observabilityProduct,
+    // The backend requires trace.userId/agentId to be a UUID or null. armorClaude's
+    // config uses logical ids ("claude-user"/"claude-code"), so pass them only when
+    // they are real UUIDs — otherwise null (the backend attributes identity from the
+    // API key regardless).
     sessionId: isValidUuid && isValidUuid(sessionId) ? sessionId : null,
-    userId: config.userId || null,
-    agentId: config.agentId || null,
+    userId: isValidUuid && isValidUuid(config.userId) ? config.userId : null,
+    agentId: isValidUuid && isValidUuid(config.agentId) ? config.agentId : null,
   });
   entry = { recorder, traceCtx: null, planStartSpanId: null };
   sessions.set(sessionId, entry);
@@ -107,9 +111,11 @@ function obsStartPlan(sessionId, config, prompt) {
   endActiveTrace(entry); // close previous turn's trace, if any
   safeObs(() => {
     const ctx = startPlanTrace(entry, sessionId, { source: "claude-code" });
+    // sanitizeParams sanitizes the string VALUES of an object; passing a bare
+    // string returns {}, so wrap the prompt to get a truncated string back.
     entry.planStartSpanId = openSpan(entry.recorder, ctx, {
       name: "iap.plan.start",
-      attributes: { prompt: sanitizeParams(prompt, config.sanitize) },
+      attributes: sanitizeParams({ prompt }, config.sanitize),
     });
   });
 }
