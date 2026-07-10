@@ -100,6 +100,11 @@ export function loadConfig(env = process.env) {
     csrgEndpoint,
     verifyStepEndpoint: `${backendEndpoint}/iap/verify-step`,
 
+    // ── Observability (additive; no-op unless daemon on + api key present) ──
+    observabilityEnabled: (true /* daemonEnabled */) && (Boolean(apiKey) || localMock),
+    observabilityEndpoint: backendEndpoint,
+    observabilityProduct: "armorclaude",
+
     // userConfig-driven (the only one)
     // In local mock mode use a placeholder key so engine.mjs apiKey guards pass.
     // The mock server ignores auth headers so the value doesn't matter, but it
