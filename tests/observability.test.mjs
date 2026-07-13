@@ -88,11 +88,15 @@ test("observeHook tolerates missing session_id", async () => {
   assert.ok(true);
 });
 
-// Regression: the backend requires trace.userId/agentId to be a UUID or null.
-// armorClaude config uses logical ids ("claude-user"/"claude-code") which are
-// NOT UUIDs — those must be emitted as null, or the ingest POST 400s and every
-// trace is silently dropped.
-test("non-UUID config userId/agentId are emitted as null on the trace", { skip: !SDK_HAS_SPANS && "SDK <0.6.3" }, async () => {
+// Regression: trace.userId is a UUID-typed backend column (obs_traces.user_id,
+// ingest schema `z.uuid()`) — armorClaude's logical "claude-user" is NOT a
+// UUID and must be emitted as null, or the ingest POST 400s and every trace
+// is silently dropped. trace.agentId, by contrast, is a free-form `text`
+// column with no UUID requirement — armorClaude's logical "claude-code" IS a
+// valid value and must flow through as-is (this used to be incorrectly
+// null'd by the same UUID gate as userId/sessionId — the root cause of the
+// dashboard's empty AGENT column).
+test("non-UUID config userId is null but non-UUID agentId flows through on the trace", { skip: !SDK_HAS_SPANS && "SDK <0.6.3" }, async () => {
   __resetObsForTests();
   const events = [];
   armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
@@ -112,7 +116,7 @@ test("non-UUID config userId/agentId are emitted as null on the trace", { skip: 
   const started = events.find((e) => e.kind === "trace_started");
   assert.ok(started, "trace started");
   assert.equal(started.trace.userId, null, "non-UUID userId must be null");
-  assert.equal(started.trace.agentId, null, "non-UUID agentId must be null");
+  assert.equal(started.trace.agentId, "claude-code", "non-UUID agentId must flow through as-is");
 });
 
 // Regression: a raw string prompt must be captured (not turned into {}).
@@ -134,4 +138,61 @@ test("iap.plan.start captures the prompt text", { skip: !SDK_HAS_SPANS && "SDK <
   const planStart = events.find((e) => e.kind === "span_recorded" && e.span.name === "iap.plan.start");
   assert.ok(planStart, "iap.plan.start recorded");
   assert.equal(planStart.span.attributes.prompt, "Find Acme contacts");
+});
+
+// Regression: the dashboard's trace-list INPUT column reads
+// `trace.attributes.input` — the turn's goal must land there too (not just
+// on the child `iap.plan.start` span's `attributes.prompt`).
+test("iap.plan trace carries attributes.input", { skip: !SDK_HAS_SPANS && "SDK <0.6.3" }, async () => {
+  __resetObsForTests();
+  const events = [];
+  armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+  const config = {
+    observabilityEnabled: true,
+    observabilityEndpoint: "http://localhost:8080",
+    observabilityProduct: "armorclaude",
+    apiKey: "ak_live_test0000000000000000000000000000",
+    sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
+  };
+  const sid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  await observeHook("UserPromptSubmit", { session_id: sid, prompt: "Find Acme contacts" }, null, config);
+  await observeHook("SessionEnd", { session_id: sid }, null, config);
+  armoriqSdk.__setObservabilitySinkForTests(null);
+  const started = events.find((e) => e.kind === "trace_started");
+  assert.ok(started, "trace started");
+  assert.equal(started.trace.attributes.input, "Find Acme contacts");
+});
+
+// Regression: dashboard TAGS/OUTPUT columns are derived by the SDK at
+// endTrace() time from the trace's own policy_call spans — armorClaude
+// doesn't need its own tally, but the derivation must actually fire for a
+// real armorClaude-shaped trace (iap.check span with toolName + child
+// policy_call span with a decision).
+test("trace_ended carries derived tags and output summary from tool checks", { skip: !SDK_HAS_SPANS && "SDK <0.6.3" }, async () => {
+  __resetObsForTests();
+  const events = [];
+  armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+  const config = {
+    observabilityEnabled: true,
+    observabilityEndpoint: "http://localhost:8080",
+    observabilityProduct: "armorclaude",
+    apiKey: "ak_live_test0000000000000000000000000000",
+    sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
+  };
+  const sid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  await observeHook("UserPromptSubmit", { session_id: sid, prompt: "List files" }, null, config);
+  await observeHook(
+    "PreToolUse",
+    { session_id: sid, tool_name: "Bash", tool_input: { command: "ls" } },
+    { hookSpecificOutput: { permissionDecision: "allow" } },
+    config
+  );
+  await observeHook("SessionEnd", { session_id: sid }, null, config);
+  armoriqSdk.__setObservabilitySinkForTests(null);
+  const ended = events.find((e) => e.kind === "trace_ended");
+  assert.ok(ended, "trace ended");
+  assert.ok(ended.trace.tags.includes("armorclaude"), "tags include product");
+  assert.ok(ended.trace.tags.includes("Bash"), "tags include checked tool name");
+  assert.ok(ended.trace.tags.includes("allowed"), "tags include overall verdict");
+  assert.equal(ended.trace.attributes.output, "1 check · all allowed");
 });

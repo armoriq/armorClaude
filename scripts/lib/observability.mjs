@@ -59,13 +59,23 @@ function getOrInitRecorder(sessionId, config) {
     endpoint: config.observabilityEndpoint,
     apiKey: config.apiKey,
     product: config.observabilityProduct,
-    // The backend requires trace.userId/agentId to be a UUID or null. armorClaude's
-    // config uses logical ids ("claude-user"/"claude-code"), so pass them only when
-    // they are real UUIDs — otherwise null (the backend attributes identity from the
-    // API key regardless).
+    // trace.sessionId and trace.userId are UUID-typed columns on the backend
+    // (obs_traces.session_id/user_id, and the ingest zod schema enforces
+    // z.uuid() for userId) — armorClaude's config uses logical, non-UUID ids
+    // ("claude-user"/"aaaa-session-slug") for these, so they're only sent
+    // when they're real UUIDs; otherwise null (the backend attributes the
+    // request's identity from the API key regardless).
+    //
+    // trace.agentId, by contrast, is a free-form `text` column with NO UUID
+    // requirement on the backend (ingest schema: `agentId: z.string()`, no
+    // `.uuid()`) — armorClaude's logical id ("claude-code") is a valid value
+    // as-is. It was PREVIOUSLY (incorrectly) gated behind the same
+    // isValidUuid check as sessionId/userId, which silently nulled agentId
+    // on every armorClaude trace; that was the root cause of the
+    // dashboard's empty AGENT column.
     sessionId: isValidUuid && isValidUuid(sessionId) ? sessionId : null,
     userId: isValidUuid && isValidUuid(config.userId) ? config.userId : null,
-    agentId: isValidUuid && isValidUuid(config.agentId) ? config.agentId : null,
+    agentId: config.agentId || null,
   });
   entry = { recorder, traceCtx: null, planStartSpanId: null };
   sessions.set(sessionId, entry);
@@ -110,7 +120,16 @@ function obsStartPlan(sessionId, config, prompt) {
   const entry = getOrInitRecorder(sessionId, config);
   endActiveTrace(entry); // close previous turn's trace, if any
   safeObs(() => {
-    const ctx = startPlanTrace(entry, sessionId, { source: "claude-code" });
+    // Trace-level `input`: the turn's goal/intent string, sanitized+truncated
+    // the same way tool params are (config.sanitize) — this is what the
+    // dashboard's trace-list INPUT column reads (attributes.input). Kept
+    // alongside (not instead of) the existing span-level `prompt` attribute
+    // on `iap.plan.start`, which callers of the raw span tree still rely on.
+    const { prompt: sanitizedInput } = sanitizeParams({ prompt }, config.sanitize);
+    const ctx = startPlanTrace(entry, sessionId, {
+      source: "claude-code",
+      input: sanitizedInput ?? null,
+    });
     // sanitizeParams sanitizes the string VALUES of an object; passing a bare
     // string returns {}, so wrap the prompt to get a truncated string back.
     entry.planStartSpanId = openSpan(entry.recorder, ctx, {
