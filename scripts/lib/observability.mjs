@@ -176,6 +176,17 @@ function obsReport(sessionId, config, toolName, toolInput, toolResponse, status)
   });
 }
 
+// End (but do not tear down) the active turn's trace. Handing the trace to the
+// SDK shipper via endTrace() is what makes it eligible for the background 5s
+// flush — until the trace ends, all its spans sit un-shipped in memory (SDK
+// only enqueues ENDED traces). Called on Stop (turn end) so each turn's trace
+// ships mid-session; the recorder + its shipper stay alive for the next turn.
+function obsEndTurn(sessionId) {
+  const entry = sessions.get(sessionId);
+  if (!entry || !entry.traceCtx) return;
+  endActiveTrace(entry);
+}
+
 async function obsEndSession(sessionId) {
   const entry = sessions.get(sessionId);
   if (!entry) return;
@@ -184,6 +195,15 @@ async function obsEndSession(sessionId) {
   // Stop the per-session shipper timer (unref'd, but tidy up in the long-lived daemon).
   safeObs(() => entry.recorder.__shipper && entry.recorder.__shipper.stop());
   sessions.delete(sessionId);
+}
+
+// Flush every live session's recorder without ending traces. Used by the daemon
+// on shutdown / idle-timeout so any already-ended turn traces ship before exit.
+// Fail-open: never throws.
+export async function obsFlushAll() {
+  for (const entry of sessions.values()) {
+    await safeObsAsync(() => flushObservability(entry.recorder));
+  }
 }
 
 export async function observeHook(event, input, output, config) {
@@ -209,6 +229,13 @@ export async function observeHook(event, input, output, config) {
         break;
       case "PostToolUseFailure":
         obsReport(sessionId, config, input.tool_name, input.tool_input, input.tool_response, "error");
+        break;
+      case "Stop":
+        // Turn boundary: end the active trace so it ships mid-session via the
+        // SDK's background shipper, instead of buffering the whole session
+        // until SessionEnd. A fresh trace opens lazily on the next tool call
+        // (or explicitly on the next UserPromptSubmit).
+        obsEndTurn(sessionId);
         break;
       case "SessionEnd":
         await obsEndSession(sessionId);

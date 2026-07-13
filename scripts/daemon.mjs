@@ -45,9 +45,9 @@ import {
   handleStop,
   handleSessionEnd,
 } from "./lib/engine.mjs";
-import { observeHook } from "./lib/observability.mjs";
+import { observeHook, obsFlushAll } from "./lib/observability.mjs";
 
-const DAEMON_VERSION = "0.2.17";
+const DAEMON_VERSION = "0.2.18";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 
@@ -110,6 +110,59 @@ function cleanupPid() {
 claimPid();
 cleanupSocket();
 
+// ---- Per-request config adoption (D1 fix) --------------------------------
+// The daemon loads config ONCE at startup from its own (possibly env-poor)
+// process env. When a long-lived daemon was first spawned by a hook lacking
+// ARMORIQ_* / the plugin API key, its cached config disables observability and
+// backend shipping for EVERY session it serves. Each hook forwards the obs/auth
+// slice of its freshly-loaded config; when that slice differs from what the
+// daemon currently holds, adopt it. This keeps enforcement, audit, and obs on
+// the live session's credentials without forcing a respawn per session.
+const OBS_AUTH_KEYS = [
+  "armoriqEnv",
+  "apiKey",
+  "orgId",
+  "backendEndpoint",
+  "observabilityEnabled",
+  "observabilityEndpoint",
+  "observabilityProduct",
+  "auditEnabled",
+  "csrgVerifyEnabled",
+  "cryptoPolicyEnabled",
+];
+
+function obsAuthSignature(cfg) {
+  return OBS_AUTH_KEYS.map((k) => String(cfg?.[k] ?? "")).join("|");
+}
+
+// Build the EFFECTIVE config for one request by overlaying the caller's obs/auth
+// slice onto the daemon's startup base. Pure: returns a NEW object and never
+// mutates the shared `config`. This snapshot is threaded through dispatch,
+// audit flush, and observability for THIS request only, so concurrent requests
+// from different sessions cannot clobber each other's credentials (avoids the
+// TOCTOU race where a queued dispatch reads a mutated module-global).
+function effectiveConfigFor(configEnv) {
+  if (!configEnv || typeof configEnv !== "object") return config;
+  if (obsAuthSignature(configEnv) === obsAuthSignature(config)) return config; // identical — reuse base
+  const merged = { ...config };
+  for (const k of OBS_AUTH_KEYS) {
+    if (configEnv[k] !== undefined) merged[k] = configEnv[k];
+  }
+  // verify-step endpoint derives from backendEndpoint; keep it consistent.
+  if (configEnv.backendEndpoint) {
+    merged.verifyStepEndpoint = `${configEnv.backendEndpoint}/iap/verify-step`;
+    merged.csrgEndpoint = config.csrgEndpoint || configEnv.backendEndpoint;
+  }
+  if (config.debug) {
+    const before = config.apiKey ? config.apiKey.slice(0, 12) : "(unset)";
+    const after = merged.apiKey ? merged.apiKey.slice(0, 12) : "(unset)";
+    process.stderr.write(
+      `[daemon] per-request config overlay: apiKey ${before} -> ${after} obsEnabled=${merged.observabilityEnabled}\n`
+    );
+  }
+  return merged;
+}
+
 // ---- Per-session serialization ------------------------------------------
 // All hooks for the same session_id execute in order, even if they arrive
 // concurrently from multiple connections, so runtime-state.json read/write
@@ -150,9 +203,9 @@ const AUDIT_FLUSH_INTERVAL_MS = 5_000;
 const AUDIT_FLUSH_THRESHOLD = 100;
 let auditFlushInFlight = false;
 
-async function flushAudit(reason) {
+async function flushAudit(reason, cfg = config) {
   if (auditFlushInFlight) return;
-  if (!config.auditEnabled || !config.apiKey) {
+  if (!cfg.auditEnabled || !cfg.apiKey) {
     // No backend to ship to. Don't truncate the WAL — rotation handles
     // unbounded growth at 10 MB / 1 h. Earlier code aggressively advanced
     // the offset which destroyed crash-recovery if audit was later enabled.
@@ -163,7 +216,7 @@ async function flushAudit(reason) {
   auditFlushInFlight = true;
   try {
     const { createIapService } = await import("./lib/iap-service.mjs");
-    const iap = createIapService(config);
+    const iap = createIapService(cfg);
 
     if (auditWal) {
       // WAL path: read up to 100 rows from disk, ship, advance offset.
@@ -276,29 +329,32 @@ const auditTimer = setInterval(() => {
 auditTimer.unref();
 
 // ---- Hook dispatch -------------------------------------------------------
-async function dispatchHook(event, input) {
+// `cfg` is the per-request effective config snapshot (see effectiveConfigFor)
+// so enforcement + audit gating never read a module-global that a concurrent
+// session mutated between enqueue and execution.
+async function dispatchHook(event, input, cfg) {
   switch (event) {
     case "SessionStart":
-      return handleSessionStart(input, config);
+      return handleSessionStart(input, cfg);
     case "UserPromptExpansion":
-      return handleUserPromptExpansion(input, config);
+      return handleUserPromptExpansion(input, cfg);
     case "UserPromptSubmit":
-      return handleUserPromptSubmit(input, config);
+      return handleUserPromptSubmit(input, cfg);
     case "PreToolUse":
-      return handlePreToolUse(input, config);
+      return handlePreToolUse(input, cfg);
     case "PostToolUse":
-      return handlePostToolUse(input, config);
+      return handlePostToolUse(input, cfg);
     case "PostToolUseFailure":
-      return handlePostToolUseFailure(input, config);
+      return handlePostToolUseFailure(input, cfg);
     case "Stop": {
-      const out = await handleStop(input, config);
+      const out = await handleStop(input, cfg);
       // Flush audits on turn end so each turn's row count lands together.
-      await flushAudit("stop");
+      await flushAudit("stop", cfg);
       return out;
     }
     case "SessionEnd": {
-      const out = await handleSessionEnd(input, config);
-      await flushAudit("session_end");
+      const out = await handleSessionEnd(input, cfg);
+      await flushAudit("session_end", cfg);
       return out;
     }
     default:
@@ -393,10 +449,21 @@ async function handleLine(rawLine, socket) {
       const event = String(msg.event || "");
       const input = msg.input ?? {};
       const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-      const output = await withSessionLock(sessionId, () => dispatchHook(event, input));
+      // Per-request effective config (D1 fix): the daemon loads config ONCE at
+      // startup off its own env, which — for a long-lived process spawned by an
+      // env-poor hook — can lack the ARMORIQ_* / plugin key and silently disable
+      // observability + backend shipping. Each hook forwards its freshly-loaded
+      // obs/auth slice; we overlay it into a per-request snapshot (NO shared
+      // mutation) and thread that single snapshot through enforcement dispatch,
+      // audit gating, and observability so concurrent sessions never read each
+      // other's credentials.
+      const effectiveConfig = effectiveConfigFor(msg.configEnv);
+      const output = await withSessionLock(sessionId, () =>
+        dispatchHook(event, input, effectiveConfig)
+      );
       // Additive, fail-open observability. Never awaited into the decision path
       // above; runs after the handler with the decision output in hand.
-      await observeHook(event, input, output, config);
+      await observeHook(event, input, output, effectiveConfig);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
       return;
     }
@@ -424,9 +491,9 @@ server.listen(socketPath, () => {
 
 // ---- Shutdown handlers ---------------------------------------------------
 function shutdown(code) {
-  // Try to flush audits one last time. If we can't await (sync context), at
-  // least kick the flush; the process will linger briefly.
-  flushAudit("shutdown").finally(() => {
+  // Try to flush audits AND observability one last time before exit, so any
+  // ended-but-unshipped turn traces reach the backend. Both are fail-open.
+  Promise.allSettled([flushAudit("shutdown"), obsFlushAll()]).finally(() => {
     try {
       server.close();
     } catch {

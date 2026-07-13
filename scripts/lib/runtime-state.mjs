@@ -15,7 +15,30 @@ export async function loadRuntimeState(runtimeFilePath) {
       ? raw.mcpRegistry
       : {};
   const discoveredTools = Array.isArray(raw?.discoveredTools) ? raw.discoveredTools : [];
-  return { sessions, mcpRegistry, discoveredTools };
+  const state = { sessions, mcpRegistry, discoveredTools };
+  // Preserve the active-session pointer (written by the engine, read by the MCP
+  // server) across load/save round-trips.
+  if (typeof raw?.activeSessionId === "string") state.activeSessionId = raw.activeSessionId;
+  if (Number.isFinite(raw?.activeSessionAt)) state.activeSessionAt = raw.activeSessionAt;
+  return state;
+}
+
+// ---------------------------------------------------------------------------
+// Active-session pointer — the policy MCP server (a separate stdio process) has
+// no access to the Claude Code session id: Claude Code exposes session_id only
+// in the hook JSON payload, never as an env var or .mcp.json interpolation. So
+// the engine (which DOES see session_id on every hook) stamps the most recently
+// active session id here; the MCP server reads it to scope register_intent_plan
+// and the Trust Update primitives to the correct live session.
+// ---------------------------------------------------------------------------
+export function setActiveSessionId(runtimeState, sessionId) {
+  if (!sessionId || typeof sessionId !== "string") return;
+  runtimeState.activeSessionId = sessionId;
+  runtimeState.activeSessionAt = nowEpochSeconds();
+}
+
+export function getActiveSessionId(runtimeState) {
+  return typeof runtimeState?.activeSessionId === "string" ? runtimeState.activeSessionId : "";
 }
 
 export function getSession(runtimeState, sessionId) {

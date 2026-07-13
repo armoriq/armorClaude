@@ -22,7 +22,7 @@ const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if da
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
 const SPAWN_RETRY_DELAY_MS = 150;
 const SPAWN_RETRIES = 3;
-const EXPECTED_DAEMON_VERSION = "0.2.17";
+const EXPECTED_DAEMON_VERSION = "0.2.18";
 
 let nextReqId = 1;
 function makeReqId() {
@@ -210,7 +210,26 @@ export async function dispatchViaDaemon({ event, input, config }) {
   const tConnected = debug ? Date.now() : 0;
   try {
     const reqId = makeReqId();
-    const reply = await exchange(sock, { type: "hook", event, input, reqId });
+    // Forward the obs/auth-relevant slice of THIS hook's freshly-loaded config
+    // so the long-lived daemon can serve observability + backend calls with the
+    // live session's credentials, even if the daemon was first spawned by an
+    // env-poor hook (the zero-traces root cause). The daemon merges this per
+    // request and refreshes its cached config when the signature changes.
+    const configEnv = config
+      ? {
+          armoriqEnv: config.armoriqEnv,
+          apiKey: config.apiKey,
+          orgId: config.orgId,
+          backendEndpoint: config.backendEndpoint,
+          observabilityEnabled: config.observabilityEnabled,
+          observabilityEndpoint: config.observabilityEndpoint,
+          observabilityProduct: config.observabilityProduct,
+          auditEnabled: config.auditEnabled,
+          csrgVerifyEnabled: config.csrgVerifyEnabled,
+          cryptoPolicyEnabled: config.cryptoPolicyEnabled,
+        }
+      : undefined;
+    const reply = await exchange(sock, { type: "hook", event, input, reqId, configEnv });
     if (debug) {
       const tDone = Date.now();
       process.stderr.write(
