@@ -79,6 +79,14 @@ export function loadConfig(env = process.env) {
   // Optional default policy template applied (staged for confirm) on first run.
   const defaultTemplate = pluginOpt(env, "DEFAULT_TEMPLATE");
   let orgId = env.ARMORIQ_ORG_ID?.trim() || "";
+
+  // Observability is ON by default. Users can opt out via the
+  // `disable_observability` plugin option or the ARMORIQ_OBSERVABILITY_DISABLED
+  // env var (accepts true/1/yes).
+  const observabilityDisabled = parseBoolean(
+    pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORIQ_OBSERVABILITY_DISABLED"),
+    false,
+  );
   try {
     const creds = JSON.parse(
       readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
@@ -100,8 +108,11 @@ export function loadConfig(env = process.env) {
     csrgEndpoint,
     verifyStepEndpoint: `${backendEndpoint}/iap/verify-step`,
 
-    // ── Observability (additive; no-op unless daemon on + api key present) ──
-    observabilityEnabled: (true /* daemonEnabled */) && (Boolean(apiKey) || localMock),
+    // ── Observability: ON by default (opt out via `disable_observability`
+    //    plugin option / ARMORIQ_OBSERVABILITY_DISABLED). Additive + no-op
+    //    unless a key or local mock gives us somewhere to ship spans. ──
+    observabilityEnabled:
+      !observabilityDisabled && (Boolean(apiKey) || localMock),
     observabilityEndpoint: backendEndpoint,
     observabilityProduct: "armorclaude",
 

@@ -47,7 +47,7 @@ import {
 } from "./lib/engine.mjs";
 import { observeHook, obsFlushAll } from "./lib/observability.mjs";
 
-const DAEMON_VERSION = "0.2.18";
+const DAEMON_VERSION = "0.2.19";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 
