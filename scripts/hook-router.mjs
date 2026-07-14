@@ -11,6 +11,7 @@ import {
   handleUserPromptSubmit,
 } from "./lib/engine.mjs";
 import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
+import { observeHook, obsFlush } from "./lib/observability.mjs";
 
 async function readStdin() {
   const chunks = [];
@@ -103,6 +104,13 @@ async function main() {
   if (output) {
     emitJson(output);
   }
+
+  // In-process fallback path: emit observability with the decision output,
+  // then force-flush before this short-lived process exits (the SDK's
+  // beforeExit handler is a backstop, but flush explicitly to be safe).
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  await observeHook(event, input, output, config);
+  await obsFlush(sessionId, config);
 }
 
 main().catch((error) => {

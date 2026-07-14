@@ -46,6 +46,7 @@ import {
   getSession,
   loadRuntimeState,
   saveRuntimeState,
+  setActiveSessionId,
   upsertDiscoveredTool,
   upsertSession,
 } from "./runtime-state.mjs";
@@ -378,6 +379,9 @@ export async function handleSessionStart(input, config) {
     startedAt: nowEpochSeconds(),
     discoveredTools: [],
   });
+  // Stamp the active-session pointer so the policy MCP server (which cannot see
+  // session_id) can scope register_intent_plan + Trust Update ops to this session.
+  setActiveSessionId(runtimeState, sessionId);
   await saveRuntimeState(config.runtimeFile, runtimeState);
 
   // --- Fire-and-forget: sync MCP registry from backend (if apiKey set) ---
@@ -521,6 +525,9 @@ export async function handleUserPromptSubmit(input, config) {
     lastPrompt: prompt,
     lastPromptAt: nowEpochSeconds(),
   });
+  // Refresh the active-session pointer: register_intent_plan (MCP) is typically
+  // the next event, and it resolves the session id from here.
+  setActiveSessionId(runtimeState, sessionId);
   await saveRuntimeState(config.runtimeFile, runtimeState);
 
   // --- Inject directive: tell Claude to register its intent plan ---
