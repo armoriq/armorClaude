@@ -20,12 +20,18 @@ import path from "node:path";
 const ROUTER = new URL("./scripts/hook-router.mjs", import.meta.url).pathname;
 const MCP = new URL("./scripts/policy-mcp.mjs", import.meta.url).pathname;
 const SID = randomUUID();
+const apiKey = process.env.ARMORIQ_API_KEY;
+
+if (!apiKey) {
+  console.error("ARMORIQ_API_KEY is required to run this manual harness.");
+  process.exit(1);
+}
 
 const env = {
   ...process.env,
   ARMORIQ_ENV: "local",
   ARMORIQ_BACKEND_URL: "http://localhost:8080",
-  ARMORIQ_API_KEY: "ak_live_5199d1bd9fc57d5e9fc711a5dabb730c6c8c902696e9b7df",
+  ARMORIQ_API_KEY: apiKey,
   ARMORCLAUDE_DEBUG: "true",
 };
 
