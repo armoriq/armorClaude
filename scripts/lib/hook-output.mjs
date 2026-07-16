@@ -71,6 +71,36 @@ export function denyPreToolWithHint(reason, args = {}) {
   };
 }
 
+/**
+ * Freemium fallback: allow the tool to proceed WITHOUT ArmorClaude enforcement,
+ * surfacing a one-time upgrade nudge to the user via `systemMessage`.
+ *
+ * We deliberately DO NOT set `permissionDecision` — that leaves Claude Code's
+ * own permission flow untouched (ArmorClaude simply steps aside / runs in
+ * observe-only mode) rather than force-allowing. Used when intent-token
+ * issuance fails for a *billing* reason so a free user isn't hard-blocked with
+ * a cryptic error that looks like a policy denial.
+ */
+export function allowWithNotice(systemMessage) {
+  return {
+    systemMessage,
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+    },
+  };
+}
+
+/**
+ * True when an intent-token failure is a billing/subscription gate (HTTP 402
+ * from the backend quota service) rather than a real enforcement error. Matches
+ * the backend messages in conmap-auto/src/billing/quota.service.ts.
+ */
+export function isBillingError(message) {
+  return /subscription is required|active ArmorIQ Pro|billing cannot be verified|payment required|\b402\b/i.test(
+    String(message || "")
+  );
+}
+
 export function blockPrompt(reason) {
   return {
     decision: "block",

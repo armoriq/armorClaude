@@ -9,9 +9,11 @@ import {
   addPromptContext,
   armorReply,
   askPreTool,
+  allowWithNotice,
   blockPrompt,
   denyPreTool,
   denyPreToolWithHint,
+  isBillingError,
 } from "./hook-output.mjs";
 import {
   isArmorPolicyCommand,
@@ -953,6 +955,28 @@ export async function handlePreToolUse(input, config) {
           : undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // Freemium fallback: a billing/subscription 402 from token issuance is NOT
+      // an enforcement decision — the user's policy (even all-allow) was never
+      // evaluated. Blocking here bricks free users with a cryptic error that
+      // looks like a policy denial. Instead, step aside (run unenforced) and
+      // nudge them to upgrade — once per session, so we don't spam every tool.
+      if (isBillingError(message)) {
+        debugLog(config, `billing gate hit; running unenforced: ${message}`);
+        const already = Boolean(session && session.billingNoticeShown);
+        upsertSession(runtimeState, sessionId, { billingNoticeShown: true });
+        if (already) {
+          return null; // already nudged this session — allow silently
+        }
+        const upgradeUrl =
+          config.upgradeUrl ||
+          process.env.ARMORCLAUDE_UPGRADE_URL ||
+          "https://tools.armoriq.ai/tools/billing";
+        return allowWithNotice(
+          `⚠ ArmorIQ Pro is required for ArmorClaude enforcement. ` +
+            `Running in observe-only mode — your tools work normally but are NOT ` +
+            `policy-enforced or audited. Upgrade to activate enforcement: ${upgradeUrl}`
+        );
+      }
       if (config.intentRequired && shouldDeny(config)) {
         return denyPreTool(`ArmorClaude intent planning failed: ${message}`);
       }
