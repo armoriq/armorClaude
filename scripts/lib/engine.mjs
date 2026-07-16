@@ -426,6 +426,27 @@ export async function handleSessionStart(input, config) {
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
   const intentLabel = config.intentRequired ? "required" : "optional";
 
+  // --- Not connected: installed but no usable API key. Show a clear setup
+  // banner and run passively (monitor mode) instead of bricking the session.
+  // This is the fresh `claude plugin install` path, which never ran the
+  // interactive installer/onboarding. ---
+  if (config.unconfigured) {
+    const staleNote = config.hadUnusableKey
+      ? "\n(An existing credential was ignored — it isn't a valid ArmorIQ key.)"
+      : "";
+    return addPromptContext(
+      `ArmorClaude installed but NOT connected — no valid ArmorIQ API key found.${staleNote}\n` +
+        `Running in MONITOR mode: observing only, your tools are not blocked.\n\n` +
+        `To enable protection:\n` +
+        `  1. Get an API key: https://tools.armoriq.ai/tools/api-keys\n` +
+        `  2. Provide it via the plugin's API_KEY setting, or set ` +
+        `ARMORIQ_API_KEY=ak_live_… (or add it to ~/.armoriq/credentials.json).\n` +
+        `Once a valid key is present, ArmorClaude enforces automatically.\n` +
+        `Type /armorclaude:armor for all commands.`,
+      "SessionStart"
+    );
+  }
+
   // --- First-run onboarding: if no policy.json, show template picker ---
   const onboardingFlag = path.join(config.dataDir, "onboarding-shown");
   let onboardingMsg = "";
