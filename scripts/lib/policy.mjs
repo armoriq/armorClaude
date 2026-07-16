@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isPlainObject } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 import {
+  POLICY_IR_VERSION,
   canonicalPolicyHash,
   evaluatePolicyIr,
   legacyRulesToPolicyIr,
@@ -49,10 +50,19 @@ function normalizePolicy(policyLike) {
 }
 
 export async function loadPolicyState(policyFilePath) {
+  // New user / no policy yet → default to ALL-ALLOW so onboarding is frictionless
+  // (tools just work). Users tighten it via /armor or a template. This is a
+  // deliberate permissive default: ArmorClaude should never block someone who
+  // hasn't configured a policy. (Previously this was default-deny, which blocked
+  // every tool for a fresh install.)
   const initial = {
     version: 0,
     updatedAt: new Date().toISOString(),
-    policy: normalizePolicyIr({ statements: [] }),
+    policy: normalizePolicyIr({
+      schemaVersion: POLICY_IR_VERSION,
+      defaults: { decision: "allow" },
+      statements: [{ id: "allow-all", effect: "permit", action: { type: "tool", eq: "*" } }],
+    }),
     history: [],
   };
   const raw = await readJson(policyFilePath, initial);
