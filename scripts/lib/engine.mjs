@@ -905,6 +905,13 @@ export async function handlePreToolUse(input, config) {
   let localExpiresAt = session.expiresAt;
   let remoteAllowed = false;
   let tokenCheckMatched = false;
+  // Set when the backend billing/subscription gate (402) makes the remote
+  // layer (intent tokens, CSRG proofs, dashboard audit) unavailable. It does
+  // NOT relax local policy — deny/hold/allow are still enforced from the
+  // configured policy; it only drops the remote-token requirement so a free
+  // user isn't blocked with a cryptic "intent plan missing".
+  let billingDegraded = false;
+  let billingNotice = "";
   let usedStepIndices =
     intentTokenRaw && localPlan
       ? getSessionTokenUsedStepIndices(session, intentTokenRaw)
@@ -984,29 +991,29 @@ export async function handlePreToolUse(input, config) {
           : undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      // Freemium fallback: a billing/subscription 402 from token issuance is NOT
-      // an enforcement decision — the user's policy (even all-allow) was never
-      // evaluated. Blocking here bricks free users with a cryptic error that
-      // looks like a policy denial. Instead, step aside (run unenforced) and
-      // nudge them to upgrade — once per session, so we don't spam every tool.
+      // A billing/subscription 402 only means the REMOTE layer is unavailable —
+      // it is NOT a policy decision. The configured policy is still enforced
+      // locally: a deny already returned above (policyDecision), and hold/allow
+      // are handled below. So don't hard-block (cryptic) and don't blanket-allow
+      // (that would ignore deny/hold) — degrade the remote layer, fall through,
+      // and nudge to upgrade once per session.
       if (isBillingError(message)) {
-        debugLog(config, `billing gate hit; running unenforced: ${message}`);
-        const already = Boolean(session && session.billingNoticeShown);
-        upsertSession(runtimeState, sessionId, { billingNoticeShown: true });
-        if (already) {
-          return null; // already nudged this session — allow silently
-        }
-        const upgradeUrl =
-          config.upgradeUrl ||
-          process.env.ARMORCLAUDE_UPGRADE_URL ||
-          "https://tools.armoriq.ai/tools/billing";
-        return allowWithNotice(
-          `⚠ ArmorIQ Pro is required for ArmorClaude enforcement. ` +
-            `Running in observe-only mode — your tools work normally but are NOT ` +
-            `policy-enforced or audited. Upgrade to activate enforcement: ${upgradeUrl}`
+        billingDegraded = true;
+        debugLog(
+          config,
+          `billing gate: remote layer degraded, local policy still enforced: ${message}`
         );
-      }
-      if (enforceIntent && shouldDeny(config)) {
+        if (!session.billingNoticeShown) {
+          upsertSession(runtimeState, sessionId, { billingNoticeShown: true });
+          const upgradeUrl =
+            config.upgradeUrl ||
+            process.env.ARMORCLAUDE_UPGRADE_URL ||
+            "https://tools.armoriq.ai/tools/billing";
+          billingNotice =
+            `⚠ ArmorIQ Pro required for remote audit & CSRG proofs. Your policy is ` +
+            `still enforced locally (allow / deny / hold). Upgrade: ${upgradeUrl}`;
+        }
+      } else if (enforceIntent && shouldDeny(config)) {
         return denyPreTool(`ArmorClaude intent planning failed: ${message}`);
       }
     }
@@ -1131,7 +1138,15 @@ export async function handlePreToolUse(input, config) {
   }
 
   // --- Enforce intent requirement ---
-  if (enforceIntent && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
+  // billingDegraded relaxes ONLY the remote-token requirement — local policy
+  // (deny/hold/allow) was already applied above and still governs the outcome.
+  if (
+    enforceIntent &&
+    !billingDegraded &&
+    !remoteAllowed &&
+    !tokenCheckMatched &&
+    !localPlanMatched
+  ) {
     if (shouldDeny(config)) {
       return denyPreToolWithHint("ArmorClaude intent plan missing for this session", {
         toolName,
@@ -1152,12 +1167,15 @@ export async function handlePreToolUse(input, config) {
     return askPreTool(mcpApprovalReason);
   }
   if (requiresUserApproval) {
-    return askPreTool(
+    const askReason =
       policyDecision.reason ||
-        `ArmorClaude policy requires your approval before running ${toolName}.`
-    );
+      `ArmorClaude policy requires your approval before running ${toolName}.`;
+    const ask = askPreTool(billingNotice ? `${askReason}\n\n${billingNotice}` : askReason);
+    if (billingNotice) ask.systemMessage = billingNotice;
+    return ask;
   }
-  return null;
+  // Allowed. Surface the one-time upgrade nudge if we degraded the remote layer.
+  return billingNotice ? allowWithNotice(billingNotice) : null;
 }
 
 // ---------------------------------------------------------------------------
