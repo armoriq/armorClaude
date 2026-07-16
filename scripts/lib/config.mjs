@@ -85,7 +85,7 @@ export function loadConfig(env = process.env) {
   // env var (accepts true/1/yes).
   const observabilityDisabled = parseBoolean(
     pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORIQ_OBSERVABILITY_DISABLED"),
-    false,
+    false
   );
   try {
     const creds = JSON.parse(
@@ -96,6 +96,25 @@ export function loadConfig(env = process.env) {
   } catch {
     // no credentials file — local-only mode
   }
+
+  // A key is only usable if it matches the @armoriq/sdk key format
+  // (ak_test_/ak_live_/ak_claw_). Anything else — empty, or a stale/old-format
+  // key left over from a prior install — is treated as "not connected":
+  //   • handing a bad-format key to `new ArmorIQClient(...)` throws in the
+  //     constructor, which crashed the policy MCP server ("-32000").
+  //   • enforcing without a working key just hard-blocks every tool, bricking
+  //     the session on a fresh `claude plugin install` (no onboarding ran).
+  // So we drop an unusable key and fall into monitor mode (see `connected`).
+  const keyLooksUsable = /^ak_(test|live|claw)_/.test(apiKey);
+  const hadUnusableKey = Boolean(apiKey) && !keyLooksUsable;
+  if (hadUnusableKey) apiKey = "";
+  // Effective key handed to the SDK. In local mock use a placeholder the SDK's
+  // key-format check accepts (the mock server ignores auth). Everything that
+  // keys off "do we have a working credential" uses this.
+  const effectiveApiKey = apiKey || (localMock ? "ak_test_localmock000000000000" : "");
+  // "Connected" == we have a usable key (or we're in local mock). Only then do
+  // we enforce. Unconfigured installs run passively until the user connects.
+  const connected = localMock || keyLooksUsable;
 
   return {
     // Paths / endpoints
@@ -111,25 +130,28 @@ export function loadConfig(env = process.env) {
     // ── Observability: ON by default (opt out via `disable_observability`
     //    plugin option / ARMORIQ_OBSERVABILITY_DISABLED). Additive + no-op
     //    unless a key or local mock gives us somewhere to ship spans. ──
-    observabilityEnabled:
-      !observabilityDisabled && (Boolean(apiKey) || localMock),
+    observabilityEnabled: !observabilityDisabled && Boolean(effectiveApiKey),
     observabilityEndpoint: backendEndpoint,
     observabilityProduct: "armorclaude",
 
-    // userConfig-driven (the only one)
-    // In local mock mode use a placeholder key so engine.mjs apiKey guards pass.
-    // The mock server ignores auth headers so the value doesn't matter, but it
-    // MUST match the @armoriq/sdk (>=0.4) key-format check (ak_test_/ak_live_/
-    // ak_claw_) or the SDK client constructor throws.
-    apiKey: apiKey || (localMock ? "ak_test_localmock000000000000" : ""),
+    // userConfig-driven credential (see effectiveApiKey above: a bad-format key
+    // is dropped, and local mock substitutes an SDK-accepted placeholder).
+    apiKey: effectiveApiKey,
     orgId,
-    auditEnabled: Boolean(apiKey) || localMock,
+    auditEnabled: Boolean(effectiveApiKey),
     defaultTemplate,
 
-    // Hardcoded — every behaviour toggle uses the value we've tested into
-    // the right default. To change one, edit this file.
-    mode: "enforce",
-    intentRequired: true,
+    // Enforcement is gated on being connected. With a usable key (or local
+    // mock) we enforce + require intent, exactly as before. Without one, we run
+    // in monitor mode so the plugin never bricks an un-onboarded session; the
+    // SessionStart banner tells the user how to connect. Once a valid key is
+    // present, this flips back to enforce automatically.
+    mode: connected ? "enforce" : "monitor",
+    intentRequired: connected,
+    // True when the plugin is installed but not connected (no usable key).
+    // Drives the SessionStart setup banner.
+    unconfigured: !connected,
+    hadUnusableKey,
     auditWal: true,
     autoReanchor: true,
     autoRevokeOnEnd: true,
@@ -142,7 +164,7 @@ export function loadConfig(env = process.env) {
     //   activeSessions shows the real count on the dashboard.
     csrgVerifyEnabled: localMock,
     requireCsrgProofs: false,
-    cryptoPolicyEnabled: Boolean(apiKey),
+    cryptoPolicyEnabled: Boolean(effectiveApiKey),
     strictParamCheck: false, // advisory — LLM params are predictions
     policyUpdateEnabled: true,
     policyUpdateAllowList: ["*"],
