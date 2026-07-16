@@ -92,12 +92,12 @@ test("loadConfig: cryptoPolicyEnabled is tied to apiKey presence", () => {
   assert.equal(config.cryptoPolicyEnabled, Boolean(config.apiKey));
 });
 
-test("loadConfig: dev branch defaults to staging endpoints", () => {
+test("loadConfig: release branch defaults to production endpoints", () => {
   const config = loadConfig({});
-  assert.equal(config.armoriqEnv, "staging");
-  assert.equal(config.useProduction, false);
-  assert.equal(config.backendEndpoint, "https://staging-api.armoriq.ai");
-  assert.equal(config.csrgEndpoint, "https://iap-staging.armoriq.ai");
+  assert.equal(config.armoriqEnv, "production");
+  assert.equal(config.useProduction, true);
+  assert.equal(config.backendEndpoint, "https://api.armoriq.ai");
+  assert.equal(config.csrgEndpoint, "https://iap.armoriq.ai");
 });
 
 test("loadConfig: ARMORIQ_ENV=staging uses only staging endpoints", () => {

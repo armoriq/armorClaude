@@ -20,7 +20,7 @@ N=$'\033[0m'
 
 MARKETPLACE_REPO="${ARMORCLAUDE_MARKETPLACE_REPO:-armoriq/armorClaude}"
 PLUGIN_REF="armorclaude@armoriq"
-DASHBOARD_URL="https://dev.armoriq.ai"
+DASHBOARD_URL="https://tools.armoriq.ai"
 
 # Recover if the caller launched the installer from a directory that was deleted.
 if ! pwd >/dev/null 2>&1; then
@@ -97,10 +97,10 @@ install_plugin() {
   claude plugin install "${PLUGIN_REF}" >/dev/null
   ok "plugin installed"
 
-  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
-  npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
+  npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
     && ok "armoriq CLI ready" \
-    || warn "couldn't install globally — use ${B}npx @armoriq/sdk-dev${N} instead"
+    || warn "couldn't install globally — use ${B}npx @armoriq/sdk${N} instead"
 }
 
 # ---------------------------------------------------------------------------
@@ -163,9 +163,9 @@ EOF
   if command -v armoriq >/dev/null 2>&1; then
     armoriq login
   elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk-dev login
+    npx @armoriq/sdk login
   else
-    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk-dev login${N} manually."
+    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk login${N} manually."
     return 0
   fi
 
