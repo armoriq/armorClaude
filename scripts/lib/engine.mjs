@@ -37,6 +37,7 @@ import {
 import { createIapService, reanchorViaSdk, revokeViaSdk } from "./iap-service.mjs";
 import armoriqSdk from "@armoriq/sdk";
 import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
+import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
 import { readJson } from "./fs-store.mjs";
@@ -65,6 +66,27 @@ const INTENT_POLICY_COMPILER_VERSION = "sdk-csrg-policy-v1";
 
 function shouldDeny(config) {
   return config.mode === "enforce";
+}
+
+/**
+ * True when the active policy permits everything with no friction — default
+ * decision "allow" and every statement is a plain permit (no deny/forbid,
+ * no require_approval). This is the "All Allow" template the user picks at
+ * onboarding when they want ArmorClaude out of the way.
+ *
+ * When true, we treat intent as NOT required: no register_intent_plan gate,
+ * no token needed, no drift blocking. The user asked for everything allowed —
+ * so tools just run, exactly like Claude Code without the plugin. (balanced /
+ * strict / lockdown all have a deny or require_approval statement, so they do
+ * NOT qualify and keep full enforcement.)
+ */
+function isFrictionlessAllowPolicy(policy) {
+  try {
+    const ir = normalizePolicyIr(policy);
+    return ir.defaults.decision === "allow" && ir.statements.every((s) => s.effect === "permit");
+  } catch {
+    return false;
+  }
 }
 
 function legacyArmorPolicyMessage() {
@@ -824,6 +846,11 @@ export async function handlePreToolUse(input, config) {
   // --- Static policy evaluation ---
   const policyState = await loadPolicyState(config.policyFile);
   const currentPolicyHash = computePolicyHash(policyState.policy);
+  // "All Allow" onboarding policy => run frictionless: no intent-plan gate, no
+  // token required, no drift blocking. Any policy with a deny/require_approval
+  // keeps full enforcement.
+  const allowAll = isFrictionlessAllowPolicy(policyState.policy);
+  const enforceIntent = config.intentRequired && !allowAll;
 
   // Crypto policy digest check (Phase 4 integration point)
   if (config.cryptoPolicyEnabled) {
@@ -926,8 +953,10 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // If no token, try to acquire one
-  if (!intentTokenRaw && config.apiKey) {
+  // If no token, try to acquire one. Skipped entirely for all-allow: no token
+  // is needed to run frictionless, and skipping avoids the backend round-trip
+  // (and its billing/CSRG failure modes) on a policy that permits everything.
+  if (!intentTokenRaw && config.apiKey && !allowAll) {
     try {
       const intentResponse = await requestIntent(config, {
         prompt: session.lastPrompt || `Use tool ${toolName}`,
@@ -977,7 +1006,7 @@ export async function handlePreToolUse(input, config) {
             `policy-enforced or audited. Upgrade to activate enforcement: ${upgradeUrl}`
         );
       }
-      if (config.intentRequired && shouldDeny(config)) {
+      if (enforceIntent && shouldDeny(config)) {
         return denyPreTool(`ArmorClaude intent planning failed: ${message}`);
       }
     }
@@ -992,7 +1021,7 @@ export async function handlePreToolUse(input, config) {
     });
     if (tokenCheck.matched) {
       tokenCheckMatched = true;
-      if (tokenCheck.blockReason) {
+      if (tokenCheck.blockReason && !allowAll) {
         return denyOrAllow(config, tokenCheck.blockReason);
       }
       localPlan = tokenCheck.plan || localPlan;
@@ -1090,7 +1119,7 @@ export async function handlePreToolUse(input, config) {
     } else {
       // Phase 4 A3: include the exact register_intent_plan JSON in the deny
       // reason so the LLM auto-corrects in 1 follow-up turn.
-      if (shouldDeny(config)) {
+      if (shouldDeny(config) && !allowAll) {
         return denyPreToolWithHint(localCheck.reason || "ArmorClaude intent drift", {
           toolName,
           toolInput,
@@ -1102,7 +1131,7 @@ export async function handlePreToolUse(input, config) {
   }
 
   // --- Enforce intent requirement ---
-  if (config.intentRequired && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
+  if (enforceIntent && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
     if (shouldDeny(config)) {
       return denyPreToolWithHint("ArmorClaude intent plan missing for this session", {
         toolName,
