@@ -625,6 +625,22 @@ export async function handlePreToolUse(input, config) {
     return null;
   }
 
+  // --- Allowlist: ArmorClaude's own management skill (/armorclaude:armor) is
+  //     the escape hatch for fixing an over-restrictive policy. Under a
+  //     default-deny policy an agent's Skill(armorclaude:armor) call would
+  //     otherwise be denied ("no statement matched tool Skill"), deadlocking
+  //     the user out of the very command that fixes the policy. Exempt it.
+  //     (Invoking the skill isn't itself a security-relevant action — any tool
+  //     the skill goes on to run is still policy-checked at its own PreToolUse.)
+  if (norm === "skill") {
+    const skillRef = String(toolInput?.skill ?? toolInput?.name ?? "")
+      .trim()
+      .toLowerCase();
+    if (skillRef === "armor" || skillRef === "armorclaude:armor" || skillRef.endsWith(":armor")) {
+      return null;
+    }
+  }
+
   // --- Path guard: block write operations targeting policy/credential files.
   //     Read operations (cat, Read tool) are allowed --- only mutations blocked.
   const PROTECTED_PATHS = [
