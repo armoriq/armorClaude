@@ -258,7 +258,8 @@ and intent enforcement still work):
 - **Plugin option:** set `disable_observability: true` in the plugin's userConfig, **or**
 - **Environment variable:** set `ARMORIQ_OBSERVABILITY_DISABLED=true` (also accepts `1` / `yes`).
 
-For full details on what ArmorIQ collects, how it's used, retention, and how to opt out, see the ArmorIQ Privacy Policy at <https://armoriq.ai/privacy-policy> (Section 6, "Product-Specific Data Flows").
+- **Product overview and setup:** <https://armoriq.ai/tools/armorclaude>
+- **Privacy policy (data collected, retention, opt-out):** <https://armoriq.ai/privacy-policy> (Section 6, "Product-Specific Data Flows")
 
 ## Tests
 
