@@ -18,6 +18,7 @@
       "category": "security",
       "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp"],
       "homepage": "https://armoriq.ai/tools/armorclaude",
+      "privacyPolicy": "https://armoriq.ai/privacy-policy",
       "license": "MIT",
       "author": { "name": "ArmorIQ", "email": "license@armoriq.io" }
     }
