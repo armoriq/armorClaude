@@ -2,7 +2,7 @@
   "mcpServers": {
     "armorclaude-policy": {
       "command": "node",
-      "args": ["scripts/bootstrap.mjs", "mcp"]
+      "args": ["${CLAUDE_PLUGIN_ROOT:-.}/scripts/bootstrap.mjs", "mcp"]
     }
   }
 }

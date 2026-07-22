@@ -46,6 +46,30 @@ claude mcp list | grep armorclaude
 # plugin:armorclaude:armorclaude-policy: ... ✓ Connected
 ```
 
+### First-run behavior
+
+The plugin ships its Node dependencies uninstalled. On the **first launch** (first hook fire or
+first MCP-server start), `scripts/bootstrap.mjs` performs a **one-time `npm install`** and prints
+to stderr:
+
+```
+[armorclaude] installing dependencies (one-time)...
+```
+
+- Requires **Node.js >= 20** and **npm on PATH**, plus **network access on that first run**.
+- The bundled MCP server (`armorclaude-policy`) registers once dependencies finish installing;
+  it stays connected on subsequent runs without reinstalling.
+- **No API key is needed to start.** With `api_key` blank the plugin runs in **local-only mode**
+  (no data leaves your machine — see [Data & Privacy](#data--privacy)); a key only adds backend
+  audit, intent tokens, and CSRG proofs.
+
+If `claude mcp list` does not show `✓ Connected`, run the server directly from the plugin
+directory to surface the install/startup error:
+
+```bash
+node scripts/bootstrap.mjs mcp
+```
+
 ### Update / disable / uninstall
 
 ```bash
@@ -143,6 +167,11 @@ When installed as a Claude Code plugin, these values are prompted on enable:
 |----------|---------|-------------|
 | `ARMORCLAUDE_AUDIT_ENABLED` | `true` (when API key set) | Send audit logs to IAP |
 
+**Observability:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARMORIQ_OBSERVABILITY_DISABLED` | `false` | Set to `true`/`1`/`yes` to stop sending execution traces to the ArmorIQ dashboard. Observability is **on by default** when an API key is set — see [Data & Privacy](#data--privacy). Equivalent to the `disable_observability` plugin option. |
+
 **Policy Management:**
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -203,6 +232,34 @@ MCP tools: `policy_read`, `register_intent_plan`, and Trust Update tools. There 
 - **Crypto Policy Binding**: Optional Merkle tree binding via CSRG ensures policy rules can't be tampered with after token issuance.
 - **Audit Trail**: Every tool execution (success/failure) is logged to ArmorIQ IAP.
 - **Fail-Closed**: Missing tokens, failed planning, invalid proofs — all result in denied tool calls in enforce mode.
+
+## Data & Privacy
+
+ArmorClaude's security enforcement works by inspecting prompts and tool calls. **What leaves your
+machine depends entirely on whether an ArmorIQ API key is configured:**
+
+- **Local-only mode (no `api_key`)** — nothing is transmitted. Policy checks, intent-drift
+  detection, and audit logging all run locally.
+- **Connected mode (`api_key` set)** — the following is sent to the ArmorIQ backend
+  (`api.armoriq.ai` / `iap.armoriq.ai`) to provide intent tokens, audit trails, and CSRG proofs:
+  - The captured **prompt and structured intent plan** (goal + steps).
+  - Per-step **audit logs** containing the tool name and its **inputs and outputs**.
+  - **Observability execution traces** (spans for planning, policy checks, and tool
+    inputs/outputs) — **on by default** in connected mode.
+
+  Tool inputs and outputs are passed through secret redaction and parameter sanitization before
+  transmission.
+
+### Turning off observability
+
+Observability traces are **enabled by default** when an API key is set. To disable them (audit
+and intent enforcement still work):
+
+- **Plugin option:** set `disable_observability: true` in the plugin's userConfig, **or**
+- **Environment variable:** set `ARMORIQ_OBSERVABILITY_DISABLED=true` (also accepts `1` / `yes`).
+
+For details on what ArmorIQ collects and how it's used, see
+<https://armoriq.ai/tools/armorclaude>.
 
 ## Tests
 
