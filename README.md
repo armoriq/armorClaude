@@ -85,6 +85,10 @@ claude plugin uninstall armorclaude
 - Node.js >= 20
 - (Optional) ArmorIQ API key for backend audit + CSRG proofs — get one at https://armoriq.ai
 
+> **Getting an API key via the CLI:** account registration (`armoriq register`) is provided by
+> the Python CLI, not the TypeScript CLI. Install it with `pip3 install armoriq-sdk`, then run
+> `armoriq register`. On macOS use **`pip3`** (plain `pip` is often not on `PATH`).
+
 ## Structure
 
 ```
