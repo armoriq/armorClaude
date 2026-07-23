@@ -844,3 +844,67 @@ test("handleUserPromptSubmit no longer injects policy_update hints (removed for 
   const ctx = output?.hookSpecificOutput?.additionalContext || "";
   assert.ok(!ctx.includes("policy_update"), "context hints must not reference policy_update");
 });
+
+function v1Policy(name, statements) {
+  return {
+    schemaVersion: "armor.policy.v1",
+    kind: "PolicyProfile",
+    metadata: { name, description: "" },
+    defaults: { decision: "allow", conflictResolution: "deny_overrides" },
+    statements,
+  };
+}
+
+test("handleUserPromptSubmit suppresses the intent directive under an all-allow policy", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  const config = buildConfig(tmp, { planningEnabled: true, intentRequired: true });
+  await savePolicyState(config.policyFile, {
+    version: 1,
+    policy: v1Policy("all-allow", [
+      {
+        id: "allow-all",
+        effect: "permit",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "*" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: [],
+      },
+    ]),
+  });
+  const output = await handleUserPromptSubmit(
+    { hook_event_name: "UserPromptSubmit", session_id: "s-allow", prompt: "read the file" },
+    config
+  );
+  const ctx = output?.hookSpecificOutput?.additionalContext || "";
+  assert.ok(
+    !ctx.includes("register_intent_plan"),
+    "no intent directive should be injected when the policy is all-allow (enforcement is off)"
+  );
+});
+
+test("handleUserPromptSubmit injects the intent directive when the policy enforces", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  const config = buildConfig(tmp, { planningEnabled: true, intentRequired: true });
+  await savePolicyState(config.policyFile, {
+    version: 1,
+    policy: v1Policy("enforcing", [
+      {
+        id: "hold-bash",
+        effect: "require_approval",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", eq: "Bash" },
+        resource: { type: "workspace", scope: "current" },
+        conditions: [],
+      },
+    ]),
+  });
+  const output = await handleUserPromptSubmit(
+    { hook_event_name: "UserPromptSubmit", session_id: "s-enforce", prompt: "read the file" },
+    config
+  );
+  const ctx = output?.hookSpecificOutput?.additionalContext || "";
+  assert.ok(
+    ctx.includes("register_intent_plan"),
+    "intent directive should be injected when the policy enforces intent"
+  );
+});

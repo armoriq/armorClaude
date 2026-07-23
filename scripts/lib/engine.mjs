@@ -558,8 +558,18 @@ export async function handleUserPromptSubmit(input, config) {
   // Claude will call the `register_intent_plan` MCP tool (or include a JSON
   // block in its plan file) as its first action. This uses the session's own
   // LLM — no separate API key or extra LLM call needed.
+  //
+  // Only inject this when intent is ACTUALLY enforced. Under an all-allow
+  // (frictionless) policy, handlePreToolUse does not gate tool calls, so
+  // telling Claude "enforcement is active" and "tools will be blocked" is
+  // false — and it makes Claude report a missing `register_intent_plan` tool
+  // and proceed unguarded when the policy MCP isn't surfaced. Keep this gate
+  // consistent with handlePreToolUse's enforceIntent computation.
+  const policyState = await loadPolicyState(config.policyFile);
+  const allowAll = isFrictionlessAllowPolicy(policyState.policy);
+  const enforceIntent = config.intentRequired && !allowAll;
   const parts = [];
-  if (config.planningEnabled) {
+  if (config.planningEnabled && enforceIntent) {
     parts.push(
       "ArmorClaude intent enforcement is active. Before using any tool, " +
         "declare your plan in this exact JSON shape:\n\n" +
@@ -568,8 +578,14 @@ export async function handleUserPromptSubmit(input, config) {
         "How to submit:\n" +
         "- If in plan mode: include the JSON block (fenced with ```json) " +
         "at the end of your plan file.\n" +
-        "- Otherwise: call `register_intent_plan` with the JSON as the " +
+        "- Otherwise: call the register_intent_plan tool (provided by the " +
+        "armorclaude-policy MCP server; it may appear namespaced, e.g. " +
+        "mcp__armorclaude-policy__register_intent_plan) with the JSON as the " +
         "argument BEFORE any other tool call.\n" +
+        "If that tool is not in your tool list, the ArmorClaude policy MCP " +
+        "server is not connected: do not fabricate the call, and tell the " +
+        "user to verify it with `claude mcp list` (expect armorclaude-policy " +
+        "Connected) before relying on enforcement.\n" +
         "Tool calls without a registered plan will be blocked."
     );
   }
