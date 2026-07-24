@@ -54,6 +54,44 @@ import { compileToOpaInput } from "./policy-compiler.mjs";
 // Helpers
 // ---------------------------------------------------------------------------
 
+// In-memory store for tool-call start timestamps. Keyed by tool_use_id
+// (or sessionId:toolName fallback). Entries are deleted after PostToolUse /
+// PostToolUseFailure so the map doesn't grow unboundedly.
+const _toolStartTimes = new Map();
+
+/** Derive a stable key for the tool-start-time map. */
+function _toolTimingKey(input) {
+  if (typeof input.tool_use_id === "string" && input.tool_use_id) {
+    return input.tool_use_id;
+  }
+  const sid = typeof input.session_id === "string" ? input.session_id : "";
+  const tn = typeof input.tool_name === "string" ? input.tool_name : "";
+  return `${sid}:${tn}`;
+}
+
+/** Record the start timestamp for a tool call. */
+export function _recordToolStart(input) {
+  _toolStartTimes.set(_toolTimingKey(input), Date.now());
+}
+
+/**
+ * Compute elapsed duration_ms for a tool call.
+ * Returns null if no start timestamp was recorded (never fabricates a duration).
+ * Deletes the entry after retrieval.
+ */
+export function _computeToolDuration(input) {
+  const key = _toolTimingKey(input);
+  const start = _toolStartTimes.get(key);
+  _toolStartTimes.delete(key);
+  if (start == null) return null;
+  return Date.now() - start;
+}
+
+// Exposed for testing only — clear all entries.
+export function _clearToolStartTimes() {
+  _toolStartTimes.clear();
+}
+
 const INTENT_POLICY_COMPILER_VERSION = "sdk-csrg-policy-v1";
 
 function shouldDeny(config) {
@@ -517,6 +555,10 @@ export async function handleUserPromptSubmit(input, config) {
 // ---------------------------------------------------------------------------
 
 export async function handlePreToolUse(input, config) {
+  // Record start timestamp BEFORE any deny/early-return so even denied calls
+  // have timing data available for PostToolUse/PostToolUseFailure.
+  _recordToolStart(input);
+
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
@@ -1192,7 +1234,7 @@ export async function handlePostToolUse(input, config) {
       output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
       status: "success",
       executed_at: new Date().toISOString(),
-      duration_ms: 0,
+      duration_ms: _computeToolDuration(input),
     };
 
     // Phase 4 A4 (via Tier B): if daemon is enabled, enqueue the audit DTO
@@ -1253,7 +1295,7 @@ export async function handlePostToolUseFailure(input, config) {
       status: "failed",
       error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error",
       executed_at: new Date().toISOString(),
-      duration_ms: 0,
+      duration_ms: _computeToolDuration(input),
     };
 
     const target = await emitAudit({ dto, config, iapService });
