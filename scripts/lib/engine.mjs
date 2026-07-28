@@ -1296,41 +1296,67 @@ export async function handlePostToolUse(input, config) {
     const iapService = createIapService(config);
 
     const intentTokenRaw = session.intentTokenRaw || "";
-    if (!intentTokenRaw) return null;
-    let token = intentTokenRaw;
-    // Extract JWT if embedded in JSON envelope
-    if (intentTokenRaw.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(intentTokenRaw);
-        token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch {
-        /* use raw */
-      }
-    }
-
-    // Compute the real step index from the registered plan so the backend's
-    // updateExecutionProgress can advance plan status to 'completed'.
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs);
 
-    const dto = {
-      token,
-      step_index: stepIdx,
-      action: toolName,
-      tool: toolName,
-      input: redactSecrets(inputs),
-      output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
-      status: "success",
-      executed_at: new Date().toISOString(),
-      duration_ms: 0,
-    };
+    let dto;
+    if (intentTokenRaw) {
+      let token = intentTokenRaw;
+      // Extract JWT if embedded in JSON envelope
+      if (intentTokenRaw.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(intentTokenRaw);
+          token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
+        } catch {
+          /* use raw */
+        }
+      }
+      // Compute the real step index from the registered plan so the backend's
+      // updateExecutionProgress can advance plan status to 'completed'.
+      const stepIdx = pickStepIndex(session.plan, toolName, inputs);
+      dto = {
+        token,
+        step_index: stepIdx,
+        action: toolName,
+        tool: toolName,
+        input: redactSecrets(inputs),
+        output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
+        status: "success",
+        executed_at: new Date().toISOString(),
+        duration_ms: 0,
+      };
+    } else {
+      // No intent token. Under an all-allow (frictionless) policy this is
+      // expected — no plan is registered, so no token is minted (see
+      // isFrictionlessAllowPolicy). But the action should still be recorded,
+      // otherwise the audit trail goes silent whenever enforcement is off
+      // (#116). Emit a session-scoped row: no token, attributed via explicit
+      // identity; the backend stores it as an orphan row (planId null). In
+      // enforce mode a missing token is not a valid audit context, so we do
+      // NOT fabricate one — keep returning null there.
+      const policyState = await loadPolicyState(config.policyFile);
+      if (!isFrictionlessAllowPolicy(policyState.policy)) return null;
+      dto = {
+        session_id: sessionId,
+        user_id: config.userId,
+        agent_id: config.agentId,
+        client_id: config.mcpName || config.llmId,
+        step_index: -1,
+        action: toolName,
+        tool: toolName,
+        input: redactSecrets(inputs),
+        output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
+        status: "success",
+        executed_at: new Date().toISOString(),
+        duration_ms: 0,
+      };
+    }
 
     // Phase 4 A4 (via Tier B): if daemon is enabled, enqueue the audit DTO
     // for fire-and-forget batched flush. This actually delivers the
     // latency win — without daemon, we still need to await the POST because
     // the hook process can't exit while a socket is open.
     const target = await emitAudit({ dto, config, iapService });
-    debugLog(config, `audit log ${target} for ${toolName} step=${stepIdx}`);
+    debugLog(config, `audit log ${target} for ${toolName}`);
   } catch (error) {
     // Audit is best-effort — don't block
     debugLog(config, `audit log failed: ${error}`);
