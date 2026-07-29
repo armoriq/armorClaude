@@ -6,8 +6,17 @@ set -euo pipefail
 # Usage:
 #   curl -fsSL https://armoriq.ai/install_armorclaude.sh | bash
 #
+# Idempotent: re-run anytime to pick up the latest plugin and SDK. If the
+# plugin and credentials are already in place, the script runs in update mode
+# (refresh marketplace + plugin + global SDK, skip the login prompt).
+#
+# Flags:
+#   --force-install   force the full install flow even if already installed
+#   --update          force update mode even without credentials
+#
 # Non-interactive overrides:
 #   ARMORCLAUDE_MARKETPLACE_REPO=<path>   override marketplace source (testing)
+#   ARMORIQ_FORCE_INSTALL=1               same as --force-install
 
 R=$'\033[1;31m'
 G=$'\033[32m'
@@ -20,7 +29,18 @@ N=$'\033[0m'
 
 MARKETPLACE_REPO="${ARMORCLAUDE_MARKETPLACE_REPO:-armoriq/armorClaude}"
 PLUGIN_REF="armorclaude@armoriq"
-DASHBOARD_URL="https://dev.armoriq.ai"
+DASHBOARD_URL="https://platform.armoriq.ai"
+
+FORCE_MODE=""
+if [[ "${ARMORIQ_FORCE_INSTALL:-0}" == "1" ]]; then
+  FORCE_MODE="install"
+fi
+for arg in "$@"; do
+  case "$arg" in
+    --force-install) FORCE_MODE="install" ;;
+    --update)        FORCE_MODE="update" ;;
+  esac
+done
 
 # Recover if the caller launched the installer from a directory that was deleted.
 if ! pwd >/dev/null 2>&1; then
@@ -80,6 +100,60 @@ check_node_version() {
 }
 
 # ---------------------------------------------------------------------------
+# Install mode detection
+# ---------------------------------------------------------------------------
+
+is_armorclaude_installed() {
+  claude plugin list 2>/dev/null | grep -qE 'armorclaude'
+}
+
+detect_mode() {
+  if [[ -n "${FORCE_MODE}" ]]; then
+    printf '%s' "${FORCE_MODE}"
+    return 0
+  fi
+  if [[ -f "${HOME}/.armoriq/credentials.json" ]] && is_armorclaude_installed; then
+    printf 'update'
+  else
+    printf 'install'
+  fi
+}
+
+run_update_path() {
+  info "refreshing marketplace ${B}${MARKETPLACE_REPO}${N}"
+  if ! claude plugin marketplace update armoriq >/dev/null 2>&1; then
+    claude plugin marketplace add "${MARKETPLACE_REPO}" >/dev/null 2>&1 || true
+  fi
+  ok "marketplace refreshed"
+
+  info "updating plugin ${B}${PLUGIN_REF}${N}"
+  if claude plugin install "${PLUGIN_REF}" --upgrade >/dev/null 2>&1; then
+    ok "plugin upgraded"
+  elif claude plugin install "${PLUGIN_REF}" >/dev/null 2>&1; then
+    ok "plugin re-installed at latest"
+  else
+    warn "couldn't refresh plugin, run ${B}claude plugin update armorclaude${N} manually"
+  fi
+
+  info "updating ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
+  npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
+    && ok "armoriq CLI at latest" \
+    || warn "couldn't update globally, use ${B}npx @armoriq/sdk${N} instead"
+}
+
+finish_update_banner() {
+  echo
+  printf "${G}${B}ArmorClaude is up to date.${N}\n\n"
+  info "Plugin: ${PLUGIN_REF} (refreshed)"
+  info "SDK:    @armoriq/sdk (latest)"
+  if [[ ! -f "${HOME}/.armoriq/credentials.json" ]]; then
+    echo
+    printf "  Run ${G}${B}armoriq login --product armorclaude${N} to authenticate.\n"
+  fi
+  echo
+}
+
+# ---------------------------------------------------------------------------
 # Plugin install
 # ---------------------------------------------------------------------------
 
@@ -97,10 +171,10 @@ install_plugin() {
   claude plugin install "${PLUGIN_REF}" >/dev/null
   ok "plugin installed"
 
-  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
-  npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
+  npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
     && ok "armoriq CLI ready" \
-    || warn "couldn't install globally — use ${B}npx @armoriq/sdk-dev${N} instead"
+    || warn "couldn't install globally — use ${B}npx @armoriq/sdk${N} instead"
 }
 
 # ---------------------------------------------------------------------------
@@ -159,13 +233,26 @@ EOF
   fi
 
   echo
-  # Run armoriq login inline — uses the globally installed CLI or npx fallback
+  # Pass --product so the browser approval page renders ArmorClaude branding
+  # and the resulting API key is attributed to ArmorClaude on the admin
+  # dashboard. Older CLIs without --product fall back to the ARMORIQ_PRODUCT
+  # env var, which newer CLIs (armoriq-sdk >= 0.3.6 / @armoriq/sdk >= 0.3.2)
+  # also honor — older ones simply ignore it.
+  local product="armorclaude"
   if command -v armoriq >/dev/null 2>&1; then
-    armoriq login
+    if armoriq login --help 2>&1 | grep -q -- '--product'; then
+      armoriq login --product "${product}"
+    else
+      ARMORIQ_PRODUCT="${product}" armoriq login
+    fi
   elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk-dev login
+    if npx @armoriq/sdk login --help 2>&1 | grep -q -- '--product'; then
+      npx @armoriq/sdk login --product "${product}"
+    else
+      ARMORIQ_PRODUCT="${product}" npx @armoriq/sdk login
+    fi
   else
-    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk-dev login${N} manually."
+    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk login${N} manually."
     return 0
   fi
 
@@ -218,7 +305,7 @@ EOF
   ${D}claude plugin enable  armorclaude${N}
   ${D}claude plugin update  armorclaude${N}
 
-  Docs: ${C}https://github.com/armoriq/armorClaude${N}
+  Docs: ${C}https://docs.armoriq.ai/armorclaude${N}
 
 EOF
 }
@@ -235,6 +322,16 @@ main() {
   require_cmd git
   check_node_version
   ok "prerequisites OK ($(claude --version 2>/dev/null | head -1), $(node --version))"
+
+  local mode
+  mode="$(detect_mode)"
+  if [[ "${mode}" == "update" ]]; then
+    section "Updating ArmorClaude"
+    run_update_path
+    verify_install
+    finish_update_banner
+    exit 0
+  fi
 
   install_plugin
   verify_install
