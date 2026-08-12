@@ -85,7 +85,7 @@ export function loadConfig(env = process.env) {
   // env var (accepts true/1/yes).
   const observabilityDisabled = parseBoolean(
     pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORIQ_OBSERVABILITY_DISABLED"),
-    false,
+    false
   );
   try {
     const creds = JSON.parse(
@@ -111,8 +111,7 @@ export function loadConfig(env = process.env) {
     // ── Observability: ON by default (opt out via `disable_observability`
     //    plugin option / ARMORIQ_OBSERVABILITY_DISABLED). Additive + no-op
     //    unless a key or local mock gives us somewhere to ship spans. ──
-    observabilityEnabled:
-      !observabilityDisabled && (Boolean(apiKey) || localMock),
+    observabilityEnabled: !observabilityDisabled && (Boolean(apiKey) || localMock),
     observabilityEndpoint: backendEndpoint,
     observabilityProduct: "armorclaude",
 

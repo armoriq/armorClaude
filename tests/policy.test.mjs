@@ -62,6 +62,35 @@ function startMockServer(handler) {
   });
 }
 
+// An all-allow policy puts the plugin in frictionless mode, which disables the
+// intent gate entirely (see isFrictionlessAllowPolicy in engine.mjs). That is
+// also what a config with no policy.json falls back to, so any test exercising
+// intent enforcement has to write a policy carrying at least one non-permit
+// statement first.
+async function writeEnforcingPolicy(config) {
+  await writeJson(config.policyFile, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    policy: {
+      schemaVersion: "armor.policy.v1",
+      kind: "PolicyProfile",
+      metadata: { name: "enforcing", description: "" },
+      defaults: { decision: "allow", conflictResolution: "deny_overrides" },
+      statements: [
+        {
+          id: "forbid-webfetch",
+          effect: "forbid",
+          principal: { type: "agent", id: "claude-code" },
+          action: { type: "tool", in: ["WebFetch"] },
+          resource: { type: "workspace", scope: "current" },
+          conditions: [],
+        },
+      ],
+    },
+    history: [],
+  });
+}
+
 test("evaluatePolicy denies matching deny rule", () => {
   const decision = evaluatePolicy({
     policy: {
@@ -628,6 +657,7 @@ test("handlePreToolUse reports remote IAP policy validation denials distinctly",
 test("handlePreToolUse denies missing intent when strict", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
+  await writeEnforcingPolicy(config);
   // Use Edit (mutating, NOT in the Phase 4 A1 read-only fast-path) so the
   // full intent-required pipeline runs. Read/Grep/Glob/WebSearch/etc are
   // intentionally fast-pathed and bypass this check by design.
@@ -647,6 +677,7 @@ test("handlePreToolUse denies missing intent when strict", async () => {
 test("Phase 4 A3: deny output for missing plan includes a register_intent_plan hint", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-a3-missing-"));
   const config = buildConfig(tmp, { intentRequired: true });
+  await writeEnforcingPolicy(config);
   const output = await handlePreToolUse(
     {
       hook_event_name: "PreToolUse",
@@ -670,6 +701,7 @@ test("Phase 4 A3: deny output for missing plan includes a register_intent_plan h
 test("Phase 4 A3: deny on drift extends the existing plan in the hint", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-a3-drift-"));
   const config = buildConfig(tmp, { intentRequired: true });
+  await writeEnforcingPolicy(config);
   const { writeFile } = await import("node:fs/promises");
   // Local-plan-only path (no intentTokenRaw) so the local drift check fires
   // and returns the actionable hint that extends the cached plan.
@@ -756,6 +788,7 @@ test("handlePreToolUse allows tool when local plan matches (no backend)", async 
 test("handlePreToolUse denies drift when local plan exists (no backend)", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
+  await writeEnforcingPolicy(config);
   const { writeFile } = await import("node:fs/promises");
   await writeFile(
     config.runtimeFile,

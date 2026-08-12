@@ -113,9 +113,9 @@ test("/armor policy help returns usage text", async () => {
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor policy", config);
   assert.ok(out.includes("ArmorClaude Policy Commands"));
-  assert.ok(out.includes("/armor policy list"));
-  assert.ok(out.includes("/armor policy view"));
-  assert.ok(out.includes("/armor policy default <allow|deny|hold>"));
+  assert.ok(out.includes("/armorclaude:armor policy list"));
+  assert.ok(out.includes("/armorclaude:armor policy view"));
+  assert.ok(out.includes("/armorclaude:armor policy default <allow|deny|hold>"));
   assert.ok(out.includes("legacy /armor-policy is intentionally unsupported"));
 });
 
@@ -123,7 +123,7 @@ test("/armor help returns primary UX text", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor", config);
-  assert.ok(out.includes("/armor policy add"));
+  assert.ok(out.includes("/armorclaude:armor policy add"));
 });
 
 // ---------------------------------------------------------------------------
@@ -190,8 +190,8 @@ test("/armor yes applies the current staged policy proposal", async () => {
   await seedPolicy(config);
 
   const addOut = await handleArmorPolicyCommand("/armor policy add deny Bash", config);
-  assert.ok(addOut.includes("/armor yes"));
-  assert.ok(addOut.includes("/armor no"));
+  assert.ok(addOut.includes("/armorclaude:armor yes"));
+  assert.ok(addOut.includes("/armorclaude:armor no"));
 
   const confirmOut = await handleArmorPolicyCommand("/armor yes", config);
   assert.ok(confirmOut.includes("Policy updated"));
@@ -211,7 +211,7 @@ test("/armor policy default allow stages and confirms default allow", async () =
   assert.ok(out.includes("- DEFAULT BLOCK unmatched tools"));
   assert.ok(out.includes("+ DEFAULT ALLOW unmatched tools"));
   assert.ok(out.includes('"path": "/defaults"'));
-  assert.ok(out.includes("/armor yes"));
+  assert.ok(out.includes("/armorclaude:armor yes"));
 
   const pending = JSON.parse(await readFile(path.join(tmp, "policy-pending.json"), "utf8"));
   assert.equal(pending.reason, "default allow");
@@ -1408,7 +1408,7 @@ test("handleUserPromptExpansion blocks armor policy skill expansion", async () =
     config
   );
   assert.equal(output?.decision, "block");
-  assert.ok(output?.reason?.includes("/armor policy"));
+  assert.ok(output?.reason?.includes("/armorclaude:armor policy"));
 });
 
 test("handleUserPromptExpansion executes /armor slash command through secure hook", async () => {

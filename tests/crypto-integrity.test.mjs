@@ -92,12 +92,15 @@ test("loadConfig: cryptoPolicyEnabled is tied to apiKey presence", () => {
   assert.equal(config.cryptoPolicyEnabled, Boolean(config.apiKey));
 });
 
-test("loadConfig: dev branch defaults to staging endpoints", () => {
+// This is the main branch, which config.mjs documents as production-hardcoded
+// ("Main must keep production-hardcoded behavior before release"). The staging
+// default belongs to the dev branch; asserting it here tested the wrong branch.
+test("loadConfig: main branch defaults to production endpoints", () => {
   const config = loadConfig({});
-  assert.equal(config.armoriqEnv, "staging");
-  assert.equal(config.useProduction, false);
-  assert.equal(config.backendEndpoint, "https://staging-api.armoriq.ai");
-  assert.equal(config.csrgEndpoint, "https://iap-staging.armoriq.ai");
+  assert.equal(config.armoriqEnv, "production");
+  assert.equal(config.useProduction, true);
+  assert.equal(config.backendEndpoint, "https://api.armoriq.ai");
+  assert.equal(config.csrgEndpoint, "https://iap.armoriq.ai");
 });
 
 test("loadConfig: ARMORIQ_ENV=staging uses only staging endpoints", () => {
@@ -218,7 +221,7 @@ test("reset confirm applies empty default-deny fail-closed when crypto token iss
     const out = await handleArmorPolicyCommand("/armor yes", config);
     assert.ok(out.includes("Policy updated"));
     assert.ok(out.includes("fail closed"));
-    assert.ok(out.includes("/armor policy rebind"));
+    assert.ok(out.includes("/armorclaude:armor policy rebind"));
 
     const policyState = await readJson(config.policyFile, null);
     assert.equal(policyState.version, 2);
@@ -344,7 +347,10 @@ test("confirm does not attempt crypto when cryptoPolicyEnabled is false", async 
 test("confirm pushes to backend in OPA mode", async () => {
   let syncCalled = false;
   const { server, url } = await startMockCsrg((req, res) => {
-    if (req.url?.includes("/policies/sync")) syncCalled = true;
+    // syncPolicy() proposes through /policies/profiles/draft + /propose. It
+    // stopped using /policies/sync when terminal policy changes became staged
+    // proposals, so matching the old path never fired.
+    if (req.url?.includes("/policies/profiles/")) syncCalled = true;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
   });
@@ -359,6 +365,11 @@ test("confirm pushes to backend in OPA mode", async () => {
 
     await handleArmorPolicyCommand("/armor policy add deny Bash", config);
     await handleArmorPolicyCommand("/armor policy confirm", config);
+    // The push is deliberately fire-and-forget so confirmation is not blocked
+    // on the network, so poll rather than asserting on the next tick.
+    for (let i = 0; i < 50 && !syncCalled; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     assert.ok(syncCalled, "Backend should have been called for OPA sync");
   } finally {
     server.close();
