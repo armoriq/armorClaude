@@ -61,7 +61,13 @@ if (!installedOk()) {
 }
 
 const target = process.argv[2];
-if (target === "router") {
+if (target === "warm") {
+  // Dependencies are installed above; nothing else to do. The installer calls
+  // this so the first MCP connect doesn't have to wait on `npm install` — that
+  // wait exceeds Claude Code's handshake timeout and surfaces as
+  // "MCP error -32000: Connection closed".
+  process.exit(0);
+} else if (target === "router") {
   await import("./hook-router.mjs");
 } else if (target === "mcp") {
   await import("./policy-mcp.mjs");

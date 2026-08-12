@@ -97,6 +97,22 @@ install_plugin() {
   claude plugin install "${PLUGIN_REF}" >/dev/null
   ok "plugin installed"
 
+  # Pre-install the plugin's own node_modules. Without this the first MCP
+  # connect pays for `npm install` inside the handshake and Claude Code reports
+  # "Failed to connect — MCP error -32000: Connection closed".
+  info "preparing plugin dependencies"
+  local plugin_dir
+  plugin_dir="$(ls -d "${HOME}"/.claude/plugins/cache/armoriq/armorclaude/*/ 2>/dev/null | sort -V | tail -1)"
+  if [[ -n "${plugin_dir}" && -f "${plugin_dir}scripts/bootstrap.mjs" ]]; then
+    if node "${plugin_dir}scripts/bootstrap.mjs" warm >/dev/null 2>&1; then
+      ok "dependencies ready"
+    else
+      warn "couldn't pre-install dependencies — the first Claude Code start may be slow"
+    fi
+  else
+    warn "couldn't locate the installed plugin — the first Claude Code start may be slow"
+  fi
+
   info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
   npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
     && ok "armoriq CLI ready" \
@@ -109,12 +125,24 @@ install_plugin() {
 
 verify_install() {
   section "Verifying"
-  local listed
-  listed="$(claude plugin list 2>/dev/null | grep -E "armorclaude" || true)"
-  if [[ -n "$listed" ]]; then
-    ok "armorclaude is enabled"
+  # `claude plugin list` prints the status on the line after the plugin name, so
+  # a bare grep for "armorclaude" matches even when the plugin is disabled and
+  # would wrongly report success.
+  local listing status
+  listing="$(claude plugin list 2>/dev/null || true)"
+  status="$(printf '%s\n' "$listing" | grep -A3 "armorclaude@armoriq" | grep -m1 "Status:" || true)"
+  if [[ -z "$status" ]]; then
+    warn "couldn't confirm armorclaude is installed — run: ${B}claude plugin list${N}"
+  elif [[ "$status" == *disabled* ]]; then
+    warn "armorclaude is installed but ${B}disabled${N} — enable it with: ${B}claude plugin enable armorclaude@armoriq${N}"
   else
-    warn "couldn't confirm armorclaude is enabled — run: ${B}claude plugin list${N}"
+    ok "armorclaude is enabled"
+  fi
+
+  if claude mcp list 2>/dev/null | grep -q "armorclaude-policy.*Connected"; then
+    ok "policy MCP server connected"
+  else
+    warn "policy MCP server not connected — run: ${B}claude mcp list${N}"
   fi
 }
 
