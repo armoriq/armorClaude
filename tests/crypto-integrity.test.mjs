@@ -87,9 +87,23 @@ test("loadConfig auto-enables cryptoPolicyEnabled when apiKey is set", () => {
   assert.equal(config.cryptoPolicyEnabled, true);
 });
 
-test("loadConfig: cryptoPolicyEnabled is tied to apiKey presence", () => {
+// cryptoPolicyEnabled follows the REAL api key, whereas config.apiKey falls back
+// to a local-mock placeholder so the SDK constructor accepts it. Comparing the
+// two directly only held on a machine that happened to have credentials in
+// ~/.armoriq/credentials.json; with none present the placeholder is truthy while
+// cryptoPolicyEnabled is correctly false.
+const LOCAL_MOCK_PLACEHOLDER_KEY = "ak_test_localmock000000000000";
+
+test("loadConfig: cryptoPolicyEnabled is tied to real apiKey presence", () => {
   const config = loadConfig({ ARMORIQ_ENV: "development" });
-  assert.equal(config.cryptoPolicyEnabled, Boolean(config.apiKey));
+  const usingPlaceholder = config.apiKey === LOCAL_MOCK_PLACEHOLDER_KEY;
+  assert.equal(config.cryptoPolicyEnabled, Boolean(config.apiKey) && !usingPlaceholder);
+});
+
+test("loadConfig: an explicit api key enables crypto policy", () => {
+  const config = loadConfig({ ARMORIQ_API_KEY: "ak_test_explicit0000000000000" });
+  assert.equal(config.apiKey, "ak_test_explicit0000000000000");
+  assert.equal(config.cryptoPolicyEnabled, true);
 });
 
 // This is the main branch, which config.mjs documents as production-hardcoded
