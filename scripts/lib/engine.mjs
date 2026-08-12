@@ -983,6 +983,40 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
+  // Check the registered plan BEFORE acquiring a token. The mint below sends
+  // toolName/toolInput to the backend, which builds a plan around them — so
+  // minting first meant an off-plan call replaced the registered plan and was
+  // then validated against a plan derived from itself. With an API key
+  // configured that made drift enforcement a no-op: a session whose plan
+  // declared only Read would happily run Bash, and runtime.json would show the
+  // Read step overwritten by the Bash call. Gate the mint instead.
+  if (!intentTokenRaw && config.apiKey && !allowAll && enforceIntent && shouldDeny(config)) {
+    if (isPlainObject(localPlan)) {
+      const preMintCheck = checkToolAgainstPlan({
+        plan: localPlan,
+        toolName,
+        toolInput,
+        strict: !!config.strictParamCheck,
+      });
+      if (!preMintCheck.allowed) {
+        return denyPreToolWithHint(preMintCheck.reason || "ArmorClaude intent drift", {
+          toolName,
+          toolInput,
+          goal: session.lastPrompt,
+          knownPlan: localPlan,
+        });
+      }
+    } else {
+      // Nothing registered for this session. Minting a plan from the tool call
+      // would rubber-stamp it, so require register_intent_plan instead.
+      return denyPreToolWithHint("ArmorClaude intent plan missing for this session", {
+        toolName,
+        toolInput,
+        goal: session.lastPrompt,
+      });
+    }
+  }
+
   // If no token, try to acquire one. Skipped entirely for all-allow: no token
   // is needed to run frictionless, and skipping avoids the backend round-trip
   // (and its billing/CSRG failure modes) on a policy that permits everything.
@@ -990,6 +1024,10 @@ export async function handlePreToolUse(input, config) {
     try {
       const intentResponse = await requestIntent(config, {
         prompt: session.lastPrompt || `Use tool ${toolName}`,
+        // Bind the token to the plan the user registered. Without this the
+        // backend synthesizes one from toolName/toolInput and the registered
+        // plan is silently replaced.
+        ...(isPlainObject(localPlan) ? { plan: localPlan } : {}),
         session_id: sessionId,
         toolName,
         toolInput,

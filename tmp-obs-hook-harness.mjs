@@ -91,9 +91,7 @@ function registerIntentPlan(plan) {
     };
     p.stdin.write(JSON.stringify(init) + "\n");
     setTimeout(() => {
-      p.stdin.write(
-        JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n"
-      );
+      p.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
       p.stdin.write(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -132,7 +130,19 @@ function killStaleDaemon() {
 function pg(sql) {
   const r = spawnSync(
     "docker",
-    ["exec", "pg-observability", "psql", "-U", "postgres", "-d", "conmap_local", "-t", "-A", "-c", sql],
+    [
+      "exec",
+      "pg-observability",
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      "conmap_local",
+      "-t",
+      "-A",
+      "-c",
+      sql,
+    ],
     { encoding: "utf8" }
   );
   return (r.stdout || "").trim();
@@ -150,23 +160,37 @@ const main = async () => {
   await fire("UserPromptSubmit", { prompt: "Read a file, then run a build command" });
 
   // Read is on the read-only allowlist — allowed without a plan; still emits obs.
-  console.log("preRead ", await fire("PreToolUse", { tool_name: "Read", tool_input: { file_path: "/tmp/x" } }));
-  await fire("PostToolUse", { tool_name: "Read", tool_input: { file_path: "/tmp/x" }, tool_response: { content: "hi" } });
+  console.log(
+    "preRead ",
+    await fire("PreToolUse", { tool_name: "Read", tool_input: { file_path: "/tmp/x" } })
+  );
+  await fire("PostToolUse", {
+    tool_name: "Read",
+    tool_input: { file_path: "/tmp/x" },
+    tool_response: { content: "hi" },
+  });
 
   // Bash BEFORE plan. NOTE: with an API key + local-mock backend, the engine
   // auto-mints a single-tool intent token at PreToolUse (engine.mjs:934) and the
   // mock backend allows it, so this is expected to ALLOW here. The enforcement
   // proof below is that register_intent_plan binds a REAL multi-step plan+token
   // to the session (runtime.json) and the gated tool remains allowed.
-  const bashPre1 = await fire("PreToolUse", { tool_name: "Bash", tool_input: { command: "npm run build" } });
+  const bashPre1 = await fire("PreToolUse", {
+    tool_name: "Bash",
+    tool_input: { command: "npm run build" },
+  });
   console.log("preBash1(auto-mint, expect allow in local-mock):", bashPre1 || "(allowed)");
 
   // --- Mid-session flush proof: end this turn's trace via Stop so it ships,
   // then check PG BEFORE SessionEnd. ---
   await fire("Stop", {});
   await new Promise((r) => setTimeout(r, 7000)); // > 5s shipper interval
-  const midCount = pg(`SELECT count(*) FROM obs_traces WHERE product='armorclaude' AND session_id='${SID}'`);
-  console.log(`[harness] MID-SESSION armorclaude traces for this session (before SessionEnd): ${midCount}`);
+  const midCount = pg(
+    `SELECT count(*) FROM obs_traces WHERE product='armorclaude' AND session_id='${SID}'`
+  );
+  console.log(
+    `[harness] MID-SESSION armorclaude traces for this session (before SessionEnd): ${midCount}`
+  );
 
   // Register the plan via the real MCP server. It resolves the active session
   // id from runtime.json (stamped by the engine) and writes pending-plan.<sid>.
@@ -177,12 +201,22 @@ const main = async () => {
       { action: "Bash", description: "run the build" },
     ],
   });
-  console.log("[harness] register_intent_plan result:", JSON.stringify(reg?.structuredContent || reg));
+  console.log(
+    "[harness] register_intent_plan result:",
+    JSON.stringify(reg?.structuredContent || reg)
+  );
 
   // Bash AFTER plan -> expect ALLOW (null output = allowed).
-  const bashPre2 = await fire("PreToolUse", { tool_name: "Bash", tool_input: { command: "npm run build" } });
+  const bashPre2 = await fire("PreToolUse", {
+    tool_name: "Bash",
+    tool_input: { command: "npm run build" },
+  });
   console.log("preBash2(expect ALLOW/null):", bashPre2 || "(allowed)");
-  await fire("PostToolUse", { tool_name: "Bash", tool_input: { command: "npm run build" }, tool_response: { code: 0 } });
+  await fire("PostToolUse", {
+    tool_name: "Bash",
+    tool_input: { command: "npm run build" },
+    tool_response: { code: 0 },
+  });
 
   // --- Enforcement assertion: runtime.json has the session WITH the registered
   // plan+token, checked BEFORE SessionEnd (SessionEnd GCs the session). ---
@@ -190,8 +224,11 @@ const main = async () => {
   const sess = rtBefore.sessions && rtBefore.sessions[SID];
   const hasSession = !!sess;
   const hasToken = !!(sess && sess.intentTokenRaw);
-  const planSteps = sess && sess.plan && Array.isArray(sess.plan.steps) ? sess.plan.steps.length : 0;
-  console.log(`\n[harness] BEFORE SessionEnd: session present=${hasSession} token bound=${hasToken} plan steps=${planSteps}`);
+  const planSteps =
+    sess && sess.plan && Array.isArray(sess.plan.steps) ? sess.plan.steps.length : 0;
+  console.log(
+    `\n[harness] BEFORE SessionEnd: session present=${hasSession} token bound=${hasToken} plan steps=${planSteps}`
+  );
   console.log(`[harness] runtime.activeSessionId=${rtBefore.activeSessionId}`);
 
   await fire("Stop", {});
@@ -200,7 +237,9 @@ const main = async () => {
   await new Promise((r) => setTimeout(r, 3000));
 
   // --- Final PG assertions ---
-  const finalCount = pg(`SELECT count(*) FROM obs_traces WHERE product='armorclaude' AND session_id='${SID}'`);
+  const finalCount = pg(
+    `SELECT count(*) FROM obs_traces WHERE product='armorclaude' AND session_id='${SID}'`
+  );
   console.log(`\n[harness] FINAL armorclaude traces for this session: ${finalCount}`);
   const traces = pg(
     `SELECT id||' | '||name||' | spans='||span_count FROM obs_traces WHERE product='armorclaude' AND session_id='${SID}' ORDER BY created_at`
