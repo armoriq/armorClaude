@@ -1507,3 +1507,30 @@ test("/armor policy sync without apiKey returns error", async () => {
   const out = await handleArmorPolicyCommand("/armor policy sync", config);
   assert.ok(out.includes("API key"));
 });
+
+// ---------------------------------------------------------------------------
+// Dashboard-sync warning on confirm
+// ---------------------------------------------------------------------------
+
+// With a backend configured, confirm pushes a staged PROPOSAL while SessionStart
+// pulls the dashboard's ACTIVE policy over the local one. The change therefore
+// enforces now and is reverted at the start of the next session unless someone
+// confirms it in the dashboard. "Policy updated to vN" alone reads as permanent.
+test("confirm warns that the dashboard will overwrite when a backend is configured", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = { ...buildConfig(tmp), apiKey: "ak_test_0000000000000000000" };
+  await handleArmorPolicyCommand("/armor policy add deny Write", config);
+  const out = await handleArmorPolicyCommand("/armor yes", config);
+  assert.ok(out.includes("Policy updated to v"), "still reports the version");
+  assert.match(out, /current session/i);
+  assert.match(out, /Policies → Confirm/);
+});
+
+test("confirm does not mention the dashboard in local-only mode", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
+  const config = buildConfig(tmp); // apiKey: "" — nothing syncs, local policy persists
+  await handleArmorPolicyCommand("/armor policy add deny Write", config);
+  const out = await handleArmorPolicyCommand("/armor yes", config);
+  assert.ok(out.includes("Policy updated to v"));
+  assert.ok(!/Policies → Confirm/.test(out), "no dashboard note without a backend");
+});
