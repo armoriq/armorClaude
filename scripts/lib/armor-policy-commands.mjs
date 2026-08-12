@@ -2438,11 +2438,21 @@ export async function handleArmorPolicyCommand(prompt, config) {
       // and armor commands run under a long-lived daemon that outlives this
       // call, so a detached promise flushes without blocking confirmation.
       // Matches the hasBackend() check in backend-client.mjs.
+      let dashboardNote = "";
       if (config.apiKey && config.backendEndpoint) {
         syncPolicyToBackend(config, nextState).catch(() => {});
+        // The push lands as a staged proposal, not the active org policy, while
+        // SessionStart pulls the dashboard's ACTIVE policy over the local one.
+        // So this change enforces now and is silently reverted at the start of
+        // the next session unless someone confirms it in the dashboard. Saying
+        // only "Policy updated" reads as permanent and it is not.
+        dashboardNote =
+          "\nThis applies to the current session. It was also sent to the dashboard as a" +
+          " proposal — confirm it there (Policies → Confirm) or the next session will pull the" +
+          " dashboard's active policy over it.";
       }
 
-      return `Policy updated to v${nextState.version}. ${pending.reason}${profileNote}${cryptoNote}`;
+      return `Policy updated to v${nextState.version}. ${pending.reason}${profileNote}${cryptoNote}${dashboardNote}`;
     }
 
     case "cancel": {
