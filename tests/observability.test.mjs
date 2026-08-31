@@ -234,6 +234,126 @@ test(
   }
 );
 
+const OBS_CONFIG = {
+  observabilityEnabled: true,
+  observabilityEndpoint: "http://localhost:8080",
+  observabilityProduct: "armorclaude",
+  apiKey: "ak_live_test0000000000000000000000000000",
+  sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
+};
+
+test(
+  "UserPromptSubmit starting with a slash records a slash.command span",
+  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
+  async () => {
+    __resetObsForTests();
+    const events = [];
+    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    const sid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    await observeHook(
+      "UserPromptSubmit",
+      { session_id: sid, prompt: "/deploy staging now" },
+      null,
+      OBS_CONFIG
+    );
+    await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
+    armoriqSdk.__setObservabilitySinkForTests(null);
+    const slash = events.find((e) => e.kind === "span_recorded" && e.span.name === "slash.command");
+    assert.ok(slash, "slash.command span recorded");
+    assert.equal(slash.span.attributes.slashCommand, "/deploy");
+  }
+);
+
+test(
+  "a plain (non-slash) prompt records no slash.command span",
+  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
+  async () => {
+    __resetObsForTests();
+    const events = [];
+    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    const sid = " effff-ffff"; // not used as UUID here; prompt is what matters
+    await observeHook(
+      "UserPromptSubmit",
+      { session_id: "ffffffff-ffff-4fff-8fff-ffffffffffff", prompt: "just find acme" },
+      null,
+      OBS_CONFIG
+    );
+    await observeHook(
+      "SessionEnd",
+      { session_id: "ffffffff-ffff-4fff-8fff-ffffffffffff" },
+      null,
+      OBS_CONFIG
+    );
+    armoriqSdk.__setObservabilitySinkForTests(null);
+    void sid;
+    const slash = events.find((e) => e.kind === "span_recorded" && e.span.name === "slash.command");
+    assert.equal(slash, undefined, "no slash.command span for a plain prompt");
+  }
+);
+
+test(
+  "SessionStart records an armorclaude.connected event on its own trace",
+  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
+  async () => {
+    __resetObsForTests();
+    const events = [];
+    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    const sid = "12121212-1212-4121-8121-121212121212";
+    await observeHook("SessionStart", { session_id: sid }, null, OBS_CONFIG);
+    armoriqSdk.__setObservabilitySinkForTests(null);
+    const connect = events.find(
+      (e) => e.kind === "span_recorded" && e.span.name === "armorclaude.connected"
+    );
+    assert.ok(connect, "armorclaude.connected span recorded");
+    assert.equal(connect.span.attributes.operationCategory, "connect");
+    const started = events.find(
+      (e) => e.kind === "trace_started" && e.trace.name === "armorclaude.session"
+    );
+    assert.ok(started, "armorclaude.session trace started");
+    const ended = events.find(
+      (e) => e.kind === "trace_ended" && e.trace.name === "armorclaude.session"
+    );
+    assert.ok(ended, "armorclaude.session trace ended (ships independently)");
+  }
+);
+
+test(
+  "tool.report tags operationCategory tool vs mcp",
+  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
+  async () => {
+    __resetObsForTests();
+    const events = [];
+    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    const sid = "13131313-1313-4131-8131-131313131313";
+    await observeHook("UserPromptSubmit", { session_id: sid, prompt: "go" }, null, OBS_CONFIG);
+    await observeHook(
+      "PostToolUse",
+      { session_id: sid, tool_name: "Read", tool_input: {}, tool_response: {} },
+      null,
+      OBS_CONFIG
+    );
+    await observeHook(
+      "PostToolUse",
+      {
+        session_id: sid,
+        tool_name: "mcp__github__create_issue",
+        tool_input: {},
+        tool_response: {},
+      },
+      null,
+      OBS_CONFIG
+    );
+    await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
+    armoriqSdk.__setObservabilitySinkForTests(null);
+    const reports = events.filter(
+      (e) => e.kind === "span_recorded" && e.span.name === "tool.report"
+    );
+    const cats = reports.map((r) => r.span.attributes.operationCategory);
+    assert.ok(cats.includes("tool"), "plain tool tagged 'tool'");
+    assert.ok(cats.includes("mcp"), "mcp__ tool tagged 'mcp'");
+  }
+);
+
 // Regression: dashboard TAGS/OUTPUT columns are derived by the SDK at
 // endTrace() time from the trace's own policy_call spans — armorClaude
 // doesn't need its own tally, but the derivation must actually fire for a
