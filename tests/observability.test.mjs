@@ -31,6 +31,18 @@ import { observeHook } from "../scripts/lib/observability.mjs";
 
 const SDK_HAS_SPANS = typeof armoriqSdk.openSpan === "function";
 
+test("installed SDK provides every required observability export", () => {
+  for (const name of [
+    "ObservabilityRecorder",
+    "startTrace",
+    "openSpan",
+    "flushObservability",
+    "isValidUuid",
+  ]) {
+    assert.equal(typeof armoriqSdk[name], "function", `Missing required SDK export: ${name}`);
+  }
+});
+
 test(
   "observeHook builds a nested iap.plan trace per turn",
   { skip: !SDK_HAS_SPANS && "SDK <0.6.3 (no openSpan export)" },
