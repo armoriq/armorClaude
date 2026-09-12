@@ -205,16 +205,24 @@ function obsReport(sessionId, config, toolName, toolInput, toolResponse, status)
   });
 }
 
-// Extract a leading slash command from a user prompt: "/deploy staging" ->
-// "/deploy". Returns null when the prompt is not a slash command. Bounded so a
-// pathological prompt can't produce an unbounded label.
-function extractSlashCommand(prompt) {
-  if (typeof prompt !== "string") return null;
-  const trimmed = prompt.trimStart();
-  if (!trimmed.startsWith("/") || trimmed.startsWith("//")) return null;
-  const token = trimmed.split(/\s/, 1)[0];
-  if (token.length <= 1 || token.length > 80) return null;
-  return token;
+// Only structured expansion events confirm command activity. Keep the label
+// bounded and reject arguments rather than treating arbitrary prompt text as
+// execution evidence.
+function expandedSlashCommand(input) {
+  if (input.expansion_type !== "slash_command" || typeof input.command_name !== "string") {
+    return null;
+  }
+  const name = input.command_name.trim();
+  const command = name.startsWith("/") ? name : `/${name}`;
+  if (
+    command.length <= 1 ||
+    command.length > 80 ||
+    command.startsWith("//") ||
+    /\s/.test(command)
+  ) {
+    return null;
+  }
+  return command;
 }
 
 // Record a slash-command invocation as a span on the current turn's trace, so
@@ -306,7 +314,10 @@ export async function observeHook(event, input, output, config) {
       case "UserPromptSubmit": {
         const prompt = typeof input.prompt === "string" ? input.prompt : "";
         obsStartPlan(sessionId, config, prompt);
-        const slash = extractSlashCommand(prompt);
+        break;
+      }
+      case "UserPromptExpansion": {
+        const slash = expandedSlashCommand(input);
         if (slash) obsSlashCommand(sessionId, config, slash);
         break;
       }

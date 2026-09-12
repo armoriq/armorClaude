@@ -255,7 +255,7 @@ const OBS_CONFIG = {
 };
 
 test(
-  "UserPromptSubmit starting with a slash records a slash.command span",
+  "UserPromptSubmit starting with a slash is not command execution evidence",
   { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
   async () => {
     __resetObsForTests();
@@ -271,10 +271,87 @@ test(
     await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
     armoriqSdk.__setObservabilitySinkForTests(null);
     const slash = events.find((e) => e.kind === "span_recorded" && e.span.name === "slash.command");
-    assert.ok(slash, "slash.command span recorded");
-    assert.equal(slash.span.attributes.slashCommand, "/deploy");
+    assert.equal(slash, undefined, "raw prompt text does not confirm command expansion");
   }
 );
+
+test("confirmed slash command expansions normalize command names without arguments", async () => {
+  for (const [commandName, expected] of [
+    ["deploy", "/deploy"],
+    [" /armorclaude:armor ", "/armorclaude:armor"],
+    ["a".repeat(79), "/" + "a".repeat(79)],
+  ]) {
+    __resetObsForTests();
+    const events = [];
+    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    const sid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    try {
+      await observeHook(
+        "UserPromptSubmit",
+        { session_id: sid, prompt: "/unconfirmed" },
+        null,
+        OBS_CONFIG
+      );
+      await observeHook(
+        "UserPromptExpansion",
+        {
+          session_id: sid,
+          expansion_type: "slash_command",
+          command_name: commandName,
+          command_args: "private argument text",
+        },
+        null,
+        OBS_CONFIG
+      );
+    } finally {
+      await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
+      armoriqSdk.__setObservabilitySinkForTests(null);
+    }
+    const spans = events.filter(
+      (e) => e.kind === "span_recorded" && e.span.name === "slash.command"
+    );
+    assert.equal(spans.length, 1, "only the confirmed expansion emits command activity");
+    assert.deepEqual(spans[0].span.attributes, {
+      kind: "span",
+      operationCategory: "command",
+      slashCommand: expected,
+    });
+  }
+});
+
+test("slash command evidence ignores other expansions and malformed command names", async () => {
+  __resetObsForTests();
+  const events = [];
+  armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+  const sid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  try {
+    for (const input of [
+      { expansion_type: "skill", command_name: "deploy" },
+      { command_name: "deploy" },
+      ...[
+        undefined,
+        null,
+        42,
+        "",
+        " ",
+        "/",
+        "//deploy",
+        "deploy staging",
+        "deploy\nsecret",
+        "a".repeat(80),
+      ].map((command_name) => ({ expansion_type: "slash_command", command_name })),
+    ]) {
+      await observeHook("UserPromptExpansion", { session_id: sid, ...input }, null, OBS_CONFIG);
+    }
+  } finally {
+    await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
+    armoriqSdk.__setObservabilitySinkForTests(null);
+  }
+  assert.equal(
+    events.filter((e) => e.kind === "span_recorded" && e.span.name === "slash.command").length,
+    0
+  );
+});
 
 test(
   "a plain (non-slash) prompt records no slash.command span",
