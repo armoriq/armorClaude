@@ -190,11 +190,84 @@ function obsReport(sessionId, config, toolName, toolInput, toolResponse, status)
       name: "tool.report",
       attributes: {
         toolName: toolName || null,
+        // Distinguishes an MCP tool call (`mcp__server__tool`) from a plain
+        // tool so the dashboard can bucket a session's MCP activity separately.
+        // The `tool.report` span is the EXECUTION record — the earlier
+        // `iap.check` span carries the same toolName but is the policy
+        // pre-check, so aggregations count executions here, not there.
+        operationCategory:
+          typeof toolName === "string" && toolName.startsWith("mcp__") ? "mcp" : "tool",
         input: sanitizeParams(toolInput, config.sanitize),
         output: redactSecrets(sanitizeParams(toolResponse, config.sanitize)),
       },
     });
     closeSpan(entry.recorder, ctx, spanId, { status: status || "ok" });
+  });
+}
+
+// Only structured expansion events confirm command activity. Keep the label
+// bounded and reject arguments rather than treating arbitrary prompt text as
+// execution evidence.
+function expandedSlashCommand(input) {
+  if (input.expansion_type !== "slash_command" || typeof input.command_name !== "string") {
+    return null;
+  }
+  const name = input.command_name.trim();
+  const command = name.startsWith("/") ? name : `/${name}`;
+  if (
+    command.length <= 1 ||
+    command.length > 80 ||
+    command.startsWith("//") ||
+    /\s/.test(command)
+  ) {
+    return null;
+  }
+  return command;
+}
+
+// Record a slash-command invocation as a span on the current turn's trace, so
+// the dashboard session view can show which slash commands a session ran. The
+// `slashCommand` attribute is what the backend session-activity rollup reads.
+function obsSlashCommand(sessionId, config, command) {
+  const entry = getOrInitRecorder(sessionId, config);
+  const ctx = ensureTrace(entry, sessionId);
+  if (!ctx) return;
+  safeObs(() => {
+    const spanId = openSpan(entry.recorder, ctx, {
+      name: "slash.command",
+      attributes: { operationCategory: "command", slashCommand: command },
+    });
+    closeSpan(entry.recorder, ctx, spanId, { status: "ok" });
+  });
+}
+
+// Record that ArmorClaude connected to this Claude Code session. Emitted once,
+// on SessionStart, as its own short-lived trace so it ships independently of
+// any turn. This is the "ArmorClaude is connected to Claude" signal the
+// dashboard uses to show active plugin sessions.
+function obsConnected(sessionId, config) {
+  const entry = getOrInitRecorder(sessionId, config);
+  safeObs(() => {
+    const sid = isValidUuid && isValidUuid(sessionId) ? sessionId : null;
+    const ctx = startTrace(
+      entry.recorder,
+      "armorclaude.session",
+      { source: "claude-code", event: "connected" },
+      sid
+    );
+    const spanId = openSpan(entry.recorder, ctx, {
+      name: "armorclaude.connected",
+      attributes: {
+        kind: "event",
+        level: "info",
+        message: "ArmorClaude connected to Claude Code",
+        operationCategory: "connect",
+        product: config.observabilityProduct || config.productSlug || "armorclaude",
+        llmId: config.llmId || "claude-code",
+      },
+    });
+    closeSpan(entry.recorder, ctx, spanId, { status: "ok" });
+    endTrace(entry.recorder, ctx, { status: "ok" });
   });
 }
 
@@ -234,9 +307,20 @@ export async function observeHook(event, input, output, config) {
   if (!sessionId) return;
   await safeObsAsync(async () => {
     switch (event) {
-      case "UserPromptSubmit":
-        obsStartPlan(sessionId, config, typeof input.prompt === "string" ? input.prompt : "");
+      case "SessionStart":
+        // "ArmorClaude connected to Claude" — one connect record per session.
+        obsConnected(sessionId, config);
         break;
+      case "UserPromptSubmit": {
+        const prompt = typeof input.prompt === "string" ? input.prompt : "";
+        obsStartPlan(sessionId, config, prompt);
+        break;
+      }
+      case "UserPromptExpansion": {
+        const slash = expandedSlashCommand(input);
+        if (slash) obsSlashCommand(sessionId, config, slash);
+        break;
+      }
       case "PreToolUse":
         obsCheck(
           sessionId,
