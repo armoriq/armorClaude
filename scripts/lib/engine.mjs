@@ -9,9 +9,11 @@ import {
   addPromptContext,
   armorReply,
   askPreTool,
+  allowWithNotice,
   blockPrompt,
   denyPreTool,
   denyPreToolWithHint,
+  isBillingError,
 } from "./hook-output.mjs";
 import {
   isArmorPolicyCommand,
@@ -35,6 +37,7 @@ import {
 import { createIapService, reanchorViaSdk, revokeViaSdk } from "./iap-service.mjs";
 import armoriqSdk from "@armoriq/sdk";
 import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
+import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
 import { readJson } from "./fs-store.mjs";
@@ -64,6 +67,27 @@ const INTENT_POLICY_COMPILER_VERSION = "sdk-csrg-policy-v1";
 
 function shouldDeny(config) {
   return config.mode === "enforce";
+}
+
+/**
+ * True when the active policy permits everything with no friction — default
+ * decision "allow" and every statement is a plain permit (no deny/forbid,
+ * no require_approval). This is the "All Allow" template the user picks at
+ * onboarding when they want ArmorClaude out of the way.
+ *
+ * When true, we treat intent as NOT required: no register_intent_plan gate,
+ * no token needed, no drift blocking. The user asked for everything allowed —
+ * so tools just run, exactly like Claude Code without the plugin. (balanced /
+ * strict / lockdown all have a deny or require_approval statement, so they do
+ * NOT qualify and keep full enforcement.)
+ */
+function isFrictionlessAllowPolicy(policy) {
+  try {
+    const ir = normalizePolicyIr(policy);
+    return ir.defaults.decision === "allow" && ir.statements.every((s) => s.effect === "permit");
+  } catch {
+    return false;
+  }
 }
 
 function legacyArmorPolicyMessage() {
@@ -555,8 +579,18 @@ export async function handleUserPromptSubmit(input, config) {
   // Claude will call the `register_intent_plan` MCP tool (or include a JSON
   // block in its plan file) as its first action. This uses the session's own
   // LLM — no separate API key or extra LLM call needed.
+  //
+  // Only inject this when intent is ACTUALLY enforced. Under an all-allow
+  // (frictionless) policy, handlePreToolUse does not gate tool calls, so
+  // telling Claude "enforcement is active" and "tools will be blocked" is
+  // false — and it makes Claude report a missing `register_intent_plan` tool
+  // and proceed unguarded when the policy MCP isn't surfaced. Keep this gate
+  // consistent with handlePreToolUse's enforceIntent computation.
+  const policyState = await loadPolicyState(config.policyFile);
+  const allowAll = isFrictionlessAllowPolicy(policyState.policy);
+  const enforceIntent = config.intentRequired && !allowAll;
   const parts = [];
-  if (config.planningEnabled) {
+  if (config.planningEnabled && enforceIntent) {
     parts.push(
       "ArmorClaude intent enforcement is active. Before using any tool, " +
         "declare your plan in this exact JSON shape:\n\n" +
@@ -565,8 +599,14 @@ export async function handleUserPromptSubmit(input, config) {
         "How to submit:\n" +
         "- If in plan mode: include the JSON block (fenced with ```json) " +
         "at the end of your plan file.\n" +
-        "- Otherwise: call `register_intent_plan` with the JSON as the " +
+        "- Otherwise: call the register_intent_plan tool (provided by the " +
+        "armorclaude-policy MCP server; it may appear namespaced, e.g. " +
+        "mcp__armorclaude-policy__register_intent_plan) with the JSON as the " +
         "argument BEFORE any other tool call.\n" +
+        "If that tool is not in your tool list, the ArmorClaude policy MCP " +
+        "server is not connected: do not fabricate the call, and tell the " +
+        "user to verify it with `claude mcp list` (expect armorclaude-policy " +
+        "Connected) before relying on enforcement.\n" +
         "Tool calls without a registered plan will be blocked."
     );
   }
@@ -850,6 +890,11 @@ export async function handlePreToolUse(input, config) {
   // --- Static policy evaluation ---
   const policyState = await loadPolicyState(config.policyFile);
   const currentPolicyHash = computePolicyHash(policyState.policy);
+  // "All Allow" onboarding policy => run frictionless: no intent-plan gate, no
+  // token required, no drift blocking. Any policy with a deny/require_approval
+  // keeps full enforcement.
+  const allowAll = isFrictionlessAllowPolicy(policyState.policy);
+  const enforceIntent = config.intentRequired && !allowAll;
 
   // Crypto policy digest check (Phase 4 integration point)
   if (config.cryptoPolicyEnabled) {
@@ -904,6 +949,13 @@ export async function handlePreToolUse(input, config) {
   let localExpiresAt = session.expiresAt;
   let remoteAllowed = false;
   let tokenCheckMatched = false;
+  // Set when the backend billing/subscription gate (402) makes the remote
+  // layer (intent tokens, CSRG proofs, dashboard audit) unavailable. It does
+  // NOT relax local policy — deny/hold/allow are still enforced from the
+  // configured policy; it only drops the remote-token requirement so a free
+  // user isn't blocked with a cryptic "intent plan missing".
+  let billingDegraded = false;
+  let billingNotice = "";
   let usedStepIndices =
     intentTokenRaw && localPlan
       ? getSessionTokenUsedStepIndices(session, intentTokenRaw)
@@ -952,11 +1004,51 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // If no token, try to acquire one
-  if (!intentTokenRaw && config.apiKey) {
+  // Check the registered plan BEFORE acquiring a token. The mint below sends
+  // toolName/toolInput to the backend, which builds a plan around them — so
+  // minting first meant an off-plan call replaced the registered plan and was
+  // then validated against a plan derived from itself. With an API key
+  // configured that made drift enforcement a no-op: a session whose plan
+  // declared only Read would happily run Bash, and runtime.json would show the
+  // Read step overwritten by the Bash call. Gate the mint instead.
+  if (!intentTokenRaw && config.apiKey && !allowAll && enforceIntent && shouldDeny(config)) {
+    if (isPlainObject(localPlan)) {
+      const preMintCheck = checkToolAgainstPlan({
+        plan: localPlan,
+        toolName,
+        toolInput,
+        strict: !!config.strictParamCheck,
+      });
+      if (!preMintCheck.allowed) {
+        return denyPreToolWithHint(preMintCheck.reason || "ArmorClaude intent drift", {
+          toolName,
+          toolInput,
+          goal: session.lastPrompt,
+          knownPlan: localPlan,
+        });
+      }
+    } else {
+      // Nothing registered for this session. Minting a plan from the tool call
+      // would rubber-stamp it, so require register_intent_plan instead.
+      return denyPreToolWithHint("ArmorClaude intent plan missing for this session", {
+        toolName,
+        toolInput,
+        goal: session.lastPrompt,
+      });
+    }
+  }
+
+  // If no token, try to acquire one. Skipped entirely for all-allow: no token
+  // is needed to run frictionless, and skipping avoids the backend round-trip
+  // (and its billing/CSRG failure modes) on a policy that permits everything.
+  if (!intentTokenRaw && config.apiKey && !allowAll) {
     try {
       const intentResponse = await requestIntent(config, {
         prompt: session.lastPrompt || `Use tool ${toolName}`,
+        // Bind the token to the plan the user registered. Without this the
+        // backend synthesizes one from toolName/toolInput and the registered
+        // plan is silently replaced.
+        ...(isPlainObject(localPlan) ? { plan: localPlan } : {}),
         session_id: sessionId,
         toolName,
         toolInput,
@@ -981,7 +1073,29 @@ export async function handlePreToolUse(input, config) {
           : undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (config.intentRequired && shouldDeny(config)) {
+      // A billing/subscription 402 only means the REMOTE layer is unavailable —
+      // it is NOT a policy decision. The configured policy is still enforced
+      // locally: a deny already returned above (policyDecision), and hold/allow
+      // are handled below. So don't hard-block (cryptic) and don't blanket-allow
+      // (that would ignore deny/hold) — degrade the remote layer, fall through,
+      // and nudge to upgrade once per session.
+      if (isBillingError(message)) {
+        billingDegraded = true;
+        debugLog(
+          config,
+          `billing gate: remote layer degraded, local policy still enforced: ${message}`
+        );
+        if (!session.billingNoticeShown) {
+          upsertSession(runtimeState, sessionId, { billingNoticeShown: true });
+          const upgradeUrl =
+            config.upgradeUrl ||
+            process.env.ARMORCLAUDE_UPGRADE_URL ||
+            "https://tools.armoriq.ai/tools/billing";
+          billingNotice =
+            `⚠ ArmorIQ Pro required for remote audit & CSRG proofs. Your policy is ` +
+            `still enforced locally (allow / deny / hold). Upgrade: ${upgradeUrl}`;
+        }
+      } else if (enforceIntent && shouldDeny(config)) {
         return denyPreTool(`ArmorClaude intent planning failed: ${message}`);
       }
     }
@@ -996,7 +1110,7 @@ export async function handlePreToolUse(input, config) {
     });
     if (tokenCheck.matched) {
       tokenCheckMatched = true;
-      if (tokenCheck.blockReason) {
+      if (tokenCheck.blockReason && !allowAll) {
         return denyOrAllow(config, tokenCheck.blockReason);
       }
       localPlan = tokenCheck.plan || localPlan;
@@ -1094,7 +1208,7 @@ export async function handlePreToolUse(input, config) {
     } else {
       // Phase 4 A3: include the exact register_intent_plan JSON in the deny
       // reason so the LLM auto-corrects in 1 follow-up turn.
-      if (shouldDeny(config)) {
+      if (shouldDeny(config) && !allowAll) {
         return denyPreToolWithHint(localCheck.reason || "ArmorClaude intent drift", {
           toolName,
           toolInput,
@@ -1106,7 +1220,15 @@ export async function handlePreToolUse(input, config) {
   }
 
   // --- Enforce intent requirement ---
-  if (config.intentRequired && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
+  // billingDegraded relaxes ONLY the remote-token requirement — local policy
+  // (deny/hold/allow) was already applied above and still governs the outcome.
+  if (
+    enforceIntent &&
+    !billingDegraded &&
+    !remoteAllowed &&
+    !tokenCheckMatched &&
+    !localPlanMatched
+  ) {
     if (shouldDeny(config)) {
       return denyPreToolWithHint("ArmorClaude intent plan missing for this session", {
         toolName,
@@ -1127,12 +1249,15 @@ export async function handlePreToolUse(input, config) {
     return askPreTool(mcpApprovalReason);
   }
   if (requiresUserApproval) {
-    return askPreTool(
+    const askReason =
       policyDecision.reason ||
-        `ArmorClaude policy requires your approval before running ${toolName}.`
-    );
+      `ArmorClaude policy requires your approval before running ${toolName}.`;
+    const ask = askPreTool(billingNotice ? `${askReason}\n\n${billingNotice}` : askReason);
+    if (billingNotice) ask.systemMessage = billingNotice;
+    return ask;
   }
-  return null;
+  // Allowed. Surface the one-time upgrade nudge if we degraded the remote layer.
+  return billingNotice ? allowWithNotice(billingNotice) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,41 +1355,67 @@ export async function handlePostToolUse(input, config) {
     const iapService = createIapService(config);
 
     const intentTokenRaw = session.intentTokenRaw || "";
-    if (!intentTokenRaw) return null;
-    let token = intentTokenRaw;
-    // Extract JWT if embedded in JSON envelope
-    if (intentTokenRaw.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(intentTokenRaw);
-        token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch {
-        /* use raw */
-      }
-    }
-
-    // Compute the real step index from the registered plan so the backend's
-    // updateExecutionProgress can advance plan status to 'completed'.
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs);
 
-    const dto = {
-      token,
-      step_index: stepIdx,
-      action: toolName,
-      tool: toolName,
-      input: redactSecrets(inputs),
-      output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
-      status: "success",
-      executed_at: new Date().toISOString(),
-      duration_ms: 0,
-    };
+    let dto;
+    if (intentTokenRaw) {
+      let token = intentTokenRaw;
+      // Extract JWT if embedded in JSON envelope
+      if (intentTokenRaw.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(intentTokenRaw);
+          token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
+        } catch {
+          /* use raw */
+        }
+      }
+      // Compute the real step index from the registered plan so the backend's
+      // updateExecutionProgress can advance plan status to 'completed'.
+      const stepIdx = pickStepIndex(session.plan, toolName, inputs);
+      dto = {
+        token,
+        step_index: stepIdx,
+        action: toolName,
+        tool: toolName,
+        input: redactSecrets(inputs),
+        output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
+        status: "success",
+        executed_at: new Date().toISOString(),
+        duration_ms: 0,
+      };
+    } else {
+      // No intent token. Under an all-allow (frictionless) policy this is
+      // expected — no plan is registered, so no token is minted (see
+      // isFrictionlessAllowPolicy). But the action should still be recorded,
+      // otherwise the audit trail goes silent whenever enforcement is off
+      // (#116). Emit a session-scoped row: no token, attributed via explicit
+      // identity; the backend stores it as an orphan row (planId null). In
+      // enforce mode a missing token is not a valid audit context, so we do
+      // NOT fabricate one — keep returning null there.
+      const policyState = await loadPolicyState(config.policyFile);
+      if (!isFrictionlessAllowPolicy(policyState.policy)) return null;
+      dto = {
+        session_id: sessionId,
+        user_id: config.userId,
+        agent_id: config.agentId,
+        client_id: config.mcpName || config.llmId,
+        step_index: -1,
+        action: toolName,
+        tool: toolName,
+        input: redactSecrets(inputs),
+        output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
+        status: "success",
+        executed_at: new Date().toISOString(),
+        duration_ms: 0,
+      };
+    }
 
     // Phase 4 A4 (via Tier B): if daemon is enabled, enqueue the audit DTO
     // for fire-and-forget batched flush. This actually delivers the
     // latency win — without daemon, we still need to await the POST because
     // the hook process can't exit while a socket is open.
     const target = await emitAudit({ dto, config, iapService });
-    debugLog(config, `audit log ${target} for ${toolName} step=${stepIdx}`);
+    debugLog(config, `audit log ${target} for ${toolName}`);
   } catch (error) {
     // Audit is best-effort — don't block
     debugLog(config, `audit log failed: ${error}`);

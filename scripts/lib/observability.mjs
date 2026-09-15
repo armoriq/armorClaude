@@ -106,7 +106,9 @@ function startPlanTrace(entry, sessionId, attrs) {
 
 function ensureTrace(entry, sessionId) {
   if (entry.traceCtx) return entry.traceCtx;
-  return safeObs(() => startPlanTrace(entry, sessionId, { source: "claude-code", lazy: true })) ?? null;
+  return (
+    safeObs(() => startPlanTrace(entry, sessionId, { source: "claude-code", lazy: true })) ?? null
+  );
 }
 
 function classifyDecision(output) {
@@ -147,7 +149,8 @@ function obsCheck(sessionId, config, toolName, toolInput, output) {
     const decision = classifyDecision(output);
     const status = decision === "deny" ? "denied" : "ok";
     const reason =
-      (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) || null;
+      (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
+      null;
     const checkSpanId = openSpan(entry.recorder, ctx, {
       name: "iap.check",
       attributes: { toolName },
@@ -247,7 +250,14 @@ export async function observeHook(event, input, output, config) {
         obsReport(sessionId, config, input.tool_name, input.tool_input, input.tool_response, "ok");
         break;
       case "PostToolUseFailure":
-        obsReport(sessionId, config, input.tool_name, input.tool_input, input.tool_response, "error");
+        obsReport(
+          sessionId,
+          config,
+          input.tool_name,
+          input.tool_input,
+          input.tool_response,
+          "error"
+        );
         break;
       case "Stop":
         // Turn boundary: end the active trace so it ships mid-session via the

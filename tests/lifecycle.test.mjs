@@ -19,6 +19,7 @@ import {
   saveRuntimeState,
   getTrustOps,
 } from "../scripts/lib/runtime-state.mjs";
+import { savePolicyState } from "../scripts/lib/policy.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
   return {
@@ -157,6 +158,93 @@ test("handlePostToolUse sends audit when enabled", async () => {
     assert.equal(output, null);
     assert.equal(capturedPayload.action, "Read");
     assert.equal(capturedPayload.status, "success");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("handlePostToolUse records a session-scoped audit in all-allow mode (no token)", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  // No policy file written → loadPolicyState defaults to all-allow, and no
+  // intent token is seeded on the session. Pre-#116 this returned null (silent
+  // audit trail whenever enforcement is off); now it emits a session-scoped row.
+  const config = buildConfig(tmp, {
+    auditEnabled: true,
+    apiKey: "test-key",
+    userId: "u1",
+    agentId: "a1",
+    mcpName: "claude-code",
+  });
+
+  const originalFetch = globalThis.fetch;
+  let capturedPayload;
+  let capturedUrl;
+  globalThis.fetch = async (url, options) => {
+    capturedUrl = String(url);
+    capturedPayload = JSON.parse(options.body);
+    return new Response(JSON.stringify({ audit_id: "a2", iap_sync_status: "ok" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const output = await handlePostToolUse(
+      {
+        hook_event_name: "PostToolUse",
+        session_id: "sess-aa",
+        tool_name: "Read",
+        tool_input: { file_path: "x.txt" },
+        tool_response: { content: "hi" },
+      },
+      config
+    );
+    assert.equal(output, null);
+    assert.ok(capturedUrl.endsWith("/iap/audit"), `posted to ${capturedUrl}`);
+    assert.equal(capturedPayload.action, "Read");
+    assert.equal(capturedPayload.status, "success");
+    assert.equal(capturedPayload.token, undefined, "all-allow row carries no token");
+    assert.equal(capturedPayload.session_id, "sess-aa");
+    assert.equal(capturedPayload.user_id, "u1");
+    assert.equal(capturedPayload.agent_id, "a1");
+    assert.equal(capturedPayload.step_index, -1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("handlePostToolUse still skips audit with no token when NOT all-allow (enforce)", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
+  const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
+  // Seed a non-all-allow policy: a deny statement disqualifies frictionless mode.
+  await savePolicyState(config.policyFile, {
+    version: 1,
+    policy: {
+      schemaVersion: "armor.policy.v1",
+      defaults: { decision: "allow" },
+      statements: [{ id: "deny-bash", effect: "forbid", action: { type: "tool", eq: "Bash" } }],
+    },
+  });
+
+  const originalFetch = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const output = await handlePostToolUse(
+      {
+        hook_event_name: "PostToolUse",
+        session_id: "sess-enforce",
+        tool_name: "Read",
+        tool_input: { file_path: "x.txt" },
+        tool_response: { content: "hi" },
+      },
+      config
+    );
+    assert.equal(output, null);
+    assert.equal(called, false, "must not fabricate an audit row without a token in enforce mode");
   } finally {
     globalThis.fetch = originalFetch;
   }

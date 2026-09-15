@@ -10,6 +10,7 @@ import {
   deleteProfile,
   seedBuiltinProfiles,
 } from "../scripts/lib/policy-profiles.mjs";
+import { POLICY_TEMPLATES } from "../scripts/lib/policy-templates.mjs";
 import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.mjs";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
 
@@ -65,17 +66,18 @@ async function seedPolicy(config, rules = []) {
 // Low-level profile CRUD
 // ---------------------------------------------------------------------------
 
-test("seedBuiltinProfiles creates 4 template profiles", async () => {
+test("seedBuiltinProfiles creates one profile per template", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "profiles-test-"));
   const config = buildConfig(tmp);
   await seedBuiltinProfiles(config);
   const files = await readdir(path.join(tmp, "profiles"));
-  const jsonFiles = files.filter((f) => f.endsWith(".json"));
-  assert.equal(jsonFiles.length, 4);
-  assert.ok(jsonFiles.includes("balanced.json"));
-  assert.ok(jsonFiles.includes("lockdown.json"));
-  assert.ok(jsonFiles.includes("all-allow.json"));
-  assert.ok(jsonFiles.includes("strict-read-only.json"));
+  const jsonFiles = files.filter((f) => f.endsWith(".json")).sort();
+  // Derived from POLICY_TEMPLATES so adding a template does not silently break
+  // this test the way a hard-coded count did.
+  const expected = Object.keys(POLICY_TEMPLATES)
+    .map((name) => `${name}.json`)
+    .sort();
+  assert.deepEqual(jsonFiles, expected);
 });
 
 test("seedBuiltinProfiles does not overwrite existing profiles", async () => {
@@ -96,9 +98,8 @@ test("listProfiles returns all profiles including builtins", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "profiles-test-"));
   const config = buildConfig(tmp);
   const profiles = await listProfiles(config);
-  assert.equal(profiles.length, 4);
   const names = profiles.map((p) => p.profile.name).sort();
-  assert.deepEqual(names, ["all-allow", "balanced", "lockdown", "strict-read-only"]);
+  assert.deepEqual(names, Object.keys(POLICY_TEMPLATES).sort());
 });
 
 test("saveProfile creates a new user profile", async () => {
