@@ -164,7 +164,9 @@ export function loadConfig(env = process.env) {
     //   activeSessions shows the real count on the dashboard.
     csrgVerifyEnabled: localMock,
     requireCsrgProofs: false,
-    cryptoPolicyEnabled: Boolean(effectiveApiKey),
+    // Crypto policy requires a caller-owned credential. The local-mock
+    // placeholder only satisfies the SDK constructor; it is not a real key.
+    cryptoPolicyEnabled: Boolean(apiKey),
     strictParamCheck: false, // advisory — LLM params are predictions
     policyUpdateEnabled: true,
     policyUpdateAllowList: ["*"],
