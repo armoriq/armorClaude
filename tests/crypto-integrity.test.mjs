@@ -81,7 +81,7 @@ function startMockCsrg(handler) {
 
 test("loadConfig auto-enables cryptoPolicyEnabled when apiKey is set", () => {
   const config = loadConfig({
-    CLAUDE_PLUGIN_OPTION_API_KEY: "test-key-1234567890",
+    CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_1234567890",
     ARMORIQ_ENV: "development",
   });
   assert.equal(config.cryptoPolicyEnabled, true);
