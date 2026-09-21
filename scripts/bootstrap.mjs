@@ -32,16 +32,24 @@ function installedOk() {
 
 if (!installedOk()) {
   process.stderr.write("[armorclaude] installing dependencies (one-time)...\n");
+  // On Windows the npm launcher is npm.cmd, which Node cannot spawn without a
+  // shell — spawnSync("npm", …) fails with ENOENT and status null. Run through
+  // a shell there so the .cmd launcher resolves.
+  const isWindows = process.platform === "win32";
   const result = spawnSync(
     "npm",
     ["install", "--omit=dev", "--ignore-scripts", "--silent", "--no-audit", "--no-fund"],
     {
       cwd: pluginRoot,
       stdio: ["ignore", "ignore", "inherit"],
+      shell: isWindows,
     }
   );
   if (result.status !== 0) {
-    process.stderr.write("[armorclaude] npm install failed (exit " + result.status + ")\n");
+    const detail = result.error ? ": " + result.error.message : "";
+    process.stderr.write(
+      "[armorclaude] npm install failed (exit " + result.status + ")" + detail + "\n"
+    );
     process.exit(1);
   }
   try {
@@ -53,7 +61,13 @@ if (!installedOk()) {
 }
 
 const target = process.argv[2];
-if (target === "router") {
+if (target === "warm") {
+  // Dependencies are installed above; nothing else to do. The installer calls
+  // this so the first MCP connect doesn't have to wait on `npm install` — that
+  // wait exceeds Claude Code's handshake timeout and surfaces as
+  // "MCP error -32000: Connection closed".
+  process.exit(0);
+} else if (target === "router") {
   await import("./hook-router.mjs");
 } else if (target === "mcp") {
   await import("./policy-mcp.mjs");
