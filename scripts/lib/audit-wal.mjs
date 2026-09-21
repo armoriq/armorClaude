@@ -117,7 +117,7 @@ export function createAuditWal(opts) {
 
       rows.sort(compareForOrder);
       const stripped = rows.map((row) => {
-        // eslint-disable-next-line no-unused-vars -- destructured to strip these fields from `rest`
+        // eslint-disable-next-line no-unused-vars
         const { _seq, _enqueuedAt, ...rest } = row;
         return rest;
       });

@@ -29,6 +29,9 @@ function buildEnv(dataDir) {
     ARMORCLAUDE_DEBUG: "false",
     ARMORCLAUDE_USE_SDK_INTENT: "false",
     ARMORIQ_API_KEY: "",
+    // Preempt any developer-machine credentials file, then exercise the
+    // unconfigured path deterministically after loadConfig drops this value.
+    CLAUDE_PLUGIN_OPTION_API_KEY: "invalid-test-key",
   };
 }
 
@@ -127,8 +130,9 @@ test("daemon: SessionStart returns context output", async () => {
       },
       config,
     });
-    assert.ok(output?.hookSpecificOutput?.additionalContext);
-    assert.match(output.hookSpecificOutput.additionalContext, /ArmorClaude active/i);
+    const context = output?.hookSpecificOutput?.additionalContext || "";
+    assert.match(context, /ArmorClaude installed but NOT connected/i);
+    assert.match(context, /MONITOR mode/i);
   } finally {
     await killDaemon(child, dataDir);
   }

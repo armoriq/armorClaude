@@ -141,7 +141,9 @@ test("handlePreToolUse asks before running an unknown external MCP tool", async 
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "ask");
   assert.ok(output?.hookSpecificOutput?.permissionDecisionReason?.includes("not approved"));
-  assert.ok(output?.hookSpecificOutput?.permissionDecisionReason?.includes("/armor mcp approve"));
+  assert.ok(
+    output?.hookSpecificOutput?.permissionDecisionReason?.includes("/armorclaude:armor mcp approve")
+  );
 });
 
 test("handlePreToolUse denies explicitly denied MCP server", async () => {

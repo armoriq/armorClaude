@@ -5,6 +5,7 @@ import { readJson, writeJson } from "./fs-store.mjs";
 import { loadPolicyState, savePolicyState } from "./policy.mjs";
 import { canonicalPolicyHash, normalizePolicyIr, validatePolicyIr } from "./policy-ir.mjs";
 import { getTemplate, getTemplateNames } from "./policy-templates.mjs";
+import { mergePolicies } from "./policy-merge.mjs";
 import { listProfiles, loadProfile, saveProfile, deleteProfile } from "./policy-profiles.mjs";
 import { listMcpServers, setMcpServerStatus } from "./tool-registry.mjs";
 import { loadRuntimeState, saveRuntimeState } from "./runtime-state.mjs";
@@ -17,6 +18,10 @@ import {
 const PENDING_FILE = "policy-pending.json";
 const DRAFTS_FILE = "policy-drafts.json";
 const PROPOSAL_TTL_MS = 30 * 60 * 1000;
+// Safe profile/template slug: lowercase alphanumeric, hyphen-separated.
+// Rejects path separators and "." so a template name can never traverse
+// outside the profiles directory (e.g. "../foo", "a/b").
+const SAFE_PROFILE_NAME = /^[a-z0-9][a-z0-9-]*$/;
 const KNOWN_CLAUDE_TOOLS = new Set([
   "*",
   "Agent",
@@ -484,10 +489,10 @@ function formatProposal(pending, currentPolicy, proposedPolicy, title = "Propose
     ),
     "",
     "Next:",
-    `  /armor yes                         apply ${pending.proposalId}`,
-    `  /armor no                          discard ${pending.proposalId}`,
-    `  /armor policy confirm ${pending.proposalId}`,
-    `  /armor policy cancel ${pending.proposalId}`,
+    `  /armorclaude:armor yes                         apply ${pending.proposalId}`,
+    `  /armorclaude:armor no                          discard ${pending.proposalId}`,
+    `  /armorclaude:armor policy confirm ${pending.proposalId}`,
+    `  /armorclaude:armor policy cancel ${pending.proposalId}`,
   ].join("\n");
 }
 
@@ -517,9 +522,9 @@ function formatDraft(draft) {
     JSON.stringify(draft.policy, null, 2),
     "",
     "Next:",
-    `  /armor policy stage ${draft.draftId}`,
-    `  /armor policy revise ${draft.draftId} "clarify what should change"`,
-    "  /armor no",
+    `  /armorclaude:armor policy stage ${draft.draftId}`,
+    `  /armorclaude:armor policy revise ${draft.draftId} "clarify what should change"`,
+    "  /armorclaude:armor no",
   ]
     .filter((line) => line !== "")
     .join("\n");
@@ -549,8 +554,8 @@ function formatDraftRevision({ original, revised, removedIds, note }) {
     JSON.stringify(revised.policy, null, 2),
     "",
     "Next:",
-    `  /armor policy stage ${revised.draftId}`,
-    `  /armor policy revise ${revised.draftId} "clarify what should change"`,
+    `  /armorclaude:armor policy stage ${revised.draftId}`,
+    `  /armorclaude:armor policy revise ${revised.draftId} "clarify what should change"`,
   ]
     .filter((line) => line !== "")
     .join("\n");
@@ -814,10 +819,10 @@ function reviseDraftPolicy(draft, instruction) {
       error: [
         "Could not revise that draft deterministically.",
         "Supported revise examples:",
-        `  /armor policy revise ${draft.draftId} "block gcloud and psql in Bash"`,
-        `  /armor policy revise ${draft.draftId} "remove <statement-id>"`,
-        `  /armor policy revise ${draft.draftId} "allow Explore"`,
-        `  /armor policy revise ${draft.draftId} "default hold"`,
+        `  /armorclaude:armor policy revise ${draft.draftId} "block gcloud and psql in Bash"`,
+        `  /armorclaude:armor policy revise ${draft.draftId} "remove <statement-id>"`,
+        `  /armorclaude:armor policy revise ${draft.draftId} "allow Explore"`,
+        `  /armorclaude:armor policy revise ${draft.draftId} "default hold"`,
       ].join("\n"),
     };
   }
@@ -1845,8 +1850,16 @@ function parseCommand(prompt) {
   const removeMatch = rest.match(/^remove\s+(\S+)/i);
   if (removeMatch) return { cmd: "remove", id: removeMatch[1] };
 
-  const templateMatch = rest.match(/^template\s+(\S+)/i);
-  if (templateMatch) return { cmd: "template", name: templateMatch[1] };
+  // Accepts one or more bundle names (comma- or space-separated). Multiple
+  // bundles are merged (most-restrictive-wins) into a single policy.
+  const templateMatch = rest.match(/^template\s+(.+)/i);
+  if (templateMatch) {
+    const names = templateMatch[1]
+      .split(/[\s,]+/)
+      .map((n) => n.trim())
+      .filter(Boolean);
+    return { cmd: "template", names, name: names[0] };
+  }
 
   if (lower.startsWith("mcp ")) return parseMcpCommand(rest.slice(4).trim());
   if (lower.startsWith("profile ")) return parseProfileCommand(rest.slice(8).trim());
@@ -1905,7 +1918,7 @@ function normalizeToolLabel(raw) {
 function splitToolList(rawTools) {
   return rawTools
     .replace(/\b(to use|using|for|tools?|commands?)\b/gi, " ")
-    .split(/\s*(?:,|\band\b|&|\+)\s*/i)
+    .split(/\s*(?:,|\band\b|[&+])\s*/i)
     .map(normalizeToolLabel)
     .filter(Boolean);
 }
@@ -1941,7 +1954,7 @@ function looksComplexNaturalLanguage(text) {
     /["']|only allow|should|policy should|save (this )?as|port access|port checks|file access|file tools|read\/write|network access|internal domains|safe commands|admin tools|except|bash but not|default allow|default deny|default hold|default ask|allow all bash|through bash|using bash|curl|psql|gcloud|kubectl|aws|az/.test(
       lower
     ) &&
-    !/^add\s+(allow|deny|hold|require_approval)\s+(read|grep|glob|write|edit|multiedit|bash|webfetch|websearch|explore|agent|skill|toolsearch|lsp|notebookedit|notebookread|powershell|workflow)(\s*(,|\band\b|&|\+)\s*(read|grep|glob|write|edit|multiedit|bash|webfetch|websearch|explore|agent|skill|toolsearch|lsp|notebookedit|notebookread|powershell|workflow))*$/i.test(
+    !/^add\s+(allow|deny|hold|require_approval)\s+(read|grep|glob|write|edit|multiedit|bash|webfetch|websearch|explore|agent|skill|toolsearch|lsp|notebookedit|notebookread|powershell|workflow)(\s*(,|\band\b|[&+])\s*(read|grep|glob|write|edit|multiedit|bash|webfetch|websearch|explore|agent|skill|toolsearch|lsp|notebookedit|notebookread|powershell|workflow))*$/i.test(
       text
     ) &&
     (phraseMentionsBashProgram(text) ||
@@ -1976,35 +1989,36 @@ function helpText() {
   return [
     "ArmorClaude Policy Commands:",
     "",
-    "  /armor                              — show this help",
-    "  /armor policy list                  — show current rules",
-    "  /armor policy view                  — show active policy JSON",
-    "  /armor policy default <allow|deny|hold> — stage unmatched-tool default",
-    "  /armor policy add allow Read and Grep, deny Write, hold Bash",
-    "  /armor policy stage <draft-id|json> — stage validated draft or JSON",
-    '  /armor policy revise <draft-id> "remove <statement-id>"',
-    "  /armor policy draft edit <draft-id> <json> — replace draft JSON after validation",
-    "  /armor policy draft validate <json> — validate pasted policy JSON as a new draft",
-    "  /armor policy rebind                 — reissue crypto binding for current policy",
-    "  /armor policy remove <rule-id>       — propose removing a rule",
-    "  /armor policy reset                  — propose clearing all rules",
-    "  /armor policy template <name>        — propose applying a template",
-    "  /armor policy confirm [proposal-id]  — apply staged change",
-    "  /armor policy cancel [proposal-id]   — discard staged change",
-    "  /armor yes                           — apply current staged change",
-    "  /armor no                            — discard current staged change",
-    "  /armor policy export                 — dump policy as JSON",
+    "  /armorclaude:armor                              — show this help",
+    "  /armorclaude:armor policy list                  — show current rules",
+    "  /armorclaude:armor policy view                  — show active policy JSON",
+    "  /armorclaude:armor policy default <allow|deny|hold> — stage unmatched-tool default",
+    "  /armorclaude:armor policy add allow Read and Grep, deny Write, hold Bash",
+    "  /armorclaude:armor policy stage <draft-id|json> — stage validated draft or JSON",
+    '  /armorclaude:armor policy revise <draft-id> "remove <statement-id>"',
+    "  /armorclaude:armor policy draft edit <draft-id> <json> — replace draft JSON after validation",
+    "  /armorclaude:armor policy draft validate <json> — validate pasted policy JSON as a new draft",
+    "  /armorclaude:armor policy rebind                 — reissue crypto binding for current policy",
+    "  /armorclaude:armor policy remove <rule-id>       — propose removing a rule",
+    "  /armorclaude:armor policy reset                  — propose clearing all rules",
+    "  /armorclaude:armor policy template <name...>     — apply one template, or merge several (most-restrictive)",
+    "  /armorclaude:armor policy confirm [proposal-id]  — apply staged change",
+    "  /armorclaude:armor policy cancel [proposal-id]   — discard staged change",
+    "  /armorclaude:armor yes                           — apply current staged change",
+    "  /armorclaude:armor no                            — discard current staged change",
+    "  /armorclaude:armor policy export                 — dump policy as JSON",
+    "  /armorclaude:armor policy sync                   — push active policy to the dashboard (requires backend API key configured)",
     "",
-    "  /armor mcp list                     — show detected MCPs",
-    "  /armor mcp approve <server>         — approve an MCP server",
-    "  /armor mcp deny <server>            — deny an MCP server",
+    "  /armorclaude:armor mcp list                     — show detected MCPs",
+    "  /armorclaude:armor mcp approve <server>         — approve an MCP server",
+    "  /armorclaude:armor mcp deny <server>            — deny an MCP server",
     "",
-    "  /armor profile save <name>          — save current policy as profile",
-    "  /armor profile list                 — show saved profiles",
-    "  /armor profile switch <name>        — switch to a saved profile",
-    "  /armor profile delete <name>        — delete a profile",
+    "  /armorclaude:armor profile save <name>          — save current policy as profile",
+    "  /armorclaude:armor profile list                 — show saved profiles",
+    "  /armorclaude:armor profile switch <name>        — switch to a saved profile",
+    "  /armorclaude:armor profile delete <name>        — delete a profile",
     "",
-    "  Use /armor only; legacy /armor-policy is intentionally unsupported.",
+    "  Use /armorclaude:armor only; legacy /armor-policy is intentionally unsupported.",
     `  Templates: ${getTemplateNames().join(", ")}`,
   ].join("\n");
 }
@@ -2024,15 +2038,15 @@ export async function handleArmorPolicyCommand(prompt, config) {
     case "parse-error":
       return [
         "Could not parse that policy request, so no policy was staged.",
-        "Try: /armor policy add allow Read and Grep, deny Write, hold Bash",
+        "Try: /armorclaude:armor policy add allow Read and Grep, deny Write, hold Bash",
       ].join("\n");
 
     case "default-error":
       return [
         "Unknown default decision. No policy was staged.",
-        "Use: /armor policy default allow",
-        "Use: /armor policy default deny",
-        "Use: /armor policy default hold",
+        "Use: /armorclaude:armor policy default allow",
+        "Use: /armorclaude:armor policy default deny",
+        "Use: /armorclaude:armor policy default hold",
       ].join("\n");
 
     case "draft-complex": {
@@ -2167,7 +2181,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
         return [
           `Policy v${state.version}: no rules configured.`,
           defaultDecisionText(state.policy),
-          "Use /armor policy add, /armor policy default, or /armor policy template to get started.",
+          "Use /armorclaude:armor policy add, /armorclaude:armor policy default, or /armorclaude:armor policy template to get started.",
         ].join("\n");
       }
       return [
@@ -2278,35 +2292,86 @@ export async function handleArmorPolicyCommand(prompt, config) {
         formatPolicyReviewDiff(state.policy, proposedPolicy),
         "",
         "Next:",
-        `  /armor yes                         apply ${pending.proposalId}`,
-        `  /armor no                          discard ${pending.proposalId}`,
-        `  /armor policy confirm ${pending.proposalId}`,
-        `  /armor policy cancel ${pending.proposalId}`,
+        `  /armorclaude:armor yes                         apply ${pending.proposalId}`,
+        `  /armorclaude:armor no                          discard ${pending.proposalId}`,
+        `  /armorclaude:armor policy confirm ${pending.proposalId}`,
+        `  /armorclaude:armor policy cancel ${pending.proposalId}`,
       ].join("\n");
     }
 
     case "template": {
-      const tmpl = getTemplate(parsed.name);
-      if (!tmpl) {
-        return `Unknown template: ${parsed.name}\nAvailable: ${getTemplateNames().join(", ")}`;
+      const names = parsed.names?.length ? parsed.names : [parsed.name].filter(Boolean);
+
+      // Resolve each requested bundle to a template. Falls back to a seeded
+      // builtin profile on disk so new bundles work without a daemon version
+      // bump. Only builtins are eligible, and the name must be a safe slug so we
+      // never resolve a path outside the profiles directory.
+      const resolve = async (nm) => {
+        let tmpl = getTemplate(nm);
+        if (!tmpl && SAFE_PROFILE_NAME.test(nm)) {
+          const seeded = await loadProfile(config, nm);
+          if (seeded?.policy && seeded.profile?.createdBy === "builtin") {
+            tmpl = {
+              name: seeded.profile?.name ?? nm,
+              description: seeded.profile?.description ?? "",
+              policy: seeded.policy,
+            };
+          }
+        }
+        return tmpl;
+      };
+
+      const resolved = [];
+      const unknown = [];
+      for (const nm of names) {
+        const tmpl = await resolve(nm);
+        if (tmpl) resolved.push(tmpl);
+        else unknown.push(nm);
       }
+
+      if (unknown.length) {
+        const seededNames = (await listProfiles(config))
+          .filter((p) => p.profile?.createdBy === "builtin")
+          .map((p) => p.profile?.name)
+          .filter(Boolean);
+        const allNames = [...new Set([...getTemplateNames(), ...seededNames])];
+        return `Unknown template${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}\nAvailable: ${allNames.join(", ")}`;
+      }
+      if (!resolved.length) {
+        return `No template specified. Available: ${getTemplateNames().join(", ")}`;
+      }
+
       const state = await loadPolicyState(config.policyFile);
-      const proposedPolicy = normalizePolicyIr(tmpl.policy);
-      const pending = await stagePending(config, state, proposedPolicy, `template ${parsed.name}`, {
+      let proposedPolicy;
+      let summary;
+      let reason;
+      if (resolved.length === 1) {
+        proposedPolicy = normalizePolicyIr(resolved[0].policy);
+        summary = `Proposed: apply template "${resolved[0].name}" — ${resolved[0].description}`;
+        reason = `template ${resolved[0].name}`;
+      } else {
+        const picked = resolved.map((t) => t.name).join(", ");
+        proposedPolicy = mergePolicies(
+          resolved.map((t) => t.policy),
+          {
+            name: "custom-merged",
+            description: `Most-restrictive merge of: ${picked}`,
+          }
+        );
+        summary = `Proposed: merge ${resolved.length} bundles (most-restrictive) — ${picked}`;
+        reason = `template merge ${resolved.map((t) => t.name).join("+")}`;
+      }
+
+      const pending = await stagePending(config, state, proposedPolicy, reason, {
         type: "deterministic",
       });
-      return formatProposal(
-        pending,
-        state.policy,
-        proposedPolicy,
-        `Proposed: apply template "${tmpl.name}" — ${tmpl.description}`
-      );
+      return formatProposal(pending, state.policy, proposedPolicy, summary);
     }
 
     case "confirm": {
       const pending = await readJson(pendingPath(config), null);
       if (!pending)
-        return "Nothing staged. Use /armor policy add, remove, reset, or template first.";
+        return "Nothing staged. Use /armorclaude:armor policy add, remove, reset, or template first.";
       const state = await loadPolicyState(config.policyFile);
       if (pending.proposalId && parsed.proposalId && parsed.proposalId !== pending.proposalId) {
         return `Proposal not found: ${parsed.proposalId}. Current staged proposal is ${pending.proposalId}.`;
@@ -2353,7 +2418,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
           return [
             `Policy updated to v${nextState.version}. ${pending.reason}`,
             "Crypto policy token issuance failed, so the cached token was cleared.",
-            "Active policy is now empty default-deny; tool execution will fail closed until /armor policy rebind succeeds.",
+            "Active policy is now empty default-deny; tool execution will fail closed until /armorclaude:armor policy rebind succeeds.",
             `Reason: ${cryptoResult.error}`,
           ].join("\n");
         }
@@ -2368,17 +2433,26 @@ export async function handleArmorPolicyCommand(prompt, config) {
       }
       await clearPending(config);
 
-      // OPA mode: push compiled bundle to backend
-      if (config.enforcementEngine === "opa" && config.apiKey) {
-        try {
-          const { syncPolicy: syncToBackend } = await import("./backend-client.mjs");
-          await syncToBackend(config, nextState);
-        } catch {
-          // fire-and-forget — local policy is authoritative
-        }
+      // Push policy to backend for all engines (local is the default) when a
+      // backend is configured. Fire-and-forget: local policy is authoritative,
+      // and armor commands run under a long-lived daemon that outlives this
+      // call, so a detached promise flushes without blocking confirmation.
+      // Matches the hasBackend() check in backend-client.mjs.
+      let dashboardNote = "";
+      if (config.apiKey && config.backendEndpoint) {
+        syncPolicyToBackend(config, nextState).catch(() => {});
+        // The push lands as a staged proposal, not the active org policy, while
+        // SessionStart pulls the dashboard's ACTIVE policy over the local one.
+        // So this change enforces now and is silently reverted at the start of
+        // the next session unless someone confirms it in the dashboard. Saying
+        // only "Policy updated" reads as permanent and it is not.
+        dashboardNote =
+          "\nThis applies to the current session. It was also sent to the dashboard as a" +
+          " proposal — confirm it there (Policies → Confirm) or the next session will pull the" +
+          " dashboard's active policy over it.";
       }
 
-      return `Policy updated to v${nextState.version}. ${pending.reason}${profileNote}${cryptoNote}`;
+      return `Policy updated to v${nextState.version}. ${pending.reason}${profileNote}${cryptoNote}${dashboardNote}`;
     }
 
     case "cancel": {
@@ -2471,7 +2545,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
       const result = await pushProfileToBackend(config, profile);
       if (!result.ok)
         return `Failed to push profile "${parsed.name}": ${result.reason || `HTTP ${result.status}`}`;
-      return `Profile "${parsed.name}" pushed to organization.`;
+      return `Profile "${parsed.name}" staged as a proposal for your organization. Confirm it in the dashboard (Policies → Confirm) to activate.`;
     }
 
     case "profile-pull": {
@@ -2499,7 +2573,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
           `  OPA PDP URL: ${config.opaPdpUrl || "(not set)"}`,
           `  MCP deny-by-default: ${config.mcpDenyByDefault !== false ? "on" : "off"}`,
           "",
-          "  /armor settings enforcement <local|opa>  — switch enforcement engine",
+          "  /armorclaude:armor settings enforcement <local|opa>  — switch enforcement engine",
         ].join("\n");
       }
       const enfMatch = settingsRest.match(/^enforcement\s+(local|opa)$/);
@@ -2513,7 +2587,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
           `Note: Set ARMORCLAUDE_ENFORCEMENT_ENGINE=${engine} in your environment to persist.`
         );
       }
-      return "Unknown setting. Use: /armor settings enforcement <local|opa>";
+      return "Unknown setting. Use: /armorclaude:armor settings enforcement <local|opa>";
     }
 
     case "sync": {
@@ -2522,12 +2596,81 @@ export async function handleArmorPolicyCommand(prompt, config) {
       const state = await loadPolicyState(config.policyFile);
       const result = await syncPolicyToBackend(config, state);
       if (!result.ok) return `Sync failed: ${result.reason || `HTTP ${result.status}`}`;
-      return `Policy v${state.version} synced to backend.`;
+      return `Policy v${state.version} staged as a proposal on the backend. Confirm it in the dashboard (Policies → Confirm) to activate.`;
     }
 
     default:
       return helpText();
   }
+}
+
+/**
+ * Dashboard-authoritative sync: pull the org's CONFIRMED active policy from the
+ * backend and make it the local enforced policy. Called on session start.
+ *
+ * Fail-safe by construction: on ANY problem (no api key, network error, invalid
+ * remote policy, or crypto policy-token issuance failure) the local policy is
+ * left untouched — a failed pull never wipes or loosens enforcement. No-op when
+ * the remote policy already matches the local one.
+ *
+ * Returns { ok, changed, version?, reason? }.
+ */
+export async function syncActivePolicyFromBackend(config) {
+  if (!config.apiKey) return { ok: false, changed: false, reason: "no api key" };
+
+  const result = await pullProfilesFromBackend(config);
+  if (!result.ok)
+    return { ok: false, changed: false, reason: result.reason || `HTTP ${result.status}` };
+
+  const active = result.profiles.find((p) => p?.policy);
+  if (!active?.policy) return { ok: false, changed: false, reason: "no active org policy" };
+
+  const validated = validatePolicyIr(normalizePolicyIr(active.policy));
+  if (!validated.ok)
+    return {
+      ok: false,
+      changed: false,
+      reason: `invalid remote policy: ${validated.errors.join("; ")}`,
+    };
+  const remotePolicy = validated.policy;
+
+  const state = await loadPolicyState(config.policyFile);
+  if (canonicalPolicyHash(state.policy) === canonicalPolicyHash(remotePolicy)) {
+    return { ok: true, changed: false };
+  }
+
+  const now = new Date().toISOString();
+  const nextState = {
+    version: state.version + 1,
+    updatedAt: now,
+    updatedBy: "dashboard-sync",
+    policy: remotePolicy,
+    history: [
+      ...state.history,
+      {
+        version: state.version + 1,
+        updatedAt: now,
+        updatedBy: "dashboard-sync",
+        reason: "pulled confirmed org policy from dashboard",
+        policy: remotePolicy,
+      },
+    ],
+  };
+
+  // Re-issue the crypto policy token for the new policy, exactly like confirm.
+  // If issuance fails, do NOT overwrite local policy — keep enforcing the
+  // current one rather than switch to a policy we can't back with a token.
+  const cryptoResult = await issueCryptoPolicyTokenForState(config, nextState);
+  if (!cryptoResult.ok) {
+    return {
+      ok: false,
+      changed: false,
+      reason: `crypto token issuance failed: ${cryptoResult.error}`,
+    };
+  }
+
+  await savePolicyState(config.policyFile, nextState);
+  return { ok: true, changed: true, version: nextState.version };
 }
 
 async function stagePending(

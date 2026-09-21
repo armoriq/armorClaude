@@ -81,17 +81,33 @@ function startMockCsrg(handler) {
 
 test("loadConfig auto-enables cryptoPolicyEnabled when apiKey is set", () => {
   const config = loadConfig({
-    CLAUDE_PLUGIN_OPTION_API_KEY: "test-key-1234567890",
+    CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_1234567890",
     ARMORIQ_ENV: "development",
   });
   assert.equal(config.cryptoPolicyEnabled, true);
 });
 
-test("loadConfig: cryptoPolicyEnabled is tied to apiKey presence", () => {
+// cryptoPolicyEnabled follows the REAL api key, whereas config.apiKey falls back
+// to a local-mock placeholder so the SDK constructor accepts it. Comparing the
+// two directly only held on a machine that happened to have credentials in
+// ~/.armoriq/credentials.json; with none present the placeholder is truthy while
+// cryptoPolicyEnabled is correctly false.
+const LOCAL_MOCK_PLACEHOLDER_KEY = "ak_test_localmock000000000000";
+
+test("loadConfig: cryptoPolicyEnabled is tied to real apiKey presence", () => {
   const config = loadConfig({ ARMORIQ_ENV: "development" });
-  assert.equal(config.cryptoPolicyEnabled, Boolean(config.apiKey));
+  const usingPlaceholder = config.apiKey === LOCAL_MOCK_PLACEHOLDER_KEY;
+  assert.equal(config.cryptoPolicyEnabled, Boolean(config.apiKey) && !usingPlaceholder);
 });
 
+test("loadConfig: an explicit api key enables crypto policy", () => {
+  const config = loadConfig({ ARMORIQ_API_KEY: "ak_test_explicit0000000000000" });
+  assert.equal(config.apiKey, "ak_test_explicit0000000000000");
+  assert.equal(config.cryptoPolicyEnabled, true);
+});
+
+// This is the dev branch, which config.mjs documents as staging-default.
+// The production default belongs to the main branch.
 test("loadConfig: dev branch defaults to staging endpoints", () => {
   const config = loadConfig({});
   assert.equal(config.armoriqEnv, "staging");
@@ -218,7 +234,7 @@ test("reset confirm applies empty default-deny fail-closed when crypto token iss
     const out = await handleArmorPolicyCommand("/armor yes", config);
     assert.ok(out.includes("Policy updated"));
     assert.ok(out.includes("fail closed"));
-    assert.ok(out.includes("/armor policy rebind"));
+    assert.ok(out.includes("/armorclaude:armor policy rebind"));
 
     const policyState = await readJson(config.policyFile, null);
     assert.equal(policyState.version, 2);
@@ -344,7 +360,10 @@ test("confirm does not attempt crypto when cryptoPolicyEnabled is false", async 
 test("confirm pushes to backend in OPA mode", async () => {
   let syncCalled = false;
   const { server, url } = await startMockCsrg((req, res) => {
-    if (req.url?.includes("/policies/sync")) syncCalled = true;
+    // syncPolicy() proposes through /policies/profiles/draft + /propose. It
+    // stopped using /policies/sync when terminal policy changes became staged
+    // proposals, so matching the old path never fired.
+    if (req.url?.includes("/policies/profiles/")) syncCalled = true;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
   });
@@ -359,6 +378,11 @@ test("confirm pushes to backend in OPA mode", async () => {
 
     await handleArmorPolicyCommand("/armor policy add deny Bash", config);
     await handleArmorPolicyCommand("/armor policy confirm", config);
+    // The push is deliberately fire-and-forget so confirmation is not blocked
+    // on the network, so poll rather than asserting on the next tick.
+    for (let i = 0; i < 50 && !syncCalled; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     assert.ok(syncCalled, "Backend should have been called for OPA sync");
   } finally {
     server.close();

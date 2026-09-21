@@ -135,17 +135,10 @@ test("autoRegisterMcp sends POST to /mcp/auto-register", async () => {
   }
 });
 
-test("pullProfiles parses backend response", async () => {
-  const mockProfiles = [
-    {
-      profile: { name: "org-lockdown", description: "Org lockdown" },
-      version: 1,
-      policy: { rules: [] },
-    },
-  ];
+test("pullProfiles reads the active org policy", async () => {
   const { server, url } = await startMockServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ profiles: mockProfiles }));
+    res.end(JSON.stringify({ version: 2, policy: { rules: [] } }));
   });
   try {
     const result = await pullProfiles({
@@ -155,26 +148,26 @@ test("pullProfiles parses backend response", async () => {
     });
     assert.equal(result.ok, true);
     assert.equal(result.profiles.length, 1);
-    assert.equal(result.profiles[0].profile.name, "org-lockdown");
+    assert.equal(result.profiles[0].profile.name, "active");
   } finally {
     server.close();
   }
 });
 
-test("syncPolicy sends policy state to /policies/sync", async () => {
-  let receivedBody = null;
+test("syncPolicy stages a draft then a proposal", async () => {
+  const hits = [];
   const { server, url } = await startMockServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
-      receivedBody = JSON.parse(body);
+      hits.push({ method: req.method, path: req.url, body: body ? JSON.parse(body) : null });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
     });
   });
   try {
     const result = await syncPolicy(
-      { apiKey: "test-key", backendEndpoint: url, timeoutMs: 5000 },
+      { apiKey: "test-key", backendEndpoint: url, timeoutMs: 5000, orgId: "org-1" },
       {
         version: 3,
         policy: { rules: [{ id: "p1", action: "deny", tool: "Bash" }] },
@@ -182,8 +175,14 @@ test("syncPolicy sends policy state to /policies/sync", async () => {
       }
     );
     assert.equal(result.ok, true);
-    assert.equal(receivedBody.version, 3);
-    assert.equal(receivedBody.source, "armorclaude");
+    assert.equal(hits.length, 2);
+    assert.equal(hits[0].method, "PUT");
+    assert.ok(hits[0].path.endsWith("/policies/profiles/draft"));
+    assert.deepEqual(hits[0].body.policy, {
+      rules: [{ id: "p1", action: "deny", tool: "Bash" }],
+    });
+    assert.equal(hits[1].method, "POST");
+    assert.ok(hits[1].path.endsWith("/policies/profiles/propose"));
   } finally {
     server.close();
   }
@@ -228,30 +227,28 @@ test("/armor policy profile push with apiKey sends to backend", async () => {
     await saveProfile(config, "my-profile", "test", [{ id: "p1", action: "allow", tool: "*" }]);
     const out = await handleArmorPolicyCommand("/armor policy profile push my-profile", config);
     assert.ok(received, "Backend should have received the request");
-    assert.ok(out.includes("pushed"));
+    assert.ok(out.includes("proposal"));
   } finally {
     server.close();
   }
 });
 
 test("/armor policy profile pull with apiKey saves profiles locally", async () => {
-  const mockProfiles = [
-    {
-      profile: { name: "from-org", description: "Org profile" },
-      version: 1,
-      policy: { rules: [{ id: "o1", action: "deny", tool: "Bash" }] },
-    },
-  ];
   const { server, url } = await startMockServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ profiles: mockProfiles }));
+    res.end(
+      JSON.stringify({
+        version: 1,
+        policy: { rules: [{ id: "o1", action: "deny", tool: "Bash" }] },
+      })
+    );
   });
   try {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
     const config = buildConfig(tmp, { apiKey: "test-key", backendEndpoint: url });
     const out = await handleArmorPolicyCommand("/armor policy profile pull", config);
     assert.ok(out.includes("Pulled 1"));
-    const local = await loadProfile(config, "from-org");
+    const local = await loadProfile(config, "active");
     assert.ok(local);
     assert.equal(local.policy.rules, undefined);
     assert.equal(local.rules, undefined);
@@ -274,7 +271,7 @@ test("/armor policy sync with apiKey sends to backend", async () => {
     await seedPolicy(config, [{ id: "p1", action: "deny", tool: "Bash" }]);
     const out = await handleArmorPolicyCommand("/armor policy sync", config);
     assert.ok(received);
-    assert.ok(out.includes("synced"));
+    assert.ok(out.includes("staged"));
   } finally {
     server.close();
   }
