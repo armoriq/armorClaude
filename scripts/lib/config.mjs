@@ -36,8 +36,8 @@ function normalizeArmoriqEnv(value) {
  * production API by accident.
  *
  * ARMORIQ_ENV:
- *   staging/default -> staging-api.armoriq.ai + iap-staging.armoriq.ai
- *   production/prod -> api.armoriq.ai + iap.armoriq.ai
+ *   production/default -> api.armoriq.ai + iap.armoriq.ai
+ *   staging/stage -> staging-api.armoriq.ai + iap-staging.armoriq.ai
  *   development/local/test -> local URLs, overridable for local stacks only
  */
 export function loadConfig(env = process.env) {
@@ -54,7 +54,7 @@ export function loadConfig(env = process.env) {
   // File-based flag avoids shell env var gymnastics on Windows.
   // Delete ~/.armoriq/local-mode to restore production mode.
   const localModeFile = path.join(homedir(), ".armoriq", "local-mode");
-  const requestedEnv = normalizeArmoriqEnv(env.ARMORIQ_ENV) || "staging";
+  const requestedEnv = normalizeArmoriqEnv(env.ARMORIQ_ENV) || "production";
   const localMock =
     parseBoolean(env.ARMORIQ_LOCAL_MOCK, false) ||
     existsSync(localModeFile) ||

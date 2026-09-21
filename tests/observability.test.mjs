@@ -26,7 +26,7 @@ test("__resetObsForTests exists and is callable", () => {
   assert.ok(true);
 });
 
-import armoriqSdk from "@armoriq/sdk-dev";
+import armoriqSdk from "@armoriq/sdk";
 import { observeHook } from "../scripts/lib/observability.mjs";
 
 const SDK_HAS_SPANS = typeof armoriqSdk.openSpan === "function";

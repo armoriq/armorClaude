@@ -1,4 +1,4 @@
-import armoriqSdk from "@armoriq/sdk-dev";
+import armoriqSdk from "@armoriq/sdk";
 import {
   isPlainObject,
   isSubsetValue,

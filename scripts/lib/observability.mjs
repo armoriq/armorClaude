@@ -8,7 +8,7 @@
  *
  * NOTHING here may throw into a hook: every emission goes through safeObs().
  */
-import armoriqSdk from "@armoriq/sdk-dev";
+import armoriqSdk from "@armoriq/sdk";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 
 const {

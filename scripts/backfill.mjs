@@ -25,7 +25,7 @@ import { readdir } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { summarizeTranscriptUsage } from "@armoriq/sdk-dev";
+import { summarizeTranscriptUsage } from "@armoriq/sdk";
 import { loadConfig } from "./lib/config.mjs";
 
 const argv = process.argv.slice(2);

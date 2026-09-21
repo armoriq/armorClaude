@@ -106,14 +106,15 @@ test("loadConfig: an explicit api key enables crypto policy", () => {
   assert.equal(config.cryptoPolicyEnabled, true);
 });
 
-// This is the dev branch, which config.mjs documents as staging-default.
-// The production default belongs to the main branch.
-test("loadConfig: dev branch defaults to staging endpoints", () => {
+// This is the main branch, which config.mjs documents as production-hardcoded
+// ("Main must keep production-hardcoded behavior before release"). The staging
+// default belongs to the dev branch; asserting it here tested the wrong branch.
+test("loadConfig: main branch defaults to production endpoints", () => {
   const config = loadConfig({});
-  assert.equal(config.armoriqEnv, "staging");
-  assert.equal(config.useProduction, false);
-  assert.equal(config.backendEndpoint, "https://staging-api.armoriq.ai");
-  assert.equal(config.csrgEndpoint, "https://iap-staging.armoriq.ai");
+  assert.equal(config.armoriqEnv, "production");
+  assert.equal(config.useProduction, true);
+  assert.equal(config.backendEndpoint, "https://api.armoriq.ai");
+  assert.equal(config.csrgEndpoint, "https://iap.armoriq.ai");
 });
 
 test("loadConfig: ARMORIQ_ENV=staging uses only staging endpoints", () => {
