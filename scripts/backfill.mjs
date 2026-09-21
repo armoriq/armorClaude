@@ -130,13 +130,13 @@ async function main() {
   const config = loadConfig(process.env);
   if (!config.apiKey) {
     console.error(
-      "[backfill] no API key. Set ARMORIQ_API_KEY or ~/.armoriq/credentials.json first.",
+      "[backfill] no API key. Set ARMORIQ_API_KEY or ~/.armoriq/credentials.json first."
     );
     process.exit(1);
   }
   console.error(
     `[backfill] endpoint=${config.backendEndpoint} product=${config.productSlug} ` +
-      `device=${deviceName} armored=${ARMORED} compat=${COMPAT} dryRun=${DRY}`,
+      `device=${deviceName} armored=${ARMORED} compat=${COMPAT} dryRun=${DRY}`
   );
 
   const files = (await walkJsonl(PROJECTS_DIR)).slice(0, LIMIT);
@@ -180,7 +180,7 @@ async function main() {
       if (r.ok) {
         posted++;
         console.error(
-          `[backfill] ok    ${sessionId} date=${body.usageDate} models=${entries.length}`,
+          `[backfill] ok    ${sessionId} date=${body.usageDate} models=${entries.length}`
         );
       } else {
         failed++;
@@ -192,7 +192,7 @@ async function main() {
     }
   }
   console.error(
-    `[backfill] done: ${posted} posted, ${empty} no-usage, ${failed} failed, ${files.length} total`,
+    `[backfill] done: ${posted} posted, ${empty} no-usage, ${failed} failed, ${files.length} total`
   );
   if (failed) process.exit(1);
 }
