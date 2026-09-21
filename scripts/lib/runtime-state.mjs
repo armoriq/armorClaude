@@ -37,6 +37,10 @@ export function setActiveSessionId(runtimeState, sessionId) {
   runtimeState.activeSessionAt = nowEpochSeconds();
 }
 
+export function getActiveSessionId(runtimeState) {
+  return typeof runtimeState?.activeSessionId === "string" ? runtimeState.activeSessionId : "";
+}
+
 export function getSession(runtimeState, sessionId) {
   if (!sessionId) {
     return undefined;
