@@ -1,4 +1,6 @@
 ---
-description: Manage ArmorClaude policy through the secure hook
-argument-hint: "policy <list|add|stage|confirm|cancel|profile|mcp|settings> [args]"
+description: Manage ArmorClaude policy — list, add, confirm, profile, mcp, settings
+argument-hint: "yes | no | policy <list|add|confirm|cancel|template|remove|reset|view|export|rebind> | profile <list|switch|save|delete> | mcp <list|approve|deny> | settings enforcement <local|opa>"
 ---
+
+/armor $ARGUMENTS
