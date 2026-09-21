@@ -6,7 +6,12 @@ import { loadConfig } from "./lib/config.mjs";
 import { writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, getSdkClient, requestIntent } from "./lib/intent.mjs";
 import { delegateSubtreeViaSdk, reanchorViaSdk, revokeViaSdk } from "./lib/iap-service.mjs";
-import { loadRuntimeState, appendTrustOp, saveRuntimeState } from "./lib/runtime-state.mjs";
+import {
+  loadRuntimeState,
+  appendTrustOp,
+  saveRuntimeState,
+  getActiveSessionId,
+} from "./lib/runtime-state.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { computePolicyHash, loadPolicyState } from "./lib/policy.mjs";
 
@@ -141,6 +146,20 @@ async function run() {
       const config = loadConfig();
       const plan = normalizeIntentPlan(parsed.data);
 
+      // Resolve the ACTIVE Claude Code session id. Claude Code does not expose
+      // session_id to MCP servers (no env var, no .mcp.json interpolation), so
+      // read the pointer the engine stamps into runtime.json on every hook.
+      // Honor CLAUDE_CODE_SESSION_ID first in case a future Claude Code sets it.
+      let sessionId = process.env.CLAUDE_CODE_SESSION_ID || "";
+      if (!sessionId) {
+        try {
+          const rs = await loadRuntimeState(config.runtimeFile);
+          sessionId = getActiveSessionId(rs);
+        } catch {
+          /* runtime file unreadable — fall back to session-less pending file */
+        }
+      }
+
       // Send to ArmorIQ for signed intent token (if SDK/endpoint configured)
       let intentResult = { skipped: true };
       let policyHash = "";
@@ -151,7 +170,7 @@ async function run() {
           intentResult = await requestIntent(config, {
             prompt: parsed.data.goal,
             plan,
-            session_id: "mcp",
+            session_id: sessionId || "mcp",
             policy_hash: policyHash,
             policy: policyState.policy,
             validitySeconds: config.validitySeconds,
@@ -163,7 +182,6 @@ async function run() {
         }
       }
 
-      const sessionId = process.env.CLAUDE_CODE_SESSION_ID || "";
       const pendingFile = sessionId ? `pending-plan.${sessionId}.json` : "pending-plan.json";
       const pendingPath = path.join(config.dataDir, pendingFile);
       await writeJson(pendingPath, {
@@ -206,13 +224,17 @@ async function run() {
     // would route trust_revoke / trust_reanchor / trust_delegate against
     // the wrong window's token. CLAUDE_CODE_SESSION_ID is stamped on the
     // per-session pending-plan file (#43) and is reliable here.
-    const envSid = process.env.CLAUDE_CODE_SESSION_ID || "";
-    if (envSid && sessions[envSid]) {
+    // Prefer an explicit env var (future-proofing), then the active-session
+    // pointer the engine stamps into runtime.json on every hook. Claude Code
+    // does not expose session_id to MCP servers, so the pointer is the reliable
+    // source for routing trust ops to the current window's token.
+    const activeSid = process.env.CLAUDE_CODE_SESSION_ID || getActiveSessionId(runtimeState);
+    if (activeSid && sessions[activeSid]) {
       return {
         config,
         runtimeState,
-        sessionId: envSid,
-        session: sessions[envSid],
+        sessionId: activeSid,
+        session: sessions[activeSid],
       };
     }
 
