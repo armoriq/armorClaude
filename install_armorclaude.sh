@@ -19,7 +19,7 @@ D=$'\033[0;90m'
 N=$'\033[0m'
 
 MARKETPLACE_REPO="${ARMORCLAUDE_MARKETPLACE_REPO:-armoriq/armorClaude}"
-PLUGIN_REF="armorclaude@armoriq"
+PLUGIN_REF="armorclaude-dev@armoriq"
 DASHBOARD_URL="https://tools.armoriq.ai"
 
 # Recover if the caller launched the installer from a directory that was deleted.
@@ -102,7 +102,7 @@ install_plugin() {
   # "Failed to connect — MCP error -32000: Connection closed".
   info "preparing plugin dependencies"
   local plugin_dir
-  plugin_dir="$(ls -d "${HOME}"/.claude/plugins/cache/armoriq/armorclaude/*/ 2>/dev/null | sort -V | tail -1)"
+  plugin_dir="$(ls -d "${HOME}"/.claude/plugins/cache/armoriq/armorclaude-dev/*/ 2>/dev/null | sort -V | tail -1)"
   if [[ -n "${plugin_dir}" && -f "${plugin_dir}scripts/bootstrap.mjs" ]]; then
     if node "${plugin_dir}scripts/bootstrap.mjs" warm >/dev/null 2>&1; then
       ok "dependencies ready"
@@ -130,13 +130,13 @@ verify_install() {
   # would wrongly report success.
   local listing status
   listing="$(claude plugin list 2>/dev/null || true)"
-  status="$(printf '%s\n' "$listing" | grep -A3 "armorclaude@armoriq" | grep -m1 "Status:" || true)"
+  status="$(printf '%s\n' "$listing" | grep -A3 "armorclaude-dev@armoriq" | grep -m1 "Status:" || true)"
   if [[ -z "$status" ]]; then
-    warn "couldn't confirm armorclaude is installed — run: ${B}claude plugin list${N}"
+    warn "couldn't confirm armorclaude-dev is installed — run: ${B}claude plugin list${N}"
   elif [[ "$status" == *disabled* ]]; then
-    warn "armorclaude is installed but ${B}disabled${N} — enable it with: ${B}claude plugin enable armorclaude@armoriq${N}"
+    warn "armorclaude-dev is installed but ${B}disabled${N} — enable it with: ${B}claude plugin enable armorclaude-dev@armoriq${N}"
   else
-    ok "armorclaude is enabled"
+    ok "armorclaude-dev is enabled"
   fi
 
   if claude mcp list 2>/dev/null | grep -q "armorclaude-policy.*Connected"; then
@@ -242,9 +242,9 @@ EOF
   cat <<EOF
 
   ${D}claude plugin list${N}
-  ${D}claude plugin disable armorclaude${N}
-  ${D}claude plugin enable  armorclaude${N}
-  ${D}claude plugin update  armorclaude${N}
+  ${D}claude plugin disable armorclaude-dev${N}
+  ${D}claude plugin enable  armorclaude-dev${N}
+  ${D}claude plugin update  armorclaude-dev${N}
 
   Docs: ${C}https://github.com/armoriq/armorClaude${N}
 
