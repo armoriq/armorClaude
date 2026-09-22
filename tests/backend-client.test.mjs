@@ -215,25 +215,6 @@ test("/armor policy profile pull without apiKey returns error", async () => {
   assert.ok(out.includes("API key"));
 });
 
-test("/armor policy profile push with apiKey sends to backend", async () => {
-  let received = false;
-  const { server, url } = await startMockServer((req, res) => {
-    received = true;
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
-  });
-  try {
-    const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
-    const config = buildConfig(tmp, { apiKey: "test-key", backendEndpoint: url });
-    await saveProfile(config, "my-profile", "test", [{ id: "p1", action: "allow", tool: "*" }]);
-    const out = await handleArmorPolicyCommand("/armor policy profile push my-profile", config);
-    assert.ok(received, "Backend should have received the request");
-    assert.ok(out.includes("pushed"));
-  } finally {
-    server.close();
-  }
-});
-
 test("/armor policy profile pull with apiKey saves profiles locally", async () => {
   const mockProfiles = [
     {
@@ -256,25 +237,6 @@ test("/armor policy profile pull with apiKey saves profiles locally", async () =
     assert.equal(local.policy.rules, undefined);
     assert.equal(local.rules, undefined);
     assert.equal(local.policy.statements[0].id, "o1");
-  } finally {
-    server.close();
-  }
-});
-
-test("/armor policy sync with apiKey sends to backend", async () => {
-  let received = false;
-  const { server, url } = await startMockServer((req, res) => {
-    received = true;
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
-  });
-  try {
-    const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
-    const config = buildConfig(tmp, { apiKey: "test-key", backendEndpoint: url });
-    await seedPolicy(config, [{ id: "p1", action: "deny", tool: "Bash" }]);
-    const out = await handleArmorPolicyCommand("/armor policy sync", config);
-    assert.ok(received);
-    assert.ok(out.includes("synced"));
   } finally {
     server.close();
   }

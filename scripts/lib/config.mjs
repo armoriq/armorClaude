@@ -74,18 +74,47 @@ export function loadConfig(env = process.env) {
         : "https://iap-staging.armoriq.ai";
   const useProduction = activeEnv === "production";
 
-  // ── The one userConfig field: api_key. UI primary, legacy env fallback. ──
+  // ── userConfig fields. UI primary, legacy env fallback. ──
   let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
-  if (!apiKey) {
-    try {
-      const creds = JSON.parse(
-        readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
-      );
-      if (typeof creds?.apiKey === "string") apiKey = creds.apiKey;
-    } catch {
-      // no credentials file — local-only mode
-    }
+  // Optional default policy template applied (staged for confirm) on first run.
+  const defaultTemplate = pluginOpt(env, "DEFAULT_TEMPLATE");
+  let orgId = env.ARMORIQ_ORG_ID?.trim() || "";
+
+  // Observability is ON by default. Users can opt out via the
+  // `disable_observability` plugin option or the ARMORIQ_OBSERVABILITY_DISABLED
+  // env var (accepts true/1/yes).
+  const observabilityDisabled = parseBoolean(
+    pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORIQ_OBSERVABILITY_DISABLED"),
+    false
+  );
+  try {
+    const creds = JSON.parse(
+      readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
+    );
+    if (!apiKey && typeof creds?.apiKey === "string") apiKey = creds.apiKey;
+    if (!orgId && typeof creds?.orgId === "string") orgId = creds.orgId;
+  } catch {
+    // no credentials file — local-only mode
   }
+
+  // A key is only usable if it matches the @armoriq/sdk key format
+  // (ak_test_/ak_live_/ak_claw_). Anything else — empty, or a stale/old-format
+  // key left over from a prior install — is treated as "not connected":
+  //   • handing a bad-format key to `new ArmorIQClient(...)` throws in the
+  //     constructor, which crashed the policy MCP server ("-32000").
+  //   • enforcing without a working key just hard-blocks every tool, bricking
+  //     the session on a fresh `claude plugin install` (no onboarding ran).
+  // So we drop an unusable key and fall into monitor mode (see `connected`).
+  const keyLooksUsable = /^ak_(test|live|claw)_/.test(apiKey);
+  const hadUnusableKey = Boolean(apiKey) && !keyLooksUsable;
+  if (hadUnusableKey) apiKey = "";
+  // Effective key handed to the SDK. In local mock use a placeholder the SDK's
+  // key-format check accepts (the mock server ignores auth). Everything that
+  // keys off "do we have a working credential" uses this.
+  const effectiveApiKey = apiKey || (localMock ? "ak_test_localmock000000000000" : "");
+  // "Connected" == we have a usable key (or we're in local mock). Only then do
+  // we enforce. Unconfigured installs run passively until the user connects.
+  const connected = localMock || keyLooksUsable;
 
   return {
     // Paths / endpoints
@@ -98,16 +127,31 @@ export function loadConfig(env = process.env) {
     csrgEndpoint,
     verifyStepEndpoint: `${backendEndpoint}/iap/verify-step`,
 
-    // userConfig-driven (the only one)
-    // In local mock mode use a placeholder key so engine.mjs apiKey guards pass.
-    // The mock server ignores auth headers so the value doesn't matter.
-    apiKey: apiKey || (localMock ? "local-mock-key-00000000000000000000" : ""),
-    auditEnabled: Boolean(apiKey) || localMock,
+    // ── Observability: ON by default (opt out via `disable_observability`
+    //    plugin option / ARMORIQ_OBSERVABILITY_DISABLED). Additive + no-op
+    //    unless a key or local mock gives us somewhere to ship spans. ──
+    observabilityEnabled: !observabilityDisabled && Boolean(effectiveApiKey),
+    observabilityEndpoint: backendEndpoint,
+    observabilityProduct: "armorclaude",
 
-    // Hardcoded — every behaviour toggle uses the value we've tested into
-    // the right default. To change one, edit this file.
-    mode: "enforce",
-    intentRequired: true,
+    // userConfig-driven credential (see effectiveApiKey above: a bad-format key
+    // is dropped, and local mock substitutes an SDK-accepted placeholder).
+    apiKey: effectiveApiKey,
+    orgId,
+    auditEnabled: Boolean(effectiveApiKey),
+    defaultTemplate,
+
+    // Enforcement is gated on being connected. With a usable key (or local
+    // mock) we enforce + require intent, exactly as before. Without one, we run
+    // in monitor mode so the plugin never bricks an un-onboarded session; the
+    // SessionStart banner tells the user how to connect. Once a valid key is
+    // present, this flips back to enforce automatically.
+    mode: connected ? "enforce" : "monitor",
+    intentRequired: connected,
+    // True when the plugin is installed but not connected (no usable key).
+    // Drives the SessionStart setup banner.
+    unconfigured: !connected,
+    hadUnusableKey,
     auditWal: true,
     autoReanchor: true,
     autoRevokeOnEnd: true,
@@ -120,6 +164,8 @@ export function loadConfig(env = process.env) {
     //   activeSessions shows the real count on the dashboard.
     csrgVerifyEnabled: localMock,
     requireCsrgProofs: false,
+    // Crypto policy requires a caller-owned credential. The local-mock
+    // placeholder only satisfies the SDK constructor; it is not a real key.
     cryptoPolicyEnabled: Boolean(apiKey),
     strictParamCheck: false, // advisory — LLM params are predictions
     policyUpdateEnabled: true,
@@ -133,6 +179,9 @@ export function loadConfig(env = process.env) {
     opaCircuitResetMs: 10000,
 
     // Identity — backend derives real identity from API key.
+    // productSlug is sent explicitly on dashboard telemetry (token usage) so
+    // per-product attribution works even if the API key has product=NULL.
+    productSlug: "armorclaude",
     llmId: "claude-code",
     mcpName: "claude-code",
     userId: "claude-user",
