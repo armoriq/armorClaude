@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { loadConfig } from "../scripts/lib/config.mjs";
+import {
+  NodeTracerProvider,
+  SimpleSpanProcessor,
+  InMemorySpanExporter,
+} from "@opentelemetry/sdk-trace-node";
 
 test("observabilityEnabled true when daemon on + api key present", () => {
   const cfg = loadConfig({
@@ -13,7 +18,11 @@ test("observabilityEnabled true when daemon on + api key present", () => {
   assert.equal(cfg.observabilityProduct, "armorclaude");
 });
 
-import { isObsEnabled, __resetObsForTests } from "../scripts/lib/observability.mjs";
+import {
+  isObsEnabled,
+  __resetObsForTests,
+  __setOtelTestHooksForTests,
+} from "../scripts/lib/observability.mjs";
 
 test("isObsEnabled reflects config flag", () => {
   assert.equal(isObsEnabled({ observabilityEnabled: true }), true);
@@ -26,457 +35,242 @@ test("__resetObsForTests exists and is callable", () => {
   assert.ok(true);
 });
 
-import obsRecorder from "../scripts/lib/obs-recorder/index.cjs";
-import { observeHook } from "../scripts/lib/observability.mjs";
+import armoriqSdk from "@armoriq/sdk-dev";
+import { observeHook, obsFlush, obsFlushAll } from "../scripts/lib/observability.mjs";
 
-const SDK_HAS_SPANS = typeof obsRecorder.openSpan === "function";
-
-test("plugin recorder provides every observability export the bridge uses", () => {
-  for (const name of [
-    "ObservabilityRecorder",
-    "startTrace",
-    "openSpan",
-    "flushObservability",
-    "isValidUuid",
-  ]) {
-    assert.equal(typeof obsRecorder[name], "function", `Missing recorder export: ${name}`);
+test("installed SDK provides every required observability export", () => {
+  for (const name of ["ArmorIQTelemetryRuntime", "OtelSession"]) {
+    assert.equal(typeof armoriqSdk[name], "function", `Missing required SDK export: ${name}`);
   }
 });
 
-test(
-  "observeHook builds a nested iap.plan trace per turn",
-  { skip: !SDK_HAS_SPANS && "SDK <0.6.3 (no openSpan export)" },
-  async () => {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const config = {
-      observabilityEnabled: true,
-      observabilityEndpoint: "http://localhost:8080",
-      observabilityProduct: "armorclaude",
-      apiKey: "ak_live_test0000000000000000000000000000",
-      sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
-    };
-    const sid = "11111111-1111-4111-8111-111111111111";
+// ---------------------------------------------------------------------------
+// Otel test harness: caller-owned provider + authoritative stub lease, so no
+// test touches the network. Mirrors what the bridge wires in production
+// (backend lease endpoint + SDK-owned exporter) without any of its I/O.
+// ---------------------------------------------------------------------------
 
-    await observeHook("UserPromptSubmit", { session_id: sid, prompt: "find acme" }, null, config);
-    await observeHook(
-      "PreToolUse",
-      { session_id: sid, tool_name: "search_contacts", tool_input: { query: "acme" } },
-      null,
-      config
-    );
-    await observeHook(
-      "PostToolUse",
-      {
-        session_id: sid,
-        tool_name: "search_contacts",
-        tool_input: { query: "acme" },
-        tool_response: { matches: 1 },
-      },
-      null,
-      config
-    );
-    await observeHook("SessionEnd", { session_id: sid }, null, config);
+const OTEL_ENV_KEYS = [
+  "ARMORIQ_OBSERVABILITY",
+  "OTEL_SDK_DISABLED",
+  "OTEL_TRACES_EXPORTER",
+  "ARMORIQ_OTEL_EXPORTER",
+  "ARMORIQ_OTEL_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_ENDPOINT",
+  "ARMORIQ_OTEL_CAPTURE_MODE",
+];
 
-    obsRecorder.__setObservabilitySinkForTests(null);
-
-    const spanNames = events.filter((e) => e.kind === "span_recorded").map((e) => e.span.name);
-    assert.ok(spanNames.includes("iap.plan.start"), "has iap.plan.start");
-    assert.ok(spanNames.includes("iap.check"), "has iap.check");
-    assert.ok(spanNames.includes("tool.report"), "has tool.report");
-    const ended = events.filter((e) => e.kind === "trace_ended");
-    assert.ok(ended.length >= 1, "trace ended");
-    assert.equal(ended[ended.length - 1].trace.name, "iap.plan");
+const savedEnv = {};
+for (const key of OTEL_ENV_KEYS) {
+  savedEnv[key] = process.env[key];
+  delete process.env[key];
+}
+test.after(() => {
+  for (const key of OTEL_ENV_KEYS) {
+    if (savedEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = savedEnv[key];
   }
-);
+  __setOtelTestHooksForTests(null);
+});
 
-test(
-  "observeHook records deny decision on iap.check",
-  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
-  async () => {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const config = {
-      observabilityEnabled: true,
-      observabilityEndpoint: "http://localhost:8080",
-      observabilityProduct: "armorclaude",
-      apiKey: "ak_live_test0000000000000000000000000000",
-      sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
-    };
-    const sid = "22222222-2222-4222-8222-222222222222";
-    await observeHook("UserPromptSubmit", { session_id: sid, prompt: "x" }, null, config);
-    const denyOut = {
-      hookSpecificOutput: { permissionDecision: "deny", permissionDecisionReason: "not in plan" },
-    };
-    await observeHook(
-      "PreToolUse",
-      { session_id: sid, tool_name: "rm", tool_input: {} },
-      denyOut,
-      config
-    );
-    await observeHook("SessionEnd", { session_id: sid }, null, config);
-    obsRecorder.__setObservabilitySinkForTests(null);
-    const pc = events.find(
-      (e) =>
-        e.kind === "span_recorded" && e.span.attributes && e.span.attributes.kind === "policy_call"
-    );
-    assert.ok(pc, "policy_call span present");
-    assert.equal(pc.span.attributes.decision, "deny");
-  }
-);
+let exporter;
+let provider;
 
-test("observeHook is a no-op when disabled and never throws", async () => {
+function installHooks() {
   __resetObsForTests();
-  await observeHook("UserPromptSubmit", { session_id: "x", prompt: "y" }, null, {
-    observabilityEnabled: false,
+  exporter = new InMemorySpanExporter();
+  provider = new NodeTracerProvider({
+    spanProcessors: [new SimpleSpanProcessor(exporter)],
   });
-  assert.ok(true);
-});
+  __setOtelTestHooksForTests({
+    tracerProvider: provider,
+    leaseFetcher: async () => ({
+      captureMode: "metadata",
+      revision: 1,
+      expiresAt: new Date(Date.now() + 3600_000),
+      authoritative: true,
+      contentCaptureAllowed: false,
+      externalContentCaptureAllowed: false,
+      externalContentAllowed: false,
+      contentReasonCode: "test",
+      debugExpiresAt: null,
+    }),
+  });
+  return exporter;
+}
 
-test("observeHook tolerates missing session_id", async () => {
-  __resetObsForTests();
-  await observeHook("PreToolUse", { tool_name: "x" }, null, {
+function testConfig() {
+  return {
     observabilityEnabled: true,
-    observabilityEndpoint: "http://x",
+    observabilityEndpoint: "http://127.0.0.1:1",
     observabilityProduct: "armorclaude",
-    apiKey: "ak_live_test0000000000000000000000000000",
-    sanitize: {},
-  });
-  assert.ok(true);
-});
+    apiKey: "ak_test_otelhooks000000000000000000",
+    agentId: "claude-code",
+    userId: "claude-user",
+    sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
+  };
+}
 
-// Regression: trace.userId is a UUID-typed backend column (obs_traces.user_id,
-// ingest schema `z.uuid()`) — armorClaude's logical "claude-user" is NOT a
-// UUID and must be emitted as null, or the ingest POST 400s and every trace
-// is silently dropped. trace.agentId, by contrast, is a free-form `text`
-// column with no UUID requirement — armorClaude's logical "claude-code" IS a
-// valid value and must flow through as-is (this used to be incorrectly
-// null'd by the same UUID gate as userId/sessionId — the root cause of the
-// dashboard's empty AGENT column).
-test(
-  "non-UUID config userId is null but non-UUID agentId flows through on the trace",
-  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
-  async () => {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const config = {
-      observabilityEnabled: true,
-      observabilityEndpoint: "http://localhost:8080",
-      observabilityProduct: "armorclaude",
-      apiKey: "ak_live_test0000000000000000000000000000",
-      userId: "claude-user",
-      agentId: "claude-code",
-      sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
-    };
-    const sid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    await observeHook("UserPromptSubmit", { session_id: sid, prompt: "hi" }, null, config);
-    await observeHook("SessionEnd", { session_id: sid }, null, config);
-    obsRecorder.__setObservabilitySinkForTests(null);
-    const started = events.find((e) => e.kind === "trace_started");
-    assert.ok(started, "trace started");
-    assert.equal(started.trace.userId, null, "non-UUID userId must be null");
-    assert.equal(started.trace.agentId, "claude-code", "non-UUID agentId must flow through as-is");
-  }
-);
+function spans() {
+  return exporter.getFinishedSpans();
+}
 
-// Regression: a raw string prompt must be captured (not turned into {}).
-test(
-  "iap.plan.start captures the prompt text",
-  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
-  async () => {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const config = {
-      observabilityEnabled: true,
-      observabilityEndpoint: "http://localhost:8080",
-      observabilityProduct: "armorclaude",
-      apiKey: "ak_live_test0000000000000000000000000000",
-      sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
-    };
-    const sid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    await observeHook(
-      "UserPromptSubmit",
-      { session_id: sid, prompt: "Find Acme contacts" },
-      null,
-      config
-    );
-    await observeHook("SessionEnd", { session_id: sid }, null, config);
-    obsRecorder.__setObservabilitySinkForTests(null);
-    const planStart = events.find(
-      (e) => e.kind === "span_recorded" && e.span.name === "iap.plan.start"
-    );
-    assert.ok(planStart, "iap.plan.start recorded");
-    assert.equal(planStart.span.attributes.prompt, "Find Acme contacts");
-  }
-);
+function spansByName(name) {
+  return spans().filter((s) => s.name === name);
+}
 
-// Regression: the dashboard's trace-list INPUT column reads
-// `trace.attributes.input` — the turn's goal must land there too (not just
-// on the child `iap.plan.start` span's `attributes.prompt`).
-test(
-  "iap.plan trace carries attributes.input",
-  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
-  async () => {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const config = {
-      observabilityEnabled: true,
-      observabilityEndpoint: "http://localhost:8080",
-      observabilityProduct: "armorclaude",
-      apiKey: "ak_live_test0000000000000000000000000000",
-      sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
-    };
-    const sid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-    await observeHook(
-      "UserPromptSubmit",
-      { session_id: sid, prompt: "Find Acme contacts" },
-      null,
-      config
-    );
-    await observeHook("SessionEnd", { session_id: sid }, null, config);
-    obsRecorder.__setObservabilitySinkForTests(null);
-    const started = events.find((e) => e.kind === "trace_started");
-    assert.ok(started, "trace started");
-    assert.equal(started.trace.attributes.input, "Find Acme contacts");
-  }
-);
-
-const OBS_CONFIG = {
-  observabilityEnabled: true,
-  observabilityEndpoint: "http://localhost:8080",
-  observabilityProduct: "armorclaude",
-  apiKey: "ak_live_test0000000000000000000000000000",
-  sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
-};
-
-test(
-  "UserPromptSubmit starting with a slash is not command execution evidence",
-  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
-  async () => {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const sid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-    await observeHook(
-      "UserPromptSubmit",
-      { session_id: sid, prompt: "/deploy staging now" },
-      null,
-      OBS_CONFIG
-    );
-    await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
-    obsRecorder.__setObservabilitySinkForTests(null);
-    const slash = events.find((e) => e.kind === "span_recorded" && e.span.name === "slash.command");
-    assert.equal(slash, undefined, "raw prompt text does not confirm command expansion");
-  }
-);
-
-test("confirmed slash command expansions normalize command names without arguments", async () => {
-  for (const [commandName, expected] of [
-    ["deploy", "/deploy"],
-    [" /armorclaude:armor ", "/armorclaude:armor"],
-    ["a".repeat(79), "/" + "a".repeat(79)],
-  ]) {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const sid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-    try {
-      await observeHook(
-        "UserPromptSubmit",
-        { session_id: sid, prompt: "/unconfirmed" },
-        null,
-        OBS_CONFIG
-      );
-      await observeHook(
-        "UserPromptExpansion",
-        {
-          session_id: sid,
-          expansion_type: "slash_command",
-          command_name: commandName,
-          command_args: "private argument text",
-        },
-        null,
-        OBS_CONFIG
-      );
-    } finally {
-      await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
-      obsRecorder.__setObservabilitySinkForTests(null);
-    }
-    const spans = events.filter(
-      (e) => e.kind === "span_recorded" && e.span.name === "slash.command"
-    );
-    assert.equal(spans.length, 1, "only the confirmed expansion emits command activity");
-    assert.deepEqual(spans[0].span.attributes, {
-      kind: "span",
-      operationCategory: "command",
-      slashCommand: expected,
-    });
-  }
-});
-
-test("slash command evidence ignores other expansions and malformed command names", async () => {
-  __resetObsForTests();
-  const events = [];
-  obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-  const sid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-  try {
-    for (const input of [
-      { expansion_type: "skill", command_name: "deploy" },
-      { command_name: "deploy" },
-      ...[
-        undefined,
-        null,
-        42,
-        "",
-        " ",
-        "/",
-        "//deploy",
-        "deploy staging",
-        "deploy\nsecret",
-        "a".repeat(80),
-      ].map((command_name) => ({ expansion_type: "slash_command", command_name })),
-    ]) {
-      await observeHook("UserPromptExpansion", { session_id: sid, ...input }, null, OBS_CONFIG);
-    }
-  } finally {
-    await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
-    obsRecorder.__setObservabilitySinkForTests(null);
-  }
-  assert.equal(
-    events.filter((e) => e.kind === "span_recorded" && e.span.name === "slash.command").length,
-    0
+test("observeHook builds one turn root per session", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook("SessionStart", { session_id: "sess-turn" }, null, config);
+  await observeHook(
+    "UserPromptSubmit",
+    { session_id: "sess-turn", prompt: "deploy staging now" },
+    null,
+    config
   );
+  await observeHook("SessionEnd", { session_id: "sess-turn" }, null, config);
+  const roots = spansByName("armoriq.agent.run").filter((s) => !s.parentSpanContext?.spanId);
+  assert.equal(roots.length, 1);
+  assert.equal(roots[0].attributes["session.id"], "sess-turn");
+  assert.equal(roots[0].attributes["gen_ai.agent.name"], "claude-code");
+  await provider.shutdown();
 });
 
-test(
-  "a plain (non-slash) prompt records no slash.command span",
-  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
-  async () => {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const sid = " effff-ffff"; // not used as UUID here; prompt is what matters
-    await observeHook(
-      "UserPromptSubmit",
-      { session_id: "ffffffff-ffff-4fff-8fff-ffffffffffff", prompt: "just find acme" },
-      null,
-      OBS_CONFIG
-    );
-    await observeHook(
-      "SessionEnd",
-      { session_id: "ffffffff-ffff-4fff-8fff-ffffffffffff" },
-      null,
-      OBS_CONFIG
-    );
-    obsRecorder.__setObservabilitySinkForTests(null);
-    void sid;
-    const slash = events.find((e) => e.kind === "span_recorded" && e.span.name === "slash.command");
-    assert.equal(slash, undefined, "no slash.command span for a plain prompt");
-  }
-);
-
-test(
-  "SessionStart records an armorclaude.connected event on its own trace",
-  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
-  async () => {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const sid = "12121212-1212-4121-8121-121212121212";
-    await observeHook("SessionStart", { session_id: sid }, null, OBS_CONFIG);
-    obsRecorder.__setObservabilitySinkForTests(null);
-    const connect = events.find(
-      (e) => e.kind === "span_recorded" && e.span.name === "armorclaude.connected"
-    );
-    assert.ok(connect, "armorclaude.connected span recorded");
-    assert.equal(connect.span.attributes.operationCategory, "connect");
-    const started = events.find(
-      (e) => e.kind === "trace_started" && e.trace.name === "armorclaude.session"
-    );
-    assert.ok(started, "armorclaude.session trace started");
-    const ended = events.find(
-      (e) => e.kind === "trace_ended" && e.trace.name === "armorclaude.session"
-    );
-    assert.ok(ended, "armorclaude.session trace ended (ships independently)");
-  }
-);
-
-test(
-  "tool.report tags operationCategory tool vs mcp",
-  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
-  async () => {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const sid = "13131313-1313-4131-8131-131313131313";
-    await observeHook("UserPromptSubmit", { session_id: sid, prompt: "go" }, null, OBS_CONFIG);
-    await observeHook(
-      "PostToolUse",
-      { session_id: sid, tool_name: "Read", tool_input: {}, tool_response: {} },
-      null,
-      OBS_CONFIG
-    );
-    await observeHook(
-      "PostToolUse",
-      {
-        session_id: sid,
-        tool_name: "mcp__github__create_issue",
-        tool_input: {},
-        tool_response: {},
+test("PreToolUse deny records a blocked policy evaluation", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook(
+    "PreToolUse",
+    { session_id: "sess-deny", tool_name: "Bash", tool_input: { command: "rm -rf /" } },
+    {
+      hookSpecificOutput: {
+        permissionDecision: "deny",
+        permissionDecisionReason: "no registered plan",
       },
-      null,
-      OBS_CONFIG
-    );
-    await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
-    obsRecorder.__setObservabilitySinkForTests(null);
-    const reports = events.filter(
-      (e) => e.kind === "span_recorded" && e.span.name === "tool.report"
-    );
-    const cats = reports.map((r) => r.span.attributes.operationCategory);
-    assert.ok(cats.includes("tool"), "plain tool tagged 'tool'");
-    assert.ok(cats.includes("mcp"), "mcp__ tool tagged 'mcp'");
-  }
-);
+    },
+    config
+  );
+  await observeHook("SessionEnd", { session_id: "sess-deny" }, null, config);
+  const policy = spansByName("armoriq.policy.evaluate");
+  assert.equal(policy.length, 1);
+  assert.equal(policy[0].attributes["armoriq.policy.decision"], "deny");
+  assert.equal(policy[0].attributes["armoriq.policy.reason_code"], "no registered plan");
+  await provider.shutdown();
+});
 
-// Regression: dashboard TAGS/OUTPUT columns are derived by the SDK at
-// endTrace() time from the trace's own policy_call spans — armorClaude
-// doesn't need its own tally, but the derivation must actually fire for a
-// real armorClaude-shaped trace (iap.check span with toolName + child
-// policy_call span with a decision).
-test(
-  "trace_ended carries derived tags and output summary from tool checks",
-  { skip: !SDK_HAS_SPANS && "SDK <0.6.3" },
-  async () => {
-    __resetObsForTests();
-    const events = [];
-    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
-    const config = {
-      observabilityEnabled: true,
-      observabilityEndpoint: "http://localhost:8080",
-      observabilityProduct: "armorclaude",
-      apiKey: "ak_live_test0000000000000000000000000000",
-      sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
-    };
-    const sid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-    await observeHook("UserPromptSubmit", { session_id: sid, prompt: "List files" }, null, config);
-    await observeHook(
-      "PreToolUse",
-      { session_id: sid, tool_name: "Bash", tool_input: { command: "ls" } },
-      { hookSpecificOutput: { permissionDecision: "allow" } },
-      config
-    );
-    await observeHook("SessionEnd", { session_id: sid }, null, config);
-    obsRecorder.__setObservabilitySinkForTests(null);
-    const ended = events.find((e) => e.kind === "trace_ended");
-    assert.ok(ended, "trace ended");
-    assert.ok(ended.trace.tags.includes("armorclaude"), "tags include product");
-    assert.ok(ended.trace.tags.includes("Bash"), "tags include checked tool name");
-    assert.ok(ended.trace.tags.includes("allowed"), "tags include overall verdict");
-    assert.equal(ended.trace.attributes.output, "1 check · all allowed");
-  }
-);
+test("PreToolUse allow records an allowed policy evaluation", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook(
+    "PreToolUse",
+    { session_id: "sess-allow", tool_name: "Read", tool_input: { file_path: "x.txt" } },
+    { hookSpecificOutput: { permissionDecision: "allow" } },
+    config
+  );
+  await observeHook("SessionEnd", { session_id: "sess-allow" }, null, config);
+  const policy = spansByName("armoriq.policy.evaluate");
+  assert.equal(policy.length, 1);
+  assert.equal(policy[0].attributes["armoriq.policy.decision"], "allow");
+  await provider.shutdown();
+});
+
+test("PostToolUse records a succeeded tool span", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook(
+    "PostToolUse",
+    {
+      session_id: "sess-tool",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+      tool_response: { output: "x" },
+    },
+    null,
+    config
+  );
+  await observeHook("SessionEnd", { session_id: "sess-tool" }, null, config);
+  const tools = spansByName("armoriq.tool");
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].attributes["armoriq.tool.name"], "Bash");
+  assert.equal(tools[0].attributes["armoriq.tool.outcome"], "success");
+  assert.equal(tools[0].attributes["armoriq.operation.category"], "tool");
+  await provider.shutdown();
+});
+
+test("disabled config records nothing", async () => {
+  installHooks();
+  const config = { ...testConfig(), observabilityEnabled: false };
+  await observeHook("SessionStart", { session_id: "sess-off" }, null, config);
+  await observeHook(
+    "PreToolUse",
+    { session_id: "sess-off", tool_name: "Bash", tool_input: {} },
+    { hookSpecificOutput: { permissionDecision: "deny" } },
+    config
+  );
+  assert.equal(spans().length, 0);
+  await provider.shutdown();
+});
+
+test("missing session id records nothing and never throws", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook("PreToolUse", { tool_name: "Bash" }, null, config);
+  await observeHook("PreToolUse", null, null, config);
+  assert.equal(spans().length, 0);
+  await provider.shutdown();
+});
+
+test("Stop keeps the session usable and SessionEnd drops it", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook(
+    "PreToolUse",
+    { session_id: "sess-stop", tool_name: "Bash", tool_input: {} },
+    { hookSpecificOutput: { permissionDecision: "allow" } },
+    config
+  );
+  const afterCheck = spans().length;
+  assert.ok(afterCheck > 0);
+  await observeHook("Stop", { session_id: "sess-stop" }, null, config);
+  await observeHook(
+    "PreToolUse",
+    { session_id: "sess-stop", tool_name: "Read", tool_input: {} },
+    { hookSpecificOutput: { permissionDecision: "allow" } },
+    config
+  );
+  assert.ok(spans().length > afterCheck, "session still emits after Stop");
+  await observeHook("SessionEnd", { session_id: "sess-stop" }, null, config);
+  const afterEnd = spans().length;
+  await observeHook(
+    "PreToolUse",
+    { session_id: "sess-stop", tool_name: "Read", tool_input: {} },
+    { hookSpecificOutput: { permissionDecision: "allow" } },
+    config
+  );
+  assert.ok(spans().length > afterEnd, "a new session starts cleanly after SessionEnd");
+  await provider.shutdown();
+});
+
+test("obsFlush and obsFlushAll are callable and fail-open", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook("SessionStart", { session_id: "sess-flush" }, null, config);
+  await obsFlush("sess-flush", config);
+  await obsFlush("sess-unknown", config);
+  await obsFlushAll();
+  await obsFlush("sess-flush", { ...config, observabilityEnabled: false });
+  assert.ok(true);
+  await provider.shutdown();
+});
+
+test("observeHook never throws on garbage input", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook("PreToolUse", null, null, config);
+  await observeHook("BogusEvent", {}, {}, config);
+  await observeHook("PostToolUse", { session_id: "sess-garbage" }, null, config);
+  assert.ok(true);
+  await provider.shutdown();
+});
