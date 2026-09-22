@@ -24,90 +24,88 @@ export async function autoRegisterMcp(config, serverName) {
   }
 }
 
-export async function pushProfile(config, profile) {
-  if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
+/** JSON fetch helper honoring the configured timeout + auth headers. */
+async function jsonRequest(config, method, apiPath, body) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.timeoutMs || 8000);
   try {
-    const res = await postJson(
-      endpoint(config, "/policies/profiles"),
-      profile,
-      buildAuthHeaders(config),
-      config.timeoutMs || 8000
-    );
-    return { ok: res.ok, status: res.status, data: res.data };
-  } catch (err) {
-    return { ok: false, reason: String(err?.message || err) };
-  }
-}
-
-export async function pullProfiles(config) {
-  if (!hasBackend(config)) return { ok: false, reason: "no backend configured", profiles: [] };
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), config.timeoutMs || 8000);
-    const res = await fetch(endpoint(config, "/policies/profiles"), {
-      method: "GET",
+    const res = await fetch(endpoint(config, apiPath), {
+      method,
       headers: buildAuthHeaders(config),
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
-    clearTimeout(timeout);
     const data = await res.json().catch(() => null);
-    return {
-      ok: res.ok,
-      status: res.status,
-      profiles: Array.isArray(data?.profiles) ? data.profiles : Array.isArray(data) ? data : [],
-    };
-  } catch (err) {
-    return { ok: false, reason: String(err?.message || err), profiles: [] };
-  }
-}
-
-export async function syncPolicy(config, policyState) {
-  if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
-  try {
-    const res = await postJson(
-      endpoint(config, "/policies/sync"),
-      {
-        version: policyState.version,
-        policy: policyState.policy,
-        source: "armorclaude",
-        updatedAt: policyState.updatedAt,
-      },
-      buildAuthHeaders(config),
-      config.timeoutMs || 8000
-    );
-    return { ok: res.ok, status: res.status, data: res.data };
-  } catch (err) {
-    return { ok: false, reason: String(err?.message || err) };
+    return { ok: res.ok, status: res.status, data };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
 /**
- * Pull the org's ACTIVE armor.policy.v1 document, authored from the dashboard.
- * Read-only: the plugin never writes policy to the backend. Returns the
- * confirmed active document plus its version so the caller can skip applying
- * a policy that is not newer than what is already on disk.
+ * Push the caller's policy to the backend as a STAGED PROPOSAL, using the armor
+ * profile lifecycle: PUT /policies/profiles/draft then POST
+ * /policies/profiles/propose. Both accept the plugin API key.
+ *
+ * Activation is intentionally NOT performed here — a human confirms the staged
+ * proposal from the dashboard (POST /policies/profiles/confirm is JWT-only).
+ * This is what makes a policy set from the terminal land in the DB and show up
+ * in the UI awaiting confirmation.
  */
-export async function pullActivePolicy(config) {
-  if (!hasBackend(config)) return { ok: false, reason: "no backend configured", policy: null };
+export async function proposePolicy(config, policy, reason) {
+  if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
+  if (!policy) return { ok: false, reason: "no policy to propose" };
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), config.timeoutMs || 8000);
-    const res = await fetch(endpoint(config, "/policies/profiles/active"), {
-      method: "GET",
-      headers: buildAuthHeaders(config),
-      signal: controller.signal,
+    const draft = await jsonRequest(config, "PUT", "/policies/profiles/draft", {
+      policy,
+      orgId: config.orgId || undefined,
     });
-    clearTimeout(timeout);
-    const data = await res.json().catch(() => null);
-    return {
-      ok: res.ok,
-      status: res.status,
-      policy: data?.policy || null,
-      version: Number.isFinite(data?.version) ? data.version : 0,
-      updatedBy: data?.updatedBy || "dashboard",
-    };
+    if (!draft.ok) {
+      return { ok: false, status: draft.status, reason: `draft failed: HTTP ${draft.status}` };
+    }
+    const proposal = await jsonRequest(config, "POST", "/policies/profiles/propose", {
+      reason: reason || "Updated via /armor (terminal)",
+      orgId: config.orgId || undefined,
+    });
+    if (!proposal.ok) {
+      return {
+        ok: false,
+        status: proposal.status,
+        reason: `propose failed: HTTP ${proposal.status}`,
+      };
+    }
+    return { ok: true, status: proposal.status, data: proposal.data };
   } catch (err) {
-    return { ok: false, reason: String(err?.message || err), policy: null };
+    return { ok: false, reason: String(err?.message || err) };
+  }
+}
+
+/** Push a saved profile's policy to the backend as a staged proposal. */
+export async function pushProfile(config, profile) {
+  return proposePolicy(
+    config,
+    profile?.policy,
+    `Profile "${profile?.profile?.name || "unnamed"}" proposed via /armor`
+  );
+}
+
+/** Sync the current active policy to the backend as a staged proposal. */
+export async function syncPolicy(config, policyState) {
+  return proposePolicy(config, policyState?.policy, "Policy synced via /armor (terminal)");
+}
+
+/** Read the org's active armor policy (API-key scoped: GET profiles/active). */
+export async function pullProfiles(config) {
+  if (!hasBackend(config)) return { ok: false, reason: "no backend configured", profiles: [] };
+  try {
+    const res = await jsonRequest(config, "GET", "/policies/profiles/active");
+    const policy = res.data?.policy;
+    const profiles = policy
+      ? [{ profile: { name: "active", description: "Active org policy" }, policy }]
+      : [];
+    return { ok: res.ok, status: res.status, profiles };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err), profiles: [] };
   }
 }
 

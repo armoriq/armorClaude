@@ -7,13 +7,20 @@ import {
 } from "./common.mjs";
 import {
   addPromptContext,
+  armorReply,
   askPreTool,
+  allowWithNotice,
   blockPrompt,
   denyPreTool,
   denyPreToolWithHint,
+  isBillingError,
 } from "./hook-output.mjs";
-import { isArmorPolicyCommand, handleArmorPolicyCommand } from "./armor-policy-commands.mjs";
-import { getTemplateNames } from "./policy-templates.mjs";
+import {
+  isArmorPolicyCommand,
+  handleArmorPolicyCommand,
+  syncActivePolicyFromBackend,
+} from "./armor-policy-commands.mjs";
+import { getTemplateNames, getTemplate } from "./policy-templates.mjs";
 import {
   checkIntentTokenPlan,
   checkToolAgainstPlan,
@@ -28,12 +35,13 @@ import {
   validateCsrgProofHeaders,
 } from "./intent.mjs";
 import { createIapService, reanchorViaSdk, revokeViaSdk } from "./iap-service.mjs";
-import { computePolicyHash, evaluatePolicy, loadPolicyState, savePolicyState } from "./policy.mjs";
-import { validatePolicyIr } from "./policy-ir.mjs";
+import armoriqSdk from "@armoriq/sdk-dev";
+import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
+import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
 import { readJson } from "./fs-store.mjs";
-import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { homedir } from "node:os";
 import {
@@ -41,12 +49,13 @@ import {
   getSession,
   loadRuntimeState,
   saveRuntimeState,
+  setActiveSessionId,
   upsertDiscoveredTool,
   upsertSession,
 } from "./runtime-state.mjs";
 import { sha256Hex } from "./common.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
-import { autoRegisterMcp, syncMcpRegistry, pullActivePolicy } from "./backend-client.mjs";
+import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
 
@@ -54,52 +63,35 @@ import { compileToOpaInput } from "./policy-compiler.mjs";
 // Helpers
 // ---------------------------------------------------------------------------
 
-// In-memory store for tool-call start timestamps. Keyed by tool_use_id
-// (or sessionId:toolName fallback). Entries are deleted after PostToolUse /
-// PostToolUseFailure so the map doesn't grow unboundedly.
-const _toolStartTimes = new Map();
-
-/** Derive a stable key for the tool-start-time map. */
-function _toolTimingKey(input) {
-  if (typeof input.tool_use_id === "string" && input.tool_use_id) {
-    return input.tool_use_id;
-  }
-  const sid = typeof input.session_id === "string" ? input.session_id : "";
-  const tn = typeof input.tool_name === "string" ? input.tool_name : "";
-  return `${sid}:${tn}`;
-}
-
-/** Record the start timestamp for a tool call. */
-export function _recordToolStart(input) {
-  _toolStartTimes.set(_toolTimingKey(input), Date.now());
-}
-
-/**
- * Compute elapsed duration_ms for a tool call.
- * Returns null if no start timestamp was recorded (never fabricates a duration).
- * Deletes the entry after retrieval.
- */
-export function _computeToolDuration(input) {
-  const key = _toolTimingKey(input);
-  const start = _toolStartTimes.get(key);
-  _toolStartTimes.delete(key);
-  if (start == null) return null;
-  return Date.now() - start;
-}
-
-// Exposed for testing only — clear all entries.
-export function _clearToolStartTimes() {
-  _toolStartTimes.clear();
-}
-
 const INTENT_POLICY_COMPILER_VERSION = "sdk-csrg-policy-v1";
 
 function shouldDeny(config) {
   return config.mode === "enforce";
 }
 
+/**
+ * True when the active policy permits everything with no friction — default
+ * decision "allow" and every statement is a plain permit (no deny/forbid,
+ * no require_approval). This is the "All Allow" template the user picks at
+ * onboarding when they want ArmorClaude out of the way.
+ *
+ * When true, we treat intent as NOT required: no register_intent_plan gate,
+ * no token needed, no drift blocking. The user asked for everything allowed —
+ * so tools just run, exactly like Claude Code without the plugin. (balanced /
+ * strict / lockdown all have a deny or require_approval statement, so they do
+ * NOT qualify and keep full enforcement.)
+ */
+function isFrictionlessAllowPolicy(policy) {
+  try {
+    const ir = normalizePolicyIr(policy);
+    return ir.defaults.decision === "allow" && ir.statements.every((s) => s.effect === "permit");
+  } catch {
+    return false;
+  }
+}
+
 function legacyArmorPolicyMessage() {
-  return "Legacy /armor-policy is intentionally unsupported. Use /armor policy ... instead.";
+  return "Legacy /armor-policy is intentionally unsupported. Use /armorclaude:armor policy ... instead.";
 }
 
 function mergeIntentIntoSession(session, intentResponse, config) {
@@ -346,6 +338,45 @@ async function emitAudit({ dto, config, iapService }) {
 }
 
 /**
+ * Best-effort: capture per-model token usage from the session transcript and
+ * report it to the dashboard via the SDK (`POST /dashboard/token-usage`). This
+ * is the single cross-tool path shared with ArmorCodex/Copilot:
+ * `summarizeTranscriptUsage` + `client.recordTokenUsage`.
+ *
+ * Stop fires every turn, so we debounce on the cumulative token total and only
+ * POST when it changed. The backend upsert SETS the per-(session,model) counts,
+ * so re-posting a cumulative total is idempotent and never double-counts.
+ * `product` is sent explicitly so attribution works even if the API key has
+ * product=NULL. `session.lastTokenTotal` is mutated in place; the caller
+ * persists it. Failures are swallowed — token telemetry never breaks the hook.
+ */
+async function reportTokenUsage(input, config, session, sessionId) {
+  if (!config.apiKey) return;
+  try {
+    const entries = armoriqSdk.summarizeTranscriptUsage(input?.transcript_path);
+    const total = entries.reduce(
+      (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
+      0
+    );
+    if (total > 0 && total !== session.lastTokenTotal) {
+      const result = await getSdkClient(config).recordTokenUsage({
+        product: config.productSlug,
+        sessionId,
+        entries,
+      });
+      if (result?.ok) session.lastTokenTotal = total;
+      debugLog(
+        config,
+        `[tokens] ${entries.length} model(s) total=${total} ${result?.ok ? "ok" : "failed:" + (result?.reason || "")}`
+      );
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    debugLog(config, `[tokens] usage report failed (non-fatal): ${msg}`);
+  }
+}
+
+/**
  * Pick the best matching step index in the plan for a given tool call.
  * Prefers a step that matches BOTH tool name and parameters, falls back to
  * tool name only, then to step 0. Used to populate audit log step_index so
@@ -372,6 +403,9 @@ export async function handleSessionStart(input, config) {
     startedAt: nowEpochSeconds(),
     discoveredTools: [],
   });
+  // Stamp the active-session pointer so the policy MCP server (which cannot see
+  // session_id) can scope register_intent_plan + Trust Update ops to this session.
+  setActiveSessionId(runtimeState, sessionId);
   await saveRuntimeState(config.runtimeFile, runtimeState);
 
   // --- Fire-and-forget: sync MCP registry from backend (if apiKey set) ---
@@ -392,53 +426,50 @@ export async function handleSessionStart(input, config) {
       .catch(() => {});
   }
 
-  // --- Fire-and-forget: pull the org's ACTIVE armor policy from the dashboard
-  // backend (if apiKey set). Human-authored, human-activated policy flows into
-  // Claude Code here. Read-only on our side. Enforcement re-reads policy.json on
-  // every PreToolUse, so the next tool call picks this up automatically.
+  // --- Dashboard-authoritative sync: pull the confirmed org policy and make it
+  // the locally enforced policy, so the session enforces exactly what the
+  // dashboard shows. Awaited so it applies before any tool runs. Fail-safe:
+  // never throws and never wipes local policy on error (see the helper).
+  let syncNote = "";
   if (config.apiKey) {
-    pullActivePolicy(config)
-      .then(async (result) => {
-        if (!result.ok || !result.policy) return;
-        const validation = validatePolicyIr(result.policy);
-        if (!validation.ok) {
-          debugLog(config, `pulled policy rejected: ${validation.errors.join("; ")}`);
-          return;
-        }
-        // Track the last-applied DASHBOARD version separately from policy.json's
-        // local version counter (which /armor edits bump independently). Comparing
-        // against the local counter would let a local v6 block a dashboard v1.
-        const markerPath = path.join(config.dataDir, "dashboard-policy.version");
-        let lastPulled = -1;
-        try {
-          const raw = Number.parseInt(await readFile(markerPath, "utf8"), 10);
-          if (Number.isFinite(raw)) lastPulled = raw;
-        } catch {
-          /* no marker yet — first pull */
-        }
-        if (result.version <= lastPulled) {
-          debugLog(config, `dashboard policy v${result.version} already applied; skipping`);
-          return;
-        }
-        const local = await loadPolicyState(config.policyFile);
-        await savePolicyState(config.policyFile, {
-          ...local,
-          version: (local.version || 0) + 1,
-          updatedAt: new Date().toISOString(),
-          updatedBy: result.updatedBy || "dashboard",
-          policy: validation.policy,
-        });
-        await mkdir(config.dataDir, { recursive: true });
-        await writeFile(markerPath, String(result.version), "utf8");
-        debugLog(config, `applied dashboard policy v${result.version}`);
-      })
-      .catch(() => {});
+    try {
+      const pulled = await syncActivePolicyFromBackend(config);
+      if (pulled.ok && pulled.changed) {
+        syncNote = ` Policy synced from dashboard (v${pulled.version}).`;
+        debugLog(config, `policy synced from backend: v${pulled.version}`);
+      } else if (!pulled.ok) {
+        debugLog(config, `policy sync skipped: ${pulled.reason}`);
+      }
+    } catch (err) {
+      debugLog(config, `policy sync error: ${err?.message || err}`);
+    }
   }
 
   debugLog(config, `session started: ${sessionId}, mode=${config.mode}`);
 
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
   const intentLabel = config.intentRequired ? "required" : "optional";
+
+  // --- Not connected: installed but no usable API key. Show a clear setup
+  // banner and run passively (monitor mode) instead of bricking the session.
+  // This is the fresh `claude plugin install` path, which never ran the
+  // interactive installer/onboarding. ---
+  if (config.unconfigured) {
+    const staleNote = config.hadUnusableKey
+      ? "\n(An existing credential was ignored — it isn't a valid ArmorIQ key.)"
+      : "";
+    return addPromptContext(
+      `ArmorClaude installed but NOT connected — no valid ArmorIQ API key found.${staleNote}\n` +
+        `Running in MONITOR mode: observing only, your tools are not blocked.\n\n` +
+        `To enable protection:\n` +
+        `  1. Get an API key: https://tools.armoriq.ai/tools/api-keys\n` +
+        `  2. Provide it via the plugin's API_KEY setting, or set ` +
+        `ARMORIQ_API_KEY=ak_live_… (or add it to ~/.armoriq/credentials.json).\n` +
+        `Once a valid key is present, ArmorClaude enforces automatically.\n` +
+        `Type /armorclaude:armor for all commands.`,
+      "SessionStart"
+    );
+  }
 
   // --- First-run onboarding: if no policy.json, show template picker ---
   const onboardingFlag = path.join(config.dataDir, "onboarding-shown");
@@ -453,21 +484,37 @@ export async function handleSessionStart(input, config) {
       () => false
     );
     if (!flagExists) {
-      const templates = getTemplateNames();
-      onboardingMsg =
-        "\n\nWelcome to ArmorClaude! No policy is configured yet.\n" +
-        "Choose a template to get started:\n\n" +
-        templates.map((t) => `  /armor policy template ${t}`).join("\n") +
-        "\n\nOr add individual rules:\n" +
-        "  /armor policy add allow Read and Grep, deny Write, hold Bash\n\n" +
-        "Type /armor for all commands.";
+      const pick = config.defaultTemplate;
+      if (pick && getTemplate(pick)) {
+        // Configured default template: stage it as a proposal (never silently
+        // applied) via the same command path the user would run by hand. The
+        // returned text is the standard proposal, awaiting explicit confirm.
+        const proposal = await handleArmorPolicyCommand(`/armor template ${pick}`, config);
+        onboardingMsg =
+          `\n\nWelcome to ArmorClaude! Your configured default template "${pick}" ` +
+          `has been proposed (nothing is active until you confirm):\n\n${proposal}`;
+      } else {
+        const templates = getTemplateNames();
+        const invalidNote =
+          pick && !getTemplate(pick)
+            ? `\nConfigured default template "${pick}" is not recognized — pick one below.\n`
+            : "";
+        onboardingMsg =
+          "\n\nWelcome to ArmorClaude! No policy is configured yet.\n" +
+          invalidNote +
+          "Choose a template to get started:\n\n" +
+          templates.map((t) => `  /armorclaude:armor policy template ${t}`).join("\n") +
+          "\n\nOr add individual rules:\n" +
+          "  /armorclaude:armor policy add allow Read and Grep, deny Write, hold Bash\n\n" +
+          "Type /armorclaude:armor for all commands.";
+      }
       await mkdir(config.dataDir, { recursive: true });
       await writeFile(onboardingFlag, new Date().toISOString(), "utf8");
     }
   }
 
   return addPromptContext(
-    `ArmorClaude active (${modeLabel}, intent=${intentLabel})${onboardingMsg}`,
+    `ArmorClaude active (${modeLabel}, intent=${intentLabel})${syncNote}${onboardingMsg}`,
     "SessionStart"
   );
 }
@@ -480,7 +527,7 @@ export async function handleUserPromptExpansion(input, config) {
   const prompt = typeof input?.prompt === "string" ? input.prompt.trim() : "";
   if (isArmorPolicyCommand(prompt)) {
     const response = await handleArmorPolicyCommand(prompt, config);
-    return blockPrompt(response);
+    return armorReply(response);
   }
 
   const commandName = typeof input?.command_name === "string" ? input.command_name.trim() : "";
@@ -488,7 +535,7 @@ export async function handleUserPromptExpansion(input, config) {
   const normalizedCommand = commandName.toLowerCase().replace(/^\/+/, "");
   if (["armor", "armorclaude:armor"].includes(normalizedCommand)) {
     const response = await handleArmorPolicyCommand(`/armor ${commandArgs}`.trim(), config);
-    return blockPrompt(response);
+    return armorReply(response);
   }
   if (["armor-policy", "armorclaude:armor-policy"].includes(normalizedCommand)) {
     return blockPrompt(legacyArmorPolicyMessage());
@@ -511,7 +558,7 @@ export async function handleUserPromptSubmit(input, config) {
   // --- /armor commands: human-only, policy-immune ---
   if (isArmorPolicyCommand(prompt)) {
     const response = await handleArmorPolicyCommand(prompt, config);
-    return blockPrompt(response);
+    return armorReply(response);
   }
   if (/^\s*\/(?:armor-policy|armorclaude:armor-policy)\b/i.test(prompt)) {
     return blockPrompt(legacyArmorPolicyMessage());
@@ -523,14 +570,27 @@ export async function handleUserPromptSubmit(input, config) {
     lastPrompt: prompt,
     lastPromptAt: nowEpochSeconds(),
   });
+  // Refresh the active-session pointer: register_intent_plan (MCP) is typically
+  // the next event, and it resolves the session id from here.
+  setActiveSessionId(runtimeState, sessionId);
   await saveRuntimeState(config.runtimeFile, runtimeState);
 
   // --- Inject directive: tell Claude to register its intent plan ---
   // Claude will call the `register_intent_plan` MCP tool (or include a JSON
   // block in its plan file) as its first action. This uses the session's own
   // LLM — no separate API key or extra LLM call needed.
+  //
+  // Only inject this when intent is ACTUALLY enforced. Under an all-allow
+  // (frictionless) policy, handlePreToolUse does not gate tool calls, so
+  // telling Claude "enforcement is active" and "tools will be blocked" is
+  // false — and it makes Claude report a missing `register_intent_plan` tool
+  // and proceed unguarded when the policy MCP isn't surfaced. Keep this gate
+  // consistent with handlePreToolUse's enforceIntent computation.
+  const policyState = await loadPolicyState(config.policyFile);
+  const allowAll = isFrictionlessAllowPolicy(policyState.policy);
+  const enforceIntent = config.intentRequired && !allowAll;
   const parts = [];
-  if (config.planningEnabled) {
+  if (config.planningEnabled && enforceIntent) {
     parts.push(
       "ArmorClaude intent enforcement is active. Before using any tool, " +
         "declare your plan in this exact JSON shape:\n\n" +
@@ -539,8 +599,14 @@ export async function handleUserPromptSubmit(input, config) {
         "How to submit:\n" +
         "- If in plan mode: include the JSON block (fenced with ```json) " +
         "at the end of your plan file.\n" +
-        "- Otherwise: call `register_intent_plan` with the JSON as the " +
+        "- Otherwise: call the register_intent_plan tool (provided by the " +
+        "armorclaude-policy MCP server; it may appear namespaced, e.g. " +
+        "mcp__armorclaude-policy__register_intent_plan) with the JSON as the " +
         "argument BEFORE any other tool call.\n" +
+        "If that tool is not in your tool list, the ArmorClaude policy MCP " +
+        "server is not connected: do not fabricate the call, and tell the " +
+        "user to verify it with `claude mcp list` (expect armorclaude-policy " +
+        "Connected) before relying on enforcement.\n" +
         "Tool calls without a registered plan will be blocked."
     );
   }
@@ -555,10 +621,6 @@ export async function handleUserPromptSubmit(input, config) {
 // ---------------------------------------------------------------------------
 
 export async function handlePreToolUse(input, config) {
-  // Record start timestamp BEFORE any deny/early-return so even denied calls
-  // have timing data available for PostToolUse/PostToolUseFailure.
-  _recordToolStart(input);
-
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
   const toolInput = sanitizeParams(input.tool_input, config.sanitize);
@@ -600,6 +662,22 @@ export async function handlePreToolUse(input, config) {
     return null;
   }
 
+  // --- Allowlist: ArmorClaude's own management skill (/armorclaude:armor) is
+  //     the escape hatch for fixing an over-restrictive policy. Under a
+  //     default-deny policy an agent's Skill(armorclaude:armor) call would
+  //     otherwise be denied ("no statement matched tool Skill"), deadlocking
+  //     the user out of the very command that fixes the policy. Exempt it.
+  //     (Invoking the skill isn't itself a security-relevant action — any tool
+  //     the skill goes on to run is still policy-checked at its own PreToolUse.)
+  if (norm === "skill") {
+    const skillRef = String(toolInput?.skill ?? toolInput?.name ?? "")
+      .trim()
+      .toLowerCase();
+    if (skillRef === "armor" || skillRef === "armorclaude:armor" || skillRef.endsWith(":armor")) {
+      return null;
+    }
+  }
+
   // --- Path guard: block write operations targeting policy/credential files.
   //     Read operations (cat, Read tool) are allowed --- only mutations blocked.
   const PROTECTED_PATHS = [
@@ -621,7 +699,7 @@ export async function handlePreToolUse(input, config) {
       )
     ) {
       return denyPreTool(
-        "ArmorClaude: direct modification of policy files is blocked. Use /armor policy commands."
+        "ArmorClaude: direct modification of policy files is blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
@@ -636,14 +714,14 @@ export async function handlePreToolUse(input, config) {
       )
     ) {
       return denyPreTool(
-        "ArmorClaude: policy management is human-only. Type /armor policy in the terminal."
+        "ArmorClaude: policy management is human-only. Type /armorclaude:armor policy in the terminal."
       );
     }
     const WRITE_OPS =
       /\b(>|>>|tee|mv|cp|rm|sed\s+-i|awk\s.*>|chmod|cat\s*<<|echo.*>|truncate|dd\b)/;
     if (PROTECTED_PATHS.some((p) => cmd.includes(path.basename(p))) && WRITE_OPS.test(cmd)) {
       return denyPreTool(
-        "ArmorClaude: shell write commands targeting policy files are blocked. Use /armor policy commands."
+        "ArmorClaude: shell write commands targeting policy files are blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
@@ -712,12 +790,12 @@ export async function handlePreToolUse(input, config) {
         mcpApprovalReason =
           `ArmorClaude: MCP server "${server}" is not approved. ` +
           "Approve this one tool call in Claude Code, or type " +
-          `/armor mcp approve ${server} to trust this server persistently.`;
+          `/armorclaude:armor mcp approve ${server} to trust this server persistently.`;
       }
       if (entry?.status === "denied") {
         return denyPreTool(
           `ArmorClaude: MCP server "${server}" is denied by policy. ` +
-            `Type /armor policy mcp approve ${server} to change this.`
+            `Type /armorclaude:armor policy mcp approve ${server} to change this.`
         );
       }
     }
@@ -828,6 +906,11 @@ export async function handlePreToolUse(input, config) {
   // --- Static policy evaluation ---
   const policyState = await loadPolicyState(config.policyFile);
   const currentPolicyHash = computePolicyHash(policyState.policy);
+  // "All Allow" onboarding policy => run frictionless: no intent-plan gate, no
+  // token required, no drift blocking. Any policy with a deny/require_approval
+  // keeps full enforcement.
+  const allowAll = isFrictionlessAllowPolicy(policyState.policy);
+  const enforceIntent = config.intentRequired && !allowAll;
 
   // Crypto policy digest check (Phase 4 integration point)
   if (config.cryptoPolicyEnabled) {
@@ -882,6 +965,13 @@ export async function handlePreToolUse(input, config) {
   let localExpiresAt = session.expiresAt;
   let remoteAllowed = false;
   let tokenCheckMatched = false;
+  // Set when the backend billing/subscription gate (402) makes the remote
+  // layer (intent tokens, CSRG proofs, dashboard audit) unavailable. It does
+  // NOT relax local policy — deny/hold/allow are still enforced from the
+  // configured policy; it only drops the remote-token requirement so a free
+  // user isn't blocked with a cryptic "intent plan missing".
+  let billingDegraded = false;
+  let billingNotice = "";
   let usedStepIndices =
     intentTokenRaw && localPlan
       ? getSessionTokenUsedStepIndices(session, intentTokenRaw)
@@ -930,11 +1020,51 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // If no token, try to acquire one
-  if (!intentTokenRaw && config.apiKey) {
+  // Check the registered plan BEFORE acquiring a token. The mint below sends
+  // toolName/toolInput to the backend, which builds a plan around them — so
+  // minting first meant an off-plan call replaced the registered plan and was
+  // then validated against a plan derived from itself. With an API key
+  // configured that made drift enforcement a no-op: a session whose plan
+  // declared only Read would happily run Bash, and runtime.json would show the
+  // Read step overwritten by the Bash call. Gate the mint instead.
+  if (!intentTokenRaw && config.apiKey && !allowAll && enforceIntent && shouldDeny(config)) {
+    if (isPlainObject(localPlan)) {
+      const preMintCheck = checkToolAgainstPlan({
+        plan: localPlan,
+        toolName,
+        toolInput,
+        strict: !!config.strictParamCheck,
+      });
+      if (!preMintCheck.allowed) {
+        return denyPreToolWithHint(preMintCheck.reason || "ArmorClaude intent drift", {
+          toolName,
+          toolInput,
+          goal: session.lastPrompt,
+          knownPlan: localPlan,
+        });
+      }
+    } else {
+      // Nothing registered for this session. Minting a plan from the tool call
+      // would rubber-stamp it, so require register_intent_plan instead.
+      return denyPreToolWithHint("ArmorClaude intent plan missing for this session", {
+        toolName,
+        toolInput,
+        goal: session.lastPrompt,
+      });
+    }
+  }
+
+  // If no token, try to acquire one. Skipped entirely for all-allow: no token
+  // is needed to run frictionless, and skipping avoids the backend round-trip
+  // (and its billing/CSRG failure modes) on a policy that permits everything.
+  if (!intentTokenRaw && config.apiKey && !allowAll) {
     try {
       const intentResponse = await requestIntent(config, {
         prompt: session.lastPrompt || `Use tool ${toolName}`,
+        // Bind the token to the plan the user registered. Without this the
+        // backend synthesizes one from toolName/toolInput and the registered
+        // plan is silently replaced.
+        ...(isPlainObject(localPlan) ? { plan: localPlan } : {}),
         session_id: sessionId,
         toolName,
         toolInput,
@@ -959,7 +1089,29 @@ export async function handlePreToolUse(input, config) {
           : undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (config.intentRequired && shouldDeny(config)) {
+      // A billing/subscription 402 only means the REMOTE layer is unavailable —
+      // it is NOT a policy decision. The configured policy is still enforced
+      // locally: a deny already returned above (policyDecision), and hold/allow
+      // are handled below. So don't hard-block (cryptic) and don't blanket-allow
+      // (that would ignore deny/hold) — degrade the remote layer, fall through,
+      // and nudge to upgrade once per session.
+      if (isBillingError(message)) {
+        billingDegraded = true;
+        debugLog(
+          config,
+          `billing gate: remote layer degraded, local policy still enforced: ${message}`
+        );
+        if (!session.billingNoticeShown) {
+          upsertSession(runtimeState, sessionId, { billingNoticeShown: true });
+          const upgradeUrl =
+            config.upgradeUrl ||
+            process.env.ARMORCLAUDE_UPGRADE_URL ||
+            "https://tools.armoriq.ai/tools/billing";
+          billingNotice =
+            `⚠ ArmorIQ Pro required for remote audit & CSRG proofs. Your policy is ` +
+            `still enforced locally (allow / deny / hold). Upgrade: ${upgradeUrl}`;
+        }
+      } else if (enforceIntent && shouldDeny(config)) {
         return denyPreTool(`ArmorClaude intent planning failed: ${message}`);
       }
     }
@@ -974,7 +1126,7 @@ export async function handlePreToolUse(input, config) {
     });
     if (tokenCheck.matched) {
       tokenCheckMatched = true;
-      if (tokenCheck.blockReason) {
+      if (tokenCheck.blockReason && !allowAll) {
         return denyOrAllow(config, tokenCheck.blockReason);
       }
       localPlan = tokenCheck.plan || localPlan;
@@ -1072,7 +1224,7 @@ export async function handlePreToolUse(input, config) {
     } else {
       // Phase 4 A3: include the exact register_intent_plan JSON in the deny
       // reason so the LLM auto-corrects in 1 follow-up turn.
-      if (shouldDeny(config)) {
+      if (shouldDeny(config) && !allowAll) {
         return denyPreToolWithHint(localCheck.reason || "ArmorClaude intent drift", {
           toolName,
           toolInput,
@@ -1084,7 +1236,15 @@ export async function handlePreToolUse(input, config) {
   }
 
   // --- Enforce intent requirement ---
-  if (config.intentRequired && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
+  // billingDegraded relaxes ONLY the remote-token requirement — local policy
+  // (deny/hold/allow) was already applied above and still governs the outcome.
+  if (
+    enforceIntent &&
+    !billingDegraded &&
+    !remoteAllowed &&
+    !tokenCheckMatched &&
+    !localPlanMatched
+  ) {
     if (shouldDeny(config)) {
       return denyPreToolWithHint("ArmorClaude intent plan missing for this session", {
         toolName,
@@ -1105,12 +1265,15 @@ export async function handlePreToolUse(input, config) {
     return askPreTool(mcpApprovalReason);
   }
   if (requiresUserApproval) {
-    return askPreTool(
+    const askReason =
       policyDecision.reason ||
-        `ArmorClaude policy requires your approval before running ${toolName}.`
-    );
+      `ArmorClaude policy requires your approval before running ${toolName}.`;
+    const ask = askPreTool(billingNotice ? `${askReason}\n\n${billingNotice}` : askReason);
+    if (billingNotice) ask.systemMessage = billingNotice;
+    return ask;
   }
-  return null;
+  // Allowed. Surface the one-time upgrade nudge if we degraded the remote layer.
+  return billingNotice ? allowWithNotice(billingNotice) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,41 +1371,67 @@ export async function handlePostToolUse(input, config) {
     const iapService = createIapService(config);
 
     const intentTokenRaw = session.intentTokenRaw || "";
-    if (!intentTokenRaw) return null;
-    let token = intentTokenRaw;
-    // Extract JWT if embedded in JSON envelope
-    if (intentTokenRaw.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(intentTokenRaw);
-        token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch {
-        /* use raw */
-      }
-    }
-
-    // Compute the real step index from the registered plan so the backend's
-    // updateExecutionProgress can advance plan status to 'completed'.
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs);
 
-    const dto = {
-      token,
-      step_index: stepIdx,
-      action: toolName,
-      tool: toolName,
-      input: redactSecrets(inputs),
-      output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
-      status: "success",
-      executed_at: new Date().toISOString(),
-      duration_ms: _computeToolDuration(input),
-    };
+    let dto;
+    if (intentTokenRaw) {
+      let token = intentTokenRaw;
+      // Extract JWT if embedded in JSON envelope
+      if (intentTokenRaw.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(intentTokenRaw);
+          token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
+        } catch {
+          /* use raw */
+        }
+      }
+      // Compute the real step index from the registered plan so the backend's
+      // updateExecutionProgress can advance plan status to 'completed'.
+      const stepIdx = pickStepIndex(session.plan, toolName, inputs);
+      dto = {
+        token,
+        step_index: stepIdx,
+        action: toolName,
+        tool: toolName,
+        input: redactSecrets(inputs),
+        output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
+        status: "success",
+        executed_at: new Date().toISOString(),
+        duration_ms: 0,
+      };
+    } else {
+      // No intent token. Under an all-allow (frictionless) policy this is
+      // expected — no plan is registered, so no token is minted (see
+      // isFrictionlessAllowPolicy). But the action should still be recorded,
+      // otherwise the audit trail goes silent whenever enforcement is off
+      // (#116). Emit a session-scoped row: no token, attributed via explicit
+      // identity; the backend stores it as an orphan row (planId null). In
+      // enforce mode a missing token is not a valid audit context, so we do
+      // NOT fabricate one — keep returning null there.
+      const policyState = await loadPolicyState(config.policyFile);
+      if (!isFrictionlessAllowPolicy(policyState.policy)) return null;
+      dto = {
+        session_id: sessionId,
+        user_id: config.userId,
+        agent_id: config.agentId,
+        client_id: config.mcpName || config.llmId,
+        step_index: -1,
+        action: toolName,
+        tool: toolName,
+        input: redactSecrets(inputs),
+        output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
+        status: "success",
+        executed_at: new Date().toISOString(),
+        duration_ms: 0,
+      };
+    }
 
     // Phase 4 A4 (via Tier B): if daemon is enabled, enqueue the audit DTO
     // for fire-and-forget batched flush. This actually delivers the
     // latency win — without daemon, we still need to await the POST because
     // the hook process can't exit while a socket is open.
     const target = await emitAudit({ dto, config, iapService });
-    debugLog(config, `audit log ${target} for ${toolName} step=${stepIdx}`);
+    debugLog(config, `audit log ${target} for ${toolName}`);
   } catch (error) {
     // Audit is best-effort — don't block
     debugLog(config, `audit log failed: ${error}`);
@@ -1295,7 +1484,7 @@ export async function handlePostToolUseFailure(input, config) {
       status: "failed",
       error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error",
       executed_at: new Date().toISOString(),
-      duration_ms: _computeToolDuration(input),
+      duration_ms: 0,
     };
 
     const target = await emitAudit({ dto, config, iapService });
@@ -1378,8 +1567,13 @@ export async function handleStop(input, config) {
     }
   }
 
+  // Report cumulative token usage from the transcript at the turn boundary.
+  // Mutates session.lastTokenTotal in place (debounce marker) which we persist.
+  await reportTokenUsage(input, config, session, sessionId);
+
   upsertSession(runtimeState, sessionId, {
     lastStopAt: nowEpochSeconds(),
+    lastTokenTotal: session.lastTokenTotal,
   });
   await saveRuntimeState(config.runtimeFile, runtimeState);
   return null;

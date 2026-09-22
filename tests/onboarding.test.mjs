@@ -54,7 +54,7 @@ test("first-run onboarding: shows welcome when no policy.json exists", async () 
   const ctx = output?.hookSpecificOutput?.additionalContext || "";
   assert.ok(ctx.includes("ArmorClaude active"));
   assert.ok(ctx.includes("Welcome to ArmorClaude"));
-  assert.ok(ctx.includes("/armor policy template"));
+  assert.ok(ctx.includes("/armorclaude:armor policy template"));
   assert.ok(ctx.includes("all-allow"));
   assert.ok(ctx.includes("balanced"));
   assert.ok(ctx.includes("lockdown"));
