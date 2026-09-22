@@ -2,8 +2,8 @@
 // One-shot historical token-usage backfill for ArmorClaude.
 //
 // Enumerates every local Claude Code transcript, summarizes per-session token
-// usage with the SDK, derives usageDate / deviceId / repo, and POSTs one row
-// per session to POST {backendEndpoint}/dashboard/token-usage (X-API-Key auth).
+// usage with the SDK split by UTC day, and POSTs one row per session-day, with
+// the repo and device, to POST {backendEndpoint}/dashboard/token-usage.
 // This exists so usage from sessions that ran before the plugin was installed,
 // or while it was disabled and later re-enabled, still shows on the dashboard
 // with its real date instead of "today".
@@ -20,13 +20,12 @@
 //             the analytics on/off filter reads a server-derived signal anyway.
 // --limit N : only process the first N transcripts (debugging).
 
-import { readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { homedir, hostname } from "node:os";
-import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import path from "node:path";
-import { summarizeTranscriptUsage } from "@armoriq/sdk-dev";
+import { summarizeTranscriptUsageByDay } from "@armoriq/sdk-dev";
 import { loadConfig } from "./lib/config.mjs";
+import { deviceIdentity } from "./lib/device.mjs";
 
 const argv = process.argv.slice(2);
 const args = new Set(argv);
@@ -38,8 +37,7 @@ const LIMIT = limitIdx >= 0 ? Number(argv[limitIdx + 1]) : Infinity;
 
 const PROJECTS_DIR = path.join(homedir(), ".claude", "projects");
 
-const deviceName = hostname();
-const deviceId = "dev_" + createHash("sha256").update(deviceName).digest("hex").slice(0, 16);
+const { deviceId, deviceName } = deviceIdentity();
 
 async function walkJsonl(dir) {
   const out = [];
@@ -55,62 +53,6 @@ async function walkJsonl(dir) {
     else if (e.isFile() && e.name.endsWith(".jsonl")) out.push(full);
   }
   return out;
-}
-
-// Session end date (UTC) from the last line carrying a valid ISO `timestamp`.
-// Token totals are cumulative, so the last line is the meaningful one; fall
-// back to the file mtime when nothing parses.
-function deriveUsageDate(file) {
-  let raw;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch {
-    return fileMtimeDate(file);
-  }
-  const lines = raw.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const t = lines[i].trim();
-    if (!t) continue;
-    try {
-      const ts = JSON.parse(t)?.timestamp;
-      if (typeof ts === "string") {
-        const d = new Date(ts);
-        if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
-      }
-    } catch {
-      /* skip malformed line */
-    }
-  }
-  return fileMtimeDate(file);
-}
-
-// repo = the session's cwd, read from the first line that carries one.
-function deriveRepo(file) {
-  let raw;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch {
-    return undefined;
-  }
-  for (const line of raw.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    try {
-      const cwd = JSON.parse(t)?.cwd;
-      if (typeof cwd === "string" && cwd) return cwd;
-    } catch {
-      /* skip malformed line */
-    }
-  }
-  return undefined;
-}
-
-function fileMtimeDate(file) {
-  try {
-    return statSync(file).mtime.toISOString().slice(0, 10);
-  } catch {
-    return new Date().toISOString().slice(0, 10);
-  }
 }
 
 async function post(config, body) {
@@ -147,52 +89,54 @@ async function main() {
   let failed = 0;
   for (const file of files) {
     const sessionId = path.basename(file, ".jsonl");
-    let entries;
+    let usage;
     try {
-      entries = summarizeTranscriptUsage(file); // sync, reads the file itself
+      usage = summarizeTranscriptUsageByDay(file); // sync, reads the file itself
     } catch (e) {
       failed++;
       console.error(`[backfill] FAIL summarize ${sessionId}: ${e?.message ?? e}`);
       continue;
     }
-    if (!entries.length) {
+    if (!usage.days.length) {
       empty++;
       console.error(`[backfill] skip  ${sessionId} (no usage)`);
       continue;
     }
-    const body = {
-      product: config.productSlug,
-      sessionId,
-      usageDate: deriveUsageDate(file),
-      deviceId,
-      deviceName,
-      armored: ARMORED,
-      repo: deriveRepo(file),
-      entries,
-    };
-    if (DRY) {
-      console.log(JSON.stringify(body));
-      posted++;
-      continue;
-    }
-    try {
-      const r = await post(config, body);
-      if (r.ok) {
+    for (const day of usage.days) {
+      const body = {
+        product: config.productSlug,
+        sessionId,
+        usageDate: day.usageDate,
+        deviceId,
+        deviceName,
+        armored: ARMORED,
+        repo: usage.repo,
+        entries: day.entries,
+      };
+      if (DRY) {
+        console.log(JSON.stringify(body));
         posted++;
-        console.error(
-          `[backfill] ok    ${sessionId} date=${body.usageDate} models=${entries.length}`
-        );
-      } else {
-        failed++;
-        console.error(`[backfill] FAIL  ${sessionId} http=${r.status} ${r.body.slice(0, 200)}`);
+        continue;
       }
-    } catch (e) {
-      failed++;
-      console.error(`[backfill] FAIL  ${sessionId} ${e?.message ?? e}`);
+      try {
+        const r = await post(config, body);
+        if (r.ok) {
+          posted++;
+          console.error(
+            `[backfill] ok    ${sessionId} date=${body.usageDate} models=${day.entries.length}`
+          );
+        } else {
+          failed++;
+          console.error(`[backfill] FAIL  ${sessionId} http=${r.status} ${r.body.slice(0, 200)}`);
+        }
+      } catch (e) {
+        failed++;
+        console.error(`[backfill] FAIL  ${sessionId} ${e?.message ?? e}`);
+      }
     }
   }
   console.error(
-    `[backfill] done: ${posted} posted, ${empty} no-usage, ${failed} failed, ${files.length} total`
+    `[backfill] done: ${posted} session-day(s) posted, ${empty} no-usage, ${failed} failed, ${files.length} total`
   );
   if (failed) process.exit(1);
 }

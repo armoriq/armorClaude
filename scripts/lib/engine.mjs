@@ -54,6 +54,7 @@ import {
   upsertSession,
 } from "./runtime-state.mjs";
 import { sha256Hex } from "./common.mjs";
+import { deviceIdentity } from "./device.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
@@ -376,37 +377,56 @@ async function emitAudit({ dto, config, iapService }) {
 }
 
 /**
- * Best-effort: capture per-model token usage from the session transcript and
- * report it to the dashboard via the SDK (`POST /dashboard/token-usage`). This
- * is the single cross-tool path shared with ArmorCodex/Copilot:
- * `summarizeTranscriptUsage` + `client.recordTokenUsage`.
+ * Best-effort: report the session's token usage to the dashboard via the SDK
+ * (`POST /dashboard/token-usage`), one row per UTC day with the repo and device.
  *
- * Stop fires every turn, so we debounce on the cumulative token total and only
- * POST when it changed. The backend upsert SETS the per-(session,model) counts,
- * so re-posting a cumulative total is idempotent and never double-counts.
- * `product` is sent explicitly so attribution works even if the API key has
- * product=NULL. `session.lastTokenTotal` is mutated in place; the caller
- * persists it. Failures are swallowed — token telemetry never breaks the hook.
+ * Stop fires every turn, so we debounce on the transcript total and only POST
+ * when it changed. Each day's row is replaced server-side, so re-posting is
+ * idempotent. `product` is sent explicitly so attribution works even if the API
+ * key has product=NULL. `session.lastTokenTotal` is mutated in place; the caller
+ * persists it. Failures are swallowed: token telemetry never breaks the hook.
  */
+// SDKs before summarizeTranscriptUsageByDay only report a session total, which
+// the backend files under today; keep reporting rather than dropping usage.
+async function transcriptUsageByDay(transcriptPath) {
+  if (typeof armoriqSdk.summarizeTranscriptUsageByDay === "function") {
+    return armoriqSdk.summarizeTranscriptUsageByDay(transcriptPath);
+  }
+  const entries = await armoriqSdk.summarizeTranscriptUsage(transcriptPath);
+  return { days: entries.length ? [{ usageDate: undefined, entries }] : [] };
+}
+
 async function reportTokenUsage(input, config, session, sessionId) {
   if (!config.apiKey) return;
   try {
-    const entries = armoriqSdk.summarizeTranscriptUsage(input?.transcript_path);
-    const total = entries.reduce(
-      (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
-      0
-    );
-    if (total > 0 && total !== session.lastTokenTotal) {
-      const result = await getSdkClient(config).recordTokenUsage({
-        product: config.productSlug,
-        sessionId,
-        entries,
-      });
-      if (result?.ok) session.lastTokenTotal = total;
-      debugLog(
-        config,
-        `[tokens] ${entries.length} model(s) total=${total} ${result?.ok ? "ok" : "failed:" + (result?.reason || "")}`
+    const { days, repo } = await transcriptUsageByDay(input?.transcript_path);
+    const total = days
+      .flatMap((day) => day.entries)
+      .reduce(
+        (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
+        0
       );
+    if (total > 0 && total !== session.lastTokenTotal) {
+      const client = getSdkClient(config);
+      const device = deviceIdentity();
+      let allOk = true;
+      for (const day of days) {
+        const result = await client.recordTokenUsage({
+          product: config.productSlug,
+          sessionId,
+          entries: day.entries,
+          usageDate: day.usageDate,
+          repo: repo ?? input?.cwd,
+          ...device,
+          armored: true,
+        });
+        if (!result?.ok) allOk = false;
+        debugLog(
+          config,
+          `[tokens] ${day.usageDate} ${day.entries.length} model(s) ${result?.ok ? "ok" : "failed:" + (result?.reason || "")}`
+        );
+      }
+      if (allOk) session.lastTokenTotal = total;
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
