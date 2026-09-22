@@ -48,3 +48,13 @@ test("plugin version is consistent across every manifest", async () => {
   assert.equal(plugin.version, pkg.version, "plugin.json version must match package.json");
   assert.equal(entry.version, pkg.version, "marketplace.json version must match package.json");
 });
+
+test("dev variant stays discoverable from the published catalog", async () => {
+  const marketplace = await readJson(".claude-plugin/marketplace.json");
+  const entry = marketplace.plugins.find((p) => p.name === "armorclaude-dev");
+
+  assert.ok(entry, "armorclaude-dev must be listed in marketplace.json");
+  assert.equal(entry.source?.source, "github", "dev variant must install from git");
+  assert.equal(entry.source?.repo, "armoriq/armorClaude", "dev variant must track this repo");
+  assert.equal(entry.source?.ref, "dev", "dev variant must track the dev branch");
+});
