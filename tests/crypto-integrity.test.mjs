@@ -352,3 +352,39 @@ test("confirm does not attempt crypto when cryptoPolicyEnabled is false", async 
   assert.ok(!out.includes("Crypto"));
   assert.ok(!out.includes("crypto"));
 });
+
+// ---------------------------------------------------------------------------
+// OPA mode: confirm pushes to backend
+// ---------------------------------------------------------------------------
+
+test("confirm pushes to backend in OPA mode", async () => {
+  let syncCalled = false;
+  const { server, url } = await startMockCsrg((req, res) => {
+    // syncPolicy() proposes through /policies/profiles/draft + /propose. It
+    // stopped using /policies/sync when terminal policy changes became staged
+    // proposals, so matching the old path never fired.
+    if (req.url?.includes("/policies/profiles/")) syncCalled = true;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  try {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "crypto-test-"));
+    const config = buildConfig(tmp, {
+      enforcementEngine: "opa",
+      apiKey: "test-key",
+      backendEndpoint: url,
+    });
+    await seedPolicy(config);
+
+    await handleArmorPolicyCommand("/armor policy add deny Bash", config);
+    await handleArmorPolicyCommand("/armor policy confirm", config);
+    // The push is deliberately fire-and-forget so confirmation is not blocked
+    // on the network, so poll rather than asserting on the next tick.
+    for (let i = 0; i < 50 && !syncCalled; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(syncCalled, "Backend should have been called for OPA sync");
+  } finally {
+    server.close();
+  }
+});
