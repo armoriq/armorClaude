@@ -12,6 +12,7 @@ const installedMarker = path.join(pluginRoot, "node_modules", ".armorclaude-inst
 const packageFiles = [
   path.join(pluginRoot, "node_modules", "@armoriq", "sdk-dev", "package.json"),
   path.join(pluginRoot, "node_modules", "zod", "package.json"),
+  path.join(pluginRoot, "node_modules", "axios", "package.json"),
   path.join(pluginRoot, "node_modules", "@modelcontextprotocol", "sdk", "package.json"),
 ];
 

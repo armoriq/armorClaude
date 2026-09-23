@@ -26,12 +26,12 @@ test("__resetObsForTests exists and is callable", () => {
   assert.ok(true);
 });
 
-import armoriqSdk from "@armoriq/sdk-dev";
+import obsRecorder from "../scripts/lib/obs-recorder/index.cjs";
 import { observeHook } from "../scripts/lib/observability.mjs";
 
-const SDK_HAS_SPANS = typeof armoriqSdk.openSpan === "function";
+const SDK_HAS_SPANS = typeof obsRecorder.openSpan === "function";
 
-test("installed SDK provides every required observability export", () => {
+test("plugin recorder provides every observability export the bridge uses", () => {
   for (const name of [
     "ObservabilityRecorder",
     "startTrace",
@@ -39,7 +39,7 @@ test("installed SDK provides every required observability export", () => {
     "flushObservability",
     "isValidUuid",
   ]) {
-    assert.equal(typeof armoriqSdk[name], "function", `Missing required SDK export: ${name}`);
+    assert.equal(typeof obsRecorder[name], "function", `Missing recorder export: ${name}`);
   }
 });
 
@@ -49,7 +49,7 @@ test(
   async () => {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const config = {
       observabilityEnabled: true,
       observabilityEndpoint: "http://localhost:8080",
@@ -79,7 +79,7 @@ test(
     );
     await observeHook("SessionEnd", { session_id: sid }, null, config);
 
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
 
     const spanNames = events.filter((e) => e.kind === "span_recorded").map((e) => e.span.name);
     assert.ok(spanNames.includes("iap.plan.start"), "has iap.plan.start");
@@ -97,7 +97,7 @@ test(
   async () => {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const config = {
       observabilityEnabled: true,
       observabilityEndpoint: "http://localhost:8080",
@@ -117,7 +117,7 @@ test(
       config
     );
     await observeHook("SessionEnd", { session_id: sid }, null, config);
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
     const pc = events.find(
       (e) =>
         e.kind === "span_recorded" && e.span.attributes && e.span.attributes.kind === "policy_call"
@@ -161,7 +161,7 @@ test(
   async () => {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const config = {
       observabilityEnabled: true,
       observabilityEndpoint: "http://localhost:8080",
@@ -174,7 +174,7 @@ test(
     const sid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     await observeHook("UserPromptSubmit", { session_id: sid, prompt: "hi" }, null, config);
     await observeHook("SessionEnd", { session_id: sid }, null, config);
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
     const started = events.find((e) => e.kind === "trace_started");
     assert.ok(started, "trace started");
     assert.equal(started.trace.userId, null, "non-UUID userId must be null");
@@ -189,7 +189,7 @@ test(
   async () => {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const config = {
       observabilityEnabled: true,
       observabilityEndpoint: "http://localhost:8080",
@@ -205,7 +205,7 @@ test(
       config
     );
     await observeHook("SessionEnd", { session_id: sid }, null, config);
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
     const planStart = events.find(
       (e) => e.kind === "span_recorded" && e.span.name === "iap.plan.start"
     );
@@ -223,7 +223,7 @@ test(
   async () => {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const config = {
       observabilityEnabled: true,
       observabilityEndpoint: "http://localhost:8080",
@@ -239,7 +239,7 @@ test(
       config
     );
     await observeHook("SessionEnd", { session_id: sid }, null, config);
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
     const started = events.find((e) => e.kind === "trace_started");
     assert.ok(started, "trace started");
     assert.equal(started.trace.attributes.input, "Find Acme contacts");
@@ -260,7 +260,7 @@ test(
   async () => {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const sid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     await observeHook(
       "UserPromptSubmit",
@@ -269,7 +269,7 @@ test(
       OBS_CONFIG
     );
     await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
     const slash = events.find((e) => e.kind === "span_recorded" && e.span.name === "slash.command");
     assert.equal(slash, undefined, "raw prompt text does not confirm command expansion");
   }
@@ -283,7 +283,7 @@ test("confirmed slash command expansions normalize command names without argumen
   ]) {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const sid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     try {
       await observeHook(
@@ -305,7 +305,7 @@ test("confirmed slash command expansions normalize command names without argumen
       );
     } finally {
       await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
-      armoriqSdk.__setObservabilitySinkForTests(null);
+      obsRecorder.__setObservabilitySinkForTests(null);
     }
     const spans = events.filter(
       (e) => e.kind === "span_recorded" && e.span.name === "slash.command"
@@ -322,7 +322,7 @@ test("confirmed slash command expansions normalize command names without argumen
 test("slash command evidence ignores other expansions and malformed command names", async () => {
   __resetObsForTests();
   const events = [];
-  armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+  obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
   const sid = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
   try {
     for (const input of [
@@ -345,7 +345,7 @@ test("slash command evidence ignores other expansions and malformed command name
     }
   } finally {
     await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
   }
   assert.equal(
     events.filter((e) => e.kind === "span_recorded" && e.span.name === "slash.command").length,
@@ -359,7 +359,7 @@ test(
   async () => {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const sid = " effff-ffff"; // not used as UUID here; prompt is what matters
     await observeHook(
       "UserPromptSubmit",
@@ -373,7 +373,7 @@ test(
       null,
       OBS_CONFIG
     );
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
     void sid;
     const slash = events.find((e) => e.kind === "span_recorded" && e.span.name === "slash.command");
     assert.equal(slash, undefined, "no slash.command span for a plain prompt");
@@ -386,10 +386,10 @@ test(
   async () => {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const sid = "12121212-1212-4121-8121-121212121212";
     await observeHook("SessionStart", { session_id: sid }, null, OBS_CONFIG);
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
     const connect = events.find(
       (e) => e.kind === "span_recorded" && e.span.name === "armorclaude.connected"
     );
@@ -412,7 +412,7 @@ test(
   async () => {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const sid = "13131313-1313-4131-8131-131313131313";
     await observeHook("UserPromptSubmit", { session_id: sid, prompt: "go" }, null, OBS_CONFIG);
     await observeHook(
@@ -433,7 +433,7 @@ test(
       OBS_CONFIG
     );
     await observeHook("SessionEnd", { session_id: sid }, null, OBS_CONFIG);
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
     const reports = events.filter(
       (e) => e.kind === "span_recorded" && e.span.name === "tool.report"
     );
@@ -454,7 +454,7 @@ test(
   async () => {
     __resetObsForTests();
     const events = [];
-    armoriqSdk.__setObservabilitySinkForTests((e) => events.push(e));
+    obsRecorder.__setObservabilitySinkForTests((e) => events.push(e));
     const config = {
       observabilityEnabled: true,
       observabilityEndpoint: "http://localhost:8080",
@@ -471,7 +471,7 @@ test(
       config
     );
     await observeHook("SessionEnd", { session_id: sid }, null, config);
-    armoriqSdk.__setObservabilitySinkForTests(null);
+    obsRecorder.__setObservabilitySinkForTests(null);
     const ended = events.find((e) => e.kind === "trace_ended");
     assert.ok(ended, "trace ended");
     assert.ok(ended.trace.tags.includes("armorclaude"), "tags include product");

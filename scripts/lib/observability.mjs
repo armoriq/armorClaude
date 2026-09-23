@@ -8,9 +8,11 @@
  *
  * NOTHING here may throw into a hook: every emission goes through safeObs().
  */
-import armoriqSdk from "@armoriq/sdk-dev";
+import obsRecorder from "./obs-recorder/index.cjs";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 
+// Plugin-owned, not the SDK's: SDK 0.8.x removed this recorder, and keeping it
+// here means an SDK upgrade can never silently stop session tracing.
 const {
   ObservabilityRecorder,
   startTrace,
@@ -20,7 +22,7 @@ const {
   recordPolicyCall,
   flushObservability,
   isValidUuid,
-} = armoriqSdk;
+} = obsRecorder;
 
 // sessionId -> { recorder, traceCtx, planStartSpanId }
 const sessions = new Map();
