@@ -1,35 +1,10 @@
 "use strict";
-/**
- * Trace-level tag/output-summary derivation.
- *
- * A trace's own `tags`/`attributes.output` are never populated by callers
- * today (every chokepoint only passes freeform `attributes` at
- * `startTrace()` time, before any child span exists) — so without this
- * module every trace ships with `tags: []` and no output summary, even
- * though the information needed to compute both already lives on the
- * trace's own spans by the time `endTrace()` runs.
- *
- * This is intentionally derived, not caller-supplied: it's computed once,
- * in one place (`ObservabilityRecorder.endTrace`), from the same in-memory
- * `spans` array the recorder already holds — no new public API surface,
- * no risk of callers drifting from each other's tagging conventions.
- *
- * Kept deliberately conservative and low-cardinality (per the dashboard's
- * TAGS column contract): product + distinct tool names + one decision
- * verdict, nothing free-text or unbounded.
- */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.deriveTraceSummary = deriveTraceSummary;
 const MAX_TOOL_TAGS = 8;
 function isPolicyCallAttributes(attrs) {
     return attrs.kind === 'policy_call';
 }
-/**
- * Distinct tool names referenced by any span on the trace. Reads
- * `attributes.toolName` off `kind: 'span'` container spans (the shape
- * `iap.check`/`tool.report`/generic tool spans use) — this covers every
- * known emitter without needing parent/child span-kind coupling.
- */
 function collectToolNames(spans) {
     const names = new Set();
     for (const span of spans) {
@@ -55,7 +30,6 @@ function collectDecisionCounts(spans) {
     }
     return counts;
 }
-/** Overall verdict tag for the trace: 'allowed' | 'blocked' | 'mixed'. */
 function decisionVerdict(counts) {
     if (counts.total === 0)
         return null;
@@ -67,7 +41,6 @@ function decisionVerdict(counts) {
         return 'mixed';
     return 'allowed';
 }
-/** Concise, non-sensitive outcome summary, e.g. "5 checks · all allowed". */
 function outputSummary(counts) {
     if (counts.total === 0)
         return null;
@@ -85,12 +58,6 @@ function outputSummary(counts) {
         parts.push(`${counts.other} pending`);
     return `${counts.total} ${noun} · ${parts.join(', ')}`;
 }
-/**
- * Derive `{ tags, output }` for a trace from its accumulated spans. Pure
- * and read-only — never mutates `spans`. Callers merge the result onto the
- * trace record themselves (see `ObservabilityRecorder.endTrace`), preserving
- * any tags/output the caller already set explicitly.
- */
 function deriveTraceSummary(spans, product) {
     const tags = [];
     if (product)

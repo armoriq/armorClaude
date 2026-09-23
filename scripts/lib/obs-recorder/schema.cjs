@@ -1,17 +1,4 @@
 "use strict";
-/**
- * Observability wire schema — hand-written types and runtime validators.
- *
- * The contract mirrors `conmap-auto/src/observability/schema.ts` (zod on the
- * backend). The SDK cannot use zod (per plan §9 Q1) — adding it would balloon
- * the bundle for a small, stable shape. The backend's zod parser is the
- * safety net at the ingest boundary; if the wire shape ever drifts, the
- * backend rejects the bad batch and the SDK's no-throw invariant swallows
- * the warning.
- *
- * The validators below are deliberately cheap (typeof, structural) — they
- * run on every emitted span and must not become a hot-path cost.
- */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isValidSpanStatus = isValidSpanStatus;
 exports.isValidSpanKind = isValidSpanKind;
@@ -62,7 +49,6 @@ const EVENT_LEVELS = new Set(['info', 'warn', 'error']);
 function isPlainObject(x) {
     return typeof x === 'object' && x !== null && !Array.isArray(x);
 }
-// ─── Validators (cheap, return boolean) ──────────────────────────────────
 function isValidSpanStatus(x) {
     return typeof x === 'string' && SPAN_STATUSES.has(x);
 }
@@ -275,15 +261,9 @@ function isValidIngestPayload(x) {
     }
     return true;
 }
-// ─── ID minting helper (used by recorder) ────────────────────────────────
 function mintId() {
     return (0, crypto_1.randomUUID)();
 }
-// ─── UUID validation ──────────────────────────────────────────────────────
-// The backend's `obs_sessions.id` column is a UUID. A trace's `sessionId`
-// must therefore either be a valid UUID or `null` — never an arbitrary
-// string like the literal `'default'` — or the trace can never be grouped
-// into a session (see ArmorIQSession's sessionId resolution in session.ts).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function isValidUuid(x) {
     return typeof x === 'string' && UUID_RE.test(x);

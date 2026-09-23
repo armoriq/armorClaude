@@ -1,5 +1,6 @@
 "use strict";
-// Vendored from @armoriq/sdk-dev 0.6.10 (dist/observability). SDK 0.8.x
+// Vendored from @armoriq/sdk-dev 0.6.10 (dist/observability), comments and the unused
+// model price table removed. SDK 0.8.x
 // replaced this recorder with OtelSession; ArmorClaude keeps shipping the same
 // JSON spans to POST /observability/spans until that port is done.
 const recorder = require("./recorder.cjs");

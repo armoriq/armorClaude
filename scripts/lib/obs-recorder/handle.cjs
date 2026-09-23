@@ -1,19 +1,4 @@
 "use strict";
-/**
- * Standalone helper API for the chokepoints.
- *
- * The session chokepoints (in `src/session.ts`, owned by the peer subagent)
- * call these helpers instead of going through `ObservabilityRecorder` methods
- * directly. The wrapper signature is uniform:
- *
- *   const ctx = startTrace(obs, 'iap.enforce', { toolName });
- *   recordPolicyCall(obs, ctx, { ... });
- *   endTrace(obs, ctx, { status: 'ok' });
- *
- * All helpers are thin pass-throughs to the recorder — they're the
- * stable interface the chokepoints can import without needing to know
- * about the recorder's internal class shape.
- */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.startTrace = startTrace;
 exports.recordSpan = recordSpan;

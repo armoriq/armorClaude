@@ -1,20 +1,4 @@
 "use strict";
-/**
- * ObservabilityShipper — batches ended traces + their spans and POSTs them
- * to the backend ingest endpoint.
- *
- * Failure handling (the no-throw invariant):
- *   - 4xx: log warning, drop the batches. The backend has rejected the
- *     payload as malformed; retrying won't help.
- *   - 5xx and network errors: exponential backoff (500ms, 1s, 2s) up to
- *     3 retries; then log warning, drop.
- *   - Any throw from the httpClient is caught and treated as a network
- *     error (retried per the same schedule).
- *
- * The shipper is owned by `ObservabilityRecorder` — SDK consumers should
- * not construct it directly. It's exported so the recorder module can
- * import it without circular dep issues.
- */
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -31,7 +15,6 @@ const HTTP_TIMEOUT_MS = 10000;
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
-/** Split `batches` into chunks of at most `size` batches each (size >= 1). */
 function chunkBatches(batches, size) {
     const effectiveSize = size > 0 ? size : DEFAULT_BATCH_SIZE;
     const chunks = [];
@@ -40,9 +23,6 @@ function chunkBatches(batches, size) {
     }
     return chunks;
 }
-// ─── beforeExit singleton ──────────────────────────────────────────────────
-// Each shipper registers itself here on start(). A single beforeExit listener
-// drains all active shippers so we never leak listeners (Node warns at 11).
 const activeShippers = new Set();
 let beforeExitRegistered = false;
 function registerBeforeExitHandler() {
@@ -78,18 +58,9 @@ class ObservabilityShipper {
         this.httpClient =
             config.httpClient ?? axios_1.default.create({ timeout: HTTP_TIMEOUT_MS });
     }
-    /**
-     * Append a batch to the internal queue. The shipper does not validate
-     * the batch here (the recorder already validates on record); invalid
-     * batches are filtered at flush time.
-     */
     enqueue(batch) {
         this.queue.push(batch);
     }
-    /**
-     * Start the periodic auto-flush. Idempotent — calling start() while
-     * already running is a no-op.
-     */
     start() {
         if (this.intervalHandle)
             return;
@@ -97,16 +68,11 @@ class ObservabilityShipper {
             void this.flush();
         }, this.flushIntervalMs);
         if (typeof this.intervalHandle === 'object' && this.intervalHandle !== null) {
-            // Don't keep the event loop alive solely for the flush interval.
             this.intervalHandle.unref?.();
         }
         activeShippers.add(this);
         registerBeforeExitHandler();
     }
-    /**
-     * Stop the periodic auto-flush and do a final flush of anything still
-     * in the queue. Safe to call multiple times.
-     */
     stop() {
         if (this.stopPromise)
             return this.stopPromise;
@@ -120,26 +86,14 @@ class ObservabilityShipper {
         })();
         return this.stopPromise;
     }
-    /**
-     * POST all queued batches, chunked so each POST carries at most
-     * `this.batchSize` batches (default 100) — a burst of traces no longer
-     * sends one unbounded giant POST. Chunks are sent sequentially (simpler
-     * failure semantics than parallel: a failing chunk doesn't race with a
-     * later chunk's retry backoff). Returns the summed `{ accepted, rejected }`
-     * across all chunks. NEVER throws — observability failures must not break
-     * the consumer.
-     */
     async flush() {
         if (this.queue.length === 0) {
             return { accepted: 0, rejected: 0 };
         }
-        // Snapshot the queue and clear it before the network call so a
-        // concurrent enqueue lands in the next flush.
         const batches = this.queue.splice(0, this.queue.length);
         const valid = batches.filter((b) => (0, schema_1.isValidIngestBatch)(b));
         const invalid = batches.length - valid.length;
         if (invalid > 0) {
-            // eslint-disable-next-line no-console
             console.warn(`[observability] shipper dropped ${invalid} invalid batch(es) at flush`);
         }
         if (valid.length === 0) {
@@ -159,11 +113,9 @@ class ObservabilityShipper {
         }
         return { accepted, rejected };
     }
-    /** Test-only accessor: inspect the current queue size. */
     get __queueSize() {
         return this.queue.length;
     }
-    // ─── Internals ────────────────────────────────────────────────────────
     async postWithRetry(payload) {
         const url = `${this.endpoint}/observability/spans`;
         const headers = {
@@ -184,7 +136,6 @@ class ObservabilityShipper {
                     };
                 }
                 if (status >= 400 && status < 500) {
-                    // eslint-disable-next-line no-console
                     console.warn(`[observability] shipper got ${status} from ${url}; dropping ${payload.batches.length} batch(es)`);
                     return { accepted: 0, rejected: payload.batches.length };
                 }
@@ -197,7 +148,6 @@ class ObservabilityShipper {
                 await sleep(BACKOFF_BASE_MS * 2 ** attempt);
             }
         }
-        // eslint-disable-next-line no-console
         console.warn(`[observability] shipper failed after ${MAX_RETRIES} retries; dropping ${payload.batches.length} batch(es): ${lastError?.message ?? 'unknown error'}`);
         return { accepted: 0, rejected: payload.batches.length };
     }
