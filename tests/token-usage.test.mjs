@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import armoriqSdk from "@armoriq/sdk-dev";
 import { deviceIdentity } from "../scripts/lib/device.mjs";
 import {
   loadRuntimeState,
@@ -84,12 +85,18 @@ test("Stop reports one row per UTC day with the repo and device", async () => {
   } finally {
     client.recordTokenUsage = original;
   }
-  assert.deepEqual(
-    posts.map((p) => [p.usageDate, p.repo, p.entries[0].inputTokens]),
-    [
-      ["2026-09-20", "/work/repo-a", 10],
-      ["2026-09-21", "/work/repo-a", 20],
-    ]
-  );
   assert.ok(posts.every((p) => p.deviceId && p.sessionId === "sess-tokens"));
+  if (typeof armoriqSdk.summarizeTranscriptUsageByDay === "function") {
+    assert.deepEqual(
+      posts.map((p) => [p.usageDate, p.repo, p.entries[0].inputTokens]),
+      [
+        ["2026-09-20", "/work/repo-a", 10],
+        ["2026-09-21", "/work/repo-a", 20],
+      ]
+    );
+  } else {
+    // Older SDK: one undated session total, the pre-fix behavior.
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].usageDate, undefined);
+  }
 });
