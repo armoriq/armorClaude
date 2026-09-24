@@ -11,7 +11,7 @@ import {
   handleUserPromptSubmit,
 } from "./lib/engine.mjs";
 import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
-import { observeHook, obsFlush } from "./lib/observability.mjs";
+import { observeHook, obsShipInProcess } from "./lib/observability.mjs";
 
 async function readStdin() {
   const chunks = [];
@@ -64,8 +64,9 @@ async function main() {
       if (output) emitJson(output);
       return;
     } catch (err) {
-      debugLog(config, `daemon dispatch failed; falling back in-process: ${err?.message ?? err}`);
-      // Fall through to in-process below
+      process.stderr.write(
+        `[armorclaude] daemon unreachable, handling ${event} in-process: ${err?.message ?? err}\n`
+      );
     }
   }
 
@@ -105,12 +106,9 @@ async function main() {
     emitJson(output);
   }
 
-  // In-process fallback path: emit observability with the decision output,
-  // then force-flush before this short-lived process exits (the SDK's
-  // beforeExit handler is a backstop, but flush explicitly to be safe).
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   await observeHook(event, input, output, config);
-  await obsFlush(sessionId, config);
+  await obsShipInProcess(sessionId, config);
 }
 
 main().catch((error) => {

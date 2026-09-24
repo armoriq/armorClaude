@@ -14,7 +14,7 @@
 
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,6 +23,7 @@ const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint
 const SPAWN_RETRY_DELAY_MS = 150;
 const SPAWN_RETRIES = 3;
 const EXPECTED_DAEMON_VERSION = "0.2.19";
+const DAEMON_LOG_MAX_BYTES = 1024 * 1024;
 
 let nextReqId = 1;
 function makeReqId() {
@@ -68,23 +69,41 @@ async function spawnDaemon(socketPath, dataDir, config) {
     ARMORCLAUDE_POLICY_FILE: config?.policyFile || path.join(dataDir, "policy.json"),
   };
   mkdirSync(dataDir, { recursive: true });
+  const logPath = path.join(dataDir, "daemon.log");
+  const logFd = openSync(logPath, logSize(logPath) > DAEMON_LOG_MAX_BYTES ? "w" : "a");
   const nodeBin = existsSync(process.execPath) ? process.execPath : "node";
-  const child = spawn(nodeBin, [daemonScript], {
-    detached: true,
-    stdio: "ignore",
-    cwd: dataDir,
-    env: childEnv,
-  });
+  let child;
+  try {
+    child = spawn(nodeBin, [daemonScript], {
+      detached: true,
+      stdio: ["ignore", "ignore", logFd],
+      cwd: dataDir,
+      env: childEnv,
+    });
+  } finally {
+    closeSync(logFd);
+  }
   let spawnError = null;
+  let exited = null;
   child.once("error", (err) => {
     spawnError = err;
   });
+  child.once("exit", (code, signal) => {
+    exited = { code, signal };
+  });
   child.unref();
 
+  const failure = () => {
+    if (spawnError) return spawnError;
+    if (exited) {
+      return new Error(
+        `daemon exited (code=${exited.code}, signal=${exited.signal}) before accepting connections; see ${logPath}`
+      );
+    }
+    return null;
+  };
   for (let i = 0; i < SPAWN_RETRIES; i++) {
-    if (spawnError) throw spawnError;
     await new Promise((r) => setTimeout(r, SPAWN_RETRY_DELAY_MS));
-    if (spawnError) throw spawnError;
     if (existsSync(socketPath)) {
       try {
         const sock = await connectOnce(socketPath);
@@ -93,8 +112,20 @@ async function spawnDaemon(socketPath, dataDir, config) {
         /* try again */
       }
     }
+    const err = failure();
+    if (err) throw err;
   }
-  throw new Error("daemon spawn did not become reachable");
+  throw new Error(
+    `daemon did not accept connections within ${SPAWN_RETRIES * SPAWN_RETRY_DELAY_MS}ms; see ${logPath}`
+  );
+}
+
+function logSize(logPath) {
+  try {
+    return statSync(logPath).size;
+  } catch {
+    return 0;
+  }
 }
 
 async function shutdownDaemon(socketPath) {

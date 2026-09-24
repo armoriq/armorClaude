@@ -245,3 +245,28 @@ test("daemon-client: spawnDaemon on missing socket (auto-spawn)", async () => {
     } catch {}
   }
 });
+
+test("daemon-client: a daemon that dies on startup reports its exit and logs to daemon.log", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-crash-"));
+  const { writeFile, readFile } = await import("node:fs/promises");
+  await writeFile(path.join(dataDir, "profiles"), "not a directory");
+  const config = await loadConfigFor(dataDir);
+  const { dispatchViaDaemon } = await import("../scripts/lib/daemon-client.mjs");
+  await assert.rejects(
+    dispatchViaDaemon({
+      event: "SessionStart",
+      input: { hook_event_name: "SessionStart", session_id: "sess-crash-1", source: "startup" },
+      config,
+    }),
+    (err) => {
+      assert.match(
+        err.message,
+        /daemon exited \(code=1, signal=null\) before accepting connections/
+      );
+      assert.ok(err.message.includes(path.join(dataDir, "daemon.log")));
+      return true;
+    }
+  );
+  const log = await readFile(path.join(dataDir, "daemon.log"), "utf8");
+  assert.match(log, /profiles/);
+});

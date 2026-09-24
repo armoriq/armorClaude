@@ -366,7 +366,9 @@ async function dispatchHook(event, input, cfg) {
 let lastActivity = Date.now();
 const idleTimer = setInterval(() => {
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
-    if (config.debug) process.stderr.write("[daemon] idle timeout, exiting\n");
+    process.stderr.write(
+      `[armorclaude-daemon] idle for ${IDLE_TIMEOUT_MS / 60_000} min, exiting pid=${process.pid} at=${new Date().toISOString()}\n`
+    );
     shutdown(0);
   }
 }, 60_000);
@@ -475,6 +477,7 @@ async function handleLine(rawLine, socket) {
 
 server.on("error", (err) => {
   process.stderr.write(`[armorclaude-daemon] server error: ${err?.message ?? err}\n`);
+  shutdown(1);
 });
 
 server.listen(socketPath, () => {
@@ -485,8 +488,9 @@ server.listen(socketPath, () => {
   } catch {
     /* best-effort */
   }
-  if (config.debug)
-    process.stderr.write(`[armorclaude-daemon] listening on ${socketPath} pid=${process.pid}\n`);
+  process.stderr.write(
+    `[armorclaude-daemon] listening on ${socketPath} pid=${process.pid} version=${DAEMON_VERSION} at=${new Date().toISOString()}\n`
+  );
 });
 
 // ---- Shutdown handlers ---------------------------------------------------

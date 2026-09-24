@@ -4,7 +4,8 @@
  * Owns a module-level per-session registry of SDK ObservabilityRecorders.
  * In the daemon (one long-lived process) the registry persists across a
  * session's hook events, giving nested Model A traces + background flush.
- * In the in-process fallback the registry is per-process (flat, best-effort).
+ * In the in-process fallback the registry lives for one hook, so each hook's
+ * spans ship as their own trace.
  *
  * NOTHING here may throw into a hook: every emission goes through safeObs().
  */
@@ -361,10 +362,13 @@ export async function observeHook(event, input, output, config) {
   });
 }
 
-// In-process fallback safety net: force-flush a session's recorder.
-export async function obsFlush(sessionId, config) {
+// In-process fallback: each hook runs in its own process, so a trace left open
+// here is never ended by a later hook and the shipper, which sends only ended
+// traces, would drop it at exit.
+export async function obsShipInProcess(sessionId, config) {
   if (!isObsEnabled(config)) return;
   const entry = sessions.get(sessionId);
   if (!entry) return;
+  endActiveTrace(entry);
   await safeObsAsync(() => flushObservability(entry.recorder));
 }
