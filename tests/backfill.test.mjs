@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { stat as fsStat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -92,4 +93,24 @@ test("backfill --dry-run posts one row per session-day and counts forked history
   assert.match(run.stderr, /not read .*notes\.jsonl/);
   assert.match(run.stderr, /done: would post 3 session-day\(s\) \(1137 tokens\)/);
   assert.doesNotMatch(run.stderr, /posted/);
+});
+
+test("classifyTranscripts orders by the first own line when birthtime is 0", async () => {
+  const projects = path.join(mkdtempSync(path.join(tmpdir(), "ac-order-")), "projects");
+  const original = "ffffffff-0000-4000-8000-000000000001";
+  const fork = "00000000-0000-4000-8000-000000000002";
+  const copied = { ...assistant("m1", "2026-09-20T09:00:00Z", 10), sessionId: original };
+  // Written fork first, so its birthtime and mtime are the earlier ones.
+  writeTree(path.join(projects, "-work-repo-a"), {
+    [`${fork}.jsonl`]: [copied, { ...assistant("f1", "2026-09-20T10:00:00Z", 5), sessionId: fork }],
+  });
+  writeTree(path.join(projects, "-work-repo-a"), {
+    [`${original}.jsonl`]: [copied, assistant("m2", "2026-09-20T09:05:00Z", 20)],
+  });
+  const stat = async (file) => ({ ...(await fsStat(file)), birthtimeMs: 0 });
+  const { main } = await classifyTranscripts(projects, { stat });
+  assert.deepEqual(
+    main.map((f) => path.basename(f, ".jsonl")),
+    [original, fork]
+  );
 });

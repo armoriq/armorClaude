@@ -1,5 +1,7 @@
-import { readdir, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { readdir, stat as fsStat } from "node:fs/promises";
 import path from "node:path";
+import { createInterface } from "node:readline";
 
 const SESSION_FILE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
 
@@ -19,14 +21,53 @@ async function walkJsonl(dir) {
   return out;
 }
 
+// Copied lines keep their original timestamps, so a fork and its original start
+// at the same instant. Skip lines marked as copied or stamped with another
+// session's id and take the first line the session wrote itself.
+async function firstOwnTimestampMs(file, sessionId) {
+  const input = createReadStream(file, { encoding: "utf8" });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  let first = Infinity;
+  try {
+    for await (const line of lines) {
+      let obj;
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const ms = typeof obj?.timestamp === "string" ? Date.parse(obj.timestamp) : NaN;
+      if (Number.isNaN(ms)) continue;
+      if (first === Infinity) first = ms;
+      const copied =
+        obj.forkedFrom || (typeof obj.sessionId === "string" && obj.sessionId !== sessionId);
+      if (!copied) return ms;
+    }
+  } catch {
+    // Unreadable: keep whatever was found; path order breaks the tie.
+  } finally {
+    lines.close();
+    input.destroy();
+  }
+  return first;
+}
+
+// Where birthtime is 0 (some Linux filesystems), mtime is not a substitute: a
+// still-growing original would sort after its fork and lose its copied history.
+async function createdMs(file, stat) {
+  const { birthtimeMs } = await stat(file);
+  return birthtimeMs || firstOwnTimestampMs(file, path.basename(file, ".jsonl"));
+}
+
 /**
  * Sort every `.jsonl` under a Claude Code projects dir by role:
  * `main` is `<project>/<sessionId>.jsonl`, `subagent` is any other `.jsonl`
  * under `<project>/<sessionId>/subagents/`, `journal` is a workflow
  * `journal.jsonl` there, and `other` is everything else. Main transcripts are
- * ordered by creation time so an original session is read before its forks.
+ * ordered by creation time, or where the filesystem has no birthtime by the
+ * first line the session wrote itself, so an original is read before its forks.
  */
-export async function classifyTranscripts(projectsDir) {
+export async function classifyTranscripts(projectsDir, { stat = fsStat } = {}) {
   const groups = { main: [], subagent: [], journal: [], other: [] };
   for (const file of await walkJsonl(projectsDir)) {
     const parts = path.relative(projectsDir, file).split(path.sep);
@@ -37,10 +78,7 @@ export async function classifyTranscripts(projectsDir) {
     } else groups.other.push(file);
   }
   const born = new Map();
-  for (const file of groups.main) {
-    const s = await stat(file);
-    born.set(file, s.birthtimeMs || s.mtimeMs);
-  }
+  for (const file of groups.main) born.set(file, await createdMs(file, stat));
   groups.main.sort((a, b) => born.get(a) - born.get(b) || a.localeCompare(b));
   return groups;
 }
