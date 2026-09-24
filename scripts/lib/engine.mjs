@@ -379,27 +379,19 @@ async function emitAudit({ dto, config, iapService }) {
 /**
  * Best-effort: report the session's token usage to the dashboard via the SDK
  * (`POST /dashboard/token-usage`), one row per UTC day with the repo and device.
+ * The session covers the main transcript and its subagent transcripts.
  *
- * Stop fires every turn, so we debounce on the transcript total and only POST
+ * Stop fires every turn, so we debounce on the session total and only POST
  * when it changed. Each day's row is replaced server-side, so re-posting is
  * idempotent. `product` is sent explicitly so attribution works even if the API
  * key has product=NULL. `session.lastTokenTotal` is mutated in place; the caller
  * persists it. Failures are swallowed: token telemetry never breaks the hook.
  */
-// SDKs before summarizeTranscriptUsageByDay only report a session total, which
-// the backend files under today; keep reporting rather than dropping usage.
-async function transcriptUsageByDay(transcriptPath) {
-  if (typeof armoriqSdk.summarizeTranscriptUsageByDay === "function") {
-    return armoriqSdk.summarizeTranscriptUsageByDay(transcriptPath);
-  }
-  const entries = await armoriqSdk.summarizeTranscriptUsage(transcriptPath);
-  return { days: entries.length ? [{ usageDate: undefined, entries }] : [] };
-}
-
 async function reportTokenUsage(input, config, session, sessionId) {
-  if (!config.apiKey) return;
+  const transcriptPath = input?.transcript_path;
+  if (!config.apiKey || typeof transcriptPath !== "string" || !transcriptPath) return;
   try {
-    const { days, repo } = await transcriptUsageByDay(input?.transcript_path);
+    const { days, repo } = armoriqSdk.summarizeSessionUsageByDay(transcriptPath);
     const total = days
       .flatMap((day) => day.entries)
       .reduce(
