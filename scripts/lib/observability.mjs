@@ -1,42 +1,34 @@
 /**
  * armorClaude observability bridge — additive, fail-open.
  *
- * Owns a module-level per-session registry of SDK ObservabilityRecorders.
- * In the daemon (one long-lived process) the registry persists across a
- * session's hook events, giving nested Model A traces + background flush.
- * In the in-process fallback the registry is per-process (flat, best-effort).
+ * Owns a module-level per-session registry of SDK OtelSessions, each with its
+ * own ArmorIQTelemetryRuntime (a session close shuts its runtime down, so
+ * runtimes cannot be shared across sessions). In the daemon (one long-lived
+ * process) the registry persists across a session's hook events; in the
+ * in-process fallback the registry is per-process (flat, best-effort).
+ *
+ * Event mapping (one-shot record calls — each hook event is a complete fact):
+ *   UserPromptSubmit  -> turn root with the sanitized prompt as input
+ *   PreToolUse        -> policy evaluate span with the allow/block/hold verdict
+ *   PostToolUse       -> tool span with success/error outcome
+ *   UserPromptExpansion (slash command) -> command operation span
+ *   SessionStart      -> connect root on the session entry
+ *   Stop              -> flush the turn (root stays open for the next turn)
+ *   SessionEnd        -> close the session and drop the entry
  *
  * NOTHING here may throw into a hook: every emission goes through safeObs().
  */
-import obsRecorder from "./obs-recorder/index.cjs";
+import armoriqSdk from "@armoriq/sdk-dev";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 
-// Plugin-owned, not the SDK's: SDK 0.8.x removed this recorder, and keeping it
-// here means an SDK upgrade can never silently stop session tracing.
-const {
-  ObservabilityRecorder,
-  startTrace,
-  openSpan,
-  closeSpan,
-  endTrace,
-  recordPolicyCall,
-  flushObservability,
-  isValidUuid,
-} = obsRecorder;
+const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
-// sessionId -> { recorder, traceCtx, planStartSpanId }
+// sessionId -> { runtime, session }
 const sessions = new Map();
 
-function safeObs(fn) {
-  try {
-    return fn();
-  } catch (err) {
-    if (process.env.ARMORCLAUDE_DEBUG) {
-      process.stderr.write(`[armorclaude-obs] ${err?.message ?? err}\n`);
-    }
-    return undefined;
-  }
-}
+// Test-only injection (lease + tracer provider). Production always uses the
+// backend lease endpoint and the SDK-owned exporter.
+let testHooks = null;
 
 async function safeObsAsync(fn) {
   try {
@@ -53,34 +45,45 @@ export function isObsEnabled(config) {
   return Boolean(config && config.observabilityEnabled);
 }
 
-function getOrInitRecorder(sessionId, config) {
+function getOrInitEntry(sessionId, config) {
   let entry = sessions.get(sessionId);
-  if (entry) return entry;
-  const recorder = new ObservabilityRecorder({
-    enabled: true,
-    endpoint: config.observabilityEndpoint,
+  if (entry) return Promise.resolve(entry);
+  return initEntry(sessionId, config);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function initEntry(sessionId, config) {
+  const sdkVersion = typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown";
+  const runtimeOptions = {
+    backendEndpoint: config.observabilityEndpoint,
     apiKey: config.apiKey,
-    product: config.observabilityProduct,
-    // trace.sessionId and trace.userId are UUID-typed columns on the backend
-    // (obs_traces.session_id/user_id, and the ingest zod schema enforces
-    // z.uuid() for userId) — armorClaude's config uses logical, non-UUID ids
-    // ("claude-user"/"aaaa-session-slug") for these, so they're only sent
-    // when they're real UUIDs; otherwise null (the backend attributes the
-    // request's identity from the API key regardless).
-    //
-    // trace.agentId, by contrast, is a free-form `text` column with NO UUID
-    // requirement on the backend (ingest schema: `agentId: z.string()`, no
-    // `.uuid()`) — armorClaude's logical id ("claude-code") is a valid value
-    // as-is. It was PREVIOUSLY (incorrectly) gated behind the same
-    // isValidUuid check as sessionId/userId, which silently nulled agentId
-    // on every armorClaude trace; that was the root cause of the
-    // dashboard's empty AGENT column.
-    sessionId: isValidUuid && isValidUuid(sessionId) ? sessionId : null,
-    userId: isValidUuid && isValidUuid(config.userId) ? config.userId : null,
+    sdkVersion,
+    options: { serviceName: config.observabilityProduct || "armorclaude" },
+  };
+  if (testHooks?.leaseFetcher) runtimeOptions.leaseFetcher = testHooks.leaseFetcher;
+  if (testHooks?.tracerProvider) {
+    runtimeOptions.options = {
+      ...runtimeOptions.options,
+      exporter: "provider",
+      tracerProvider: testHooks.tracerProvider,
+    };
+  }
+  const runtime = new ArmorIQTelemetryRuntime(runtimeOptions);
+  const session = new OtelSession(runtime, {
+    sessionId,
     agentId: config.agentId || null,
+    userId: config.userId || null,
   });
-  entry = { recorder, traceCtx: null, planStartSpanId: null };
+  const entry = { runtime, session };
   sessions.set(sessionId, entry);
+  // Warm the policy lease so this session's first event is governed by a real
+  // answer instead of racing the background fetch (a cold runtime fails
+  // closed and would silently drop it). Bounded and fail-open: a slow backend
+  // delays this event by at most the race window, never breaks it.
+  await Promise.race([session.refreshPolicy().catch(() => undefined), delay(500)]);
   return entry;
 }
 
@@ -88,122 +91,56 @@ export function __resetObsForTests() {
   sessions.clear();
 }
 
-function endActiveTrace(entry) {
-  if (!entry || !entry.traceCtx) return;
-  safeObs(() => {
-    if (entry.planStartSpanId) {
-      closeSpan(entry.recorder, entry.traceCtx, entry.planStartSpanId, { status: "ok" });
-    }
-    endTrace(entry.recorder, entry.traceCtx, { status: "ok" });
-  });
-  entry.traceCtx = null;
-  entry.planStartSpanId = null;
-}
-
-function startPlanTrace(entry, sessionId, attrs) {
-  const sid = isValidUuid && isValidUuid(sessionId) ? sessionId : null;
-  entry.traceCtx = startTrace(entry.recorder, "iap.plan", attrs, sid);
-  return entry.traceCtx;
-}
-
-function ensureTrace(entry, sessionId) {
-  if (entry.traceCtx) return entry.traceCtx;
-  return (
-    safeObs(() => startPlanTrace(entry, sessionId, { source: "claude-code", lazy: true })) ?? null
-  );
+export function __setOtelTestHooksForTests(hooks) {
+  testHooks = hooks || null;
 }
 
 function classifyDecision(output) {
   const d = output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecision;
-  if (d === "deny") return "deny";
-  if (d === "ask") return "ask";
+  if (d === "deny") return "block";
+  if (d === "ask") return "hold";
   return "allow";
 }
 
-function obsStartPlan(sessionId, config, prompt) {
-  const entry = getOrInitRecorder(sessionId, config);
-  endActiveTrace(entry); // close previous turn's trace, if any
-  safeObs(() => {
-    // Trace-level `input`: the turn's goal/intent string, sanitized+truncated
-    // the same way tool params are (config.sanitize) — this is what the
-    // dashboard's trace-list INPUT column reads (attributes.input). Kept
-    // alongside (not instead of) the existing span-level `prompt` attribute
-    // on `iap.plan.start`, which callers of the raw span tree still rely on.
+function operationCategory(toolName) {
+  return typeof toolName === "string" && toolName.startsWith("mcp__") ? "mcp" : "tool";
+}
+
+async function obsStartPlan(sessionId, config, prompt) {
+  const entry = await getOrInitEntry(sessionId, config);
+  return safeObsAsync(async () => {
     const { prompt: sanitizedInput } = sanitizeParams({ prompt }, config.sanitize);
-    const ctx = startPlanTrace(entry, sessionId, {
-      source: "claude-code",
-      input: sanitizedInput ?? null,
-    });
-    // sanitizeParams sanitizes the string VALUES of an object; passing a bare
-    // string returns {}, so wrap the prompt to get a truncated string back.
-    entry.planStartSpanId = openSpan(entry.recorder, ctx, {
-      name: "iap.plan.start",
-      attributes: sanitizeParams({ prompt }, config.sanitize),
-    });
+    await entry.session.beginRoot({ input: sanitizedInput ?? null });
   });
 }
 
-function obsCheck(sessionId, config, toolName, toolInput, output) {
-  const entry = getOrInitRecorder(sessionId, config);
-  const ctx = ensureTrace(entry, sessionId);
-  if (!ctx) return;
-  safeObs(() => {
-    const decision = classifyDecision(output);
-    const status = decision === "deny" ? "denied" : "ok";
+async function obsCheck(sessionId, config, toolName, toolInput, output) {
+  const entry = await getOrInitEntry(sessionId, config);
+  return safeObsAsync(async () => {
     const reason =
       (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
-      null;
-    const checkSpanId = openSpan(entry.recorder, ctx, {
-      name: "iap.check",
-      attributes: { toolName },
-    });
-    recordPolicyCall(
-      entry.recorder,
-      ctx,
-      {
-        kind: "policy_call",
-        policyId: null,
-        policyName: null,
-        policyHash: null,
-        policyVersion: null,
-        decision,
-        matchedRuleId: null,
-        dataClasses: [],
-        reason,
-        input: sanitizeParams(toolInput, config.sanitize),
-        output: null,
-        source: "sdk",
-        enforcementAction: decision === "deny" ? "block" : "allow",
-        obligations: null,
-        delegationId: null,
-      },
-      checkSpanId
+      undefined;
+    await entry.session.recordPolicy(
+      { toolName, arguments: sanitizeParams(toolInput, config.sanitize) },
+      { decision: classifyDecision(output), ...(reason ? { policyReasonCode: reason } : {}) }
     );
-    closeSpan(entry.recorder, ctx, checkSpanId, { status });
   });
 }
 
-function obsReport(sessionId, config, toolName, toolInput, toolResponse, status) {
-  const entry = getOrInitRecorder(sessionId, config);
-  const ctx = ensureTrace(entry, sessionId);
-  if (!ctx) return;
-  safeObs(() => {
-    const spanId = openSpan(entry.recorder, ctx, {
-      name: "tool.report",
-      attributes: {
-        toolName: toolName || null,
-        // Distinguishes an MCP tool call (`mcp__server__tool`) from a plain
-        // tool so the dashboard can bucket a session's MCP activity separately.
-        // The `tool.report` span is the EXECUTION record — the earlier
-        // `iap.check` span carries the same toolName but is the policy
-        // pre-check, so aggregations count executions here, not there.
-        operationCategory:
-          typeof toolName === "string" && toolName.startsWith("mcp__") ? "mcp" : "tool",
-        input: sanitizeParams(toolInput, config.sanitize),
-        output: redactSecrets(sanitizeParams(toolResponse, config.sanitize)),
+async function obsReport(sessionId, config, toolName, toolInput, toolResponse, outcome) {
+  const entry = await getOrInitEntry(sessionId, config);
+  return safeObsAsync(async () => {
+    await entry.session.recordTool(
+      {
+        toolName,
+        arguments: sanitizeParams(toolInput, config.sanitize),
+        operation: { category: operationCategory(toolName) },
       },
-    });
-    closeSpan(entry.recorder, ctx, spanId, { status: status || "ok" });
+      {
+        outcome,
+        result: redactSecrets(sanitizeParams(toolResponse, config.sanitize)),
+      }
+    );
   });
 }
 
@@ -227,79 +164,55 @@ function expandedSlashCommand(input) {
   return command;
 }
 
-// Record a slash-command invocation as a span on the current turn's trace, so
-// the dashboard session view can show which slash commands a session ran. The
-// `slashCommand` attribute is what the backend session-activity rollup reads.
-function obsSlashCommand(sessionId, config, command) {
-  const entry = getOrInitRecorder(sessionId, config);
-  const ctx = ensureTrace(entry, sessionId);
-  if (!ctx) return;
-  safeObs(() => {
-    const spanId = openSpan(entry.recorder, ctx, {
-      name: "slash.command",
-      attributes: { operationCategory: "command", slashCommand: command },
+// Record a slash-command invocation as a command operation on the current
+// turn's trace, so the dashboard session view can show which slash commands a
+// session ran. The SDK only accepts identifier-safe tool names (must start
+// alphanumeric), so the leading slash is stripped: "/deploy" is recorded as
+// tool "deploy" under the command category.
+async function obsSlashCommand(sessionId, config, command) {
+  const entry = await getOrInitEntry(sessionId, config);
+  return safeObsAsync(async () => {
+    await entry.session.recordOperation({
+      category: "command",
+      name: "command.execute",
+      toolName: command.replace(/^\//, ""),
     });
-    closeSpan(entry.recorder, ctx, spanId, { status: "ok" });
   });
 }
 
 // Record that ArmorClaude connected to this Claude Code session. Emitted once,
-// on SessionStart, as its own short-lived trace so it ships independently of
-// any turn. This is the "ArmorClaude is connected to Claude" signal the
-// dashboard uses to show active plugin sessions.
-function obsConnected(sessionId, config) {
-  const entry = getOrInitRecorder(sessionId, config);
-  safeObs(() => {
-    const sid = isValidUuid && isValidUuid(sessionId) ? sessionId : null;
-    const ctx = startTrace(
-      entry.recorder,
-      "armorclaude.session",
-      { source: "claude-code", event: "connected" },
-      sid
-    );
-    const spanId = openSpan(entry.recorder, ctx, {
-      name: "armorclaude.connected",
-      attributes: {
-        kind: "event",
-        level: "info",
-        message: "ArmorClaude connected to Claude Code",
-        operationCategory: "connect",
-        product: config.observabilityProduct || config.productSlug || "armorclaude",
-        llmId: config.llmId || "claude-code",
-      },
+// on SessionStart, on the session entry's root.
+async function obsConnected(sessionId, config) {
+  const entry = await getOrInitEntry(sessionId, config);
+  return safeObsAsync(async () => {
+    await entry.session.beginRoot({
+      input: `ArmorClaude connected (${config.observabilityProduct || "armorclaude"})`,
     });
-    closeSpan(entry.recorder, ctx, spanId, { status: "ok" });
-    endTrace(entry.recorder, ctx, { status: "ok" });
   });
 }
 
-// End (but do not tear down) the active turn's trace. Handing the trace to the
-// SDK shipper via endTrace() is what makes it eligible for the background 5s
-// flush — until the trace ends, all its spans sit un-shipped in memory (SDK
-// only enqueues ENDED traces). Called on Stop (turn end) so each turn's trace
-// ships mid-session; the recorder + its shipper stay alive for the next turn.
-function obsEndTurn(sessionId) {
+// Turn boundary: flush the turn's plan spans so per-turn evidence ships
+// mid-session. The root stays open for the next turn; the entry (and its
+// runtime) is dropped only on SessionEnd.
+async function obsEndTurn(sessionId) {
   const entry = sessions.get(sessionId);
-  if (!entry || !entry.traceCtx) return;
-  endActiveTrace(entry);
+  if (!entry) return;
+  await safeObsAsync(() => entry.session.flush("ok"));
 }
 
 async function obsEndSession(sessionId) {
   const entry = sessions.get(sessionId);
   if (!entry) return;
-  endActiveTrace(entry);
-  await safeObsAsync(() => flushObservability(entry.recorder));
-  // Stop the per-session shipper timer (unref'd, but tidy up in the long-lived daemon).
-  safeObs(() => entry.recorder.__shipper && entry.recorder.__shipper.stop());
   sessions.delete(sessionId);
+  await safeObsAsync(() => entry.session.close("ok"));
 }
 
-// Flush every live session's recorder without ending traces. Used by the daemon
-// on shutdown / idle-timeout so any already-ended turn traces ship before exit.
+// Flush every live session's runtime without ending traces. Used by the daemon
+// on shutdown / idle-timeout so buffered spans ship before exit.
 // Fail-open: never throws.
 export async function obsFlushAll() {
   for (const entry of sessions.values()) {
-    await safeObsAsync(() => flushObservability(entry.recorder));
+    await safeObsAsync(() => entry.runtime.forceFlush());
   }
 }
 
@@ -311,20 +224,20 @@ export async function observeHook(event, input, output, config) {
     switch (event) {
       case "SessionStart":
         // "ArmorClaude connected to Claude" — one connect record per session.
-        obsConnected(sessionId, config);
+        await obsConnected(sessionId, config);
         break;
       case "UserPromptSubmit": {
         const prompt = typeof input.prompt === "string" ? input.prompt : "";
-        obsStartPlan(sessionId, config, prompt);
+        await obsStartPlan(sessionId, config, prompt);
         break;
       }
       case "UserPromptExpansion": {
         const slash = expandedSlashCommand(input);
-        if (slash) obsSlashCommand(sessionId, config, slash);
+        if (slash) await obsSlashCommand(sessionId, config, slash);
         break;
       }
       case "PreToolUse":
-        obsCheck(
+        await obsCheck(
           sessionId,
           config,
           typeof input.tool_name === "string" ? input.tool_name : "",
@@ -333,10 +246,17 @@ export async function observeHook(event, input, output, config) {
         );
         break;
       case "PostToolUse":
-        obsReport(sessionId, config, input.tool_name, input.tool_input, input.tool_response, "ok");
+        await obsReport(
+          sessionId,
+          config,
+          input.tool_name,
+          input.tool_input,
+          input.tool_response,
+          "success"
+        );
         break;
       case "PostToolUseFailure":
-        obsReport(
+        await obsReport(
           sessionId,
           config,
           input.tool_name,
@@ -346,11 +266,10 @@ export async function observeHook(event, input, output, config) {
         );
         break;
       case "Stop":
-        // Turn boundary: end the active trace so it ships mid-session via the
-        // SDK's background shipper, instead of buffering the whole session
-        // until SessionEnd. A fresh trace opens lazily on the next tool call
-        // (or explicitly on the next UserPromptSubmit).
-        obsEndTurn(sessionId);
+        // Turn boundary: flush the turn's plan spans so per-turn evidence
+        // ships mid-session instead of buffering the whole session until
+        // SessionEnd. A fresh turn starts on the next UserPromptSubmit.
+        await obsEndTurn(sessionId);
         break;
       case "SessionEnd":
         await obsEndSession(sessionId);
@@ -361,10 +280,10 @@ export async function observeHook(event, input, output, config) {
   });
 }
 
-// In-process fallback safety net: force-flush a session's recorder.
+// In-process fallback safety net: force-flush a session's runtime.
 export async function obsFlush(sessionId, config) {
   if (!isObsEnabled(config)) return;
   const entry = sessions.get(sessionId);
   if (!entry) return;
-  await safeObsAsync(() => flushObservability(entry.recorder));
+  await safeObsAsync(() => entry.runtime.forceFlush());
 }
