@@ -35,6 +35,7 @@ import path from "node:path";
 import { loadConfig } from "./lib/config.mjs";
 import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
+import { capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
 import {
   handleSessionStart,
   handleUserPromptExpansion,
@@ -46,7 +47,6 @@ import {
   handleSessionEnd,
 } from "./lib/engine.mjs";
 import { observeHook, obsFlushAll } from "./lib/observability.mjs";
-import { capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
 
 const DAEMON_VERSION = "0.2.19";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
