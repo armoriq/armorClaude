@@ -8,15 +8,18 @@
  * in-process fallback the registry is per-process (flat, best-effort).
  *
  * Event mapping (one-shot record calls — each hook event is a complete fact):
- *   UserPromptSubmit  -> turn root with the sanitized prompt as input
+ * One root span per session: the first event opens it, SessionEnd ends it.
+ *   SessionStart      -> opens the root with a connect input
+ *   UserPromptSubmit  -> opens the root with the sanitized prompt as input,
+ *                        unless an earlier event opened it
  *   PreToolUse        -> policy evaluate span with the allow/block/hold verdict
  *   PostToolUse       -> tool span with success/error outcome
  *   UserPromptExpansion (slash command) -> command operation span
- *   SessionStart      -> connect root on the session entry
- *   Stop              -> flush the turn (root stays open for the next turn)
+ *   Stop              -> ends the open plan span, if any, and flushes
  *   SessionEnd        -> close the session and drop the entry
  *
- * NOTHING here may throw into a hook: every emission goes through safeObs().
+ * Each session's events are recorded in arrival order on a per-session queue.
+ * NOTHING here may throw into a hook: every emission goes through safeObsAsync().
  */
 import armoriqSdk from "@armoriq/sdk-dev";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
@@ -25,6 +28,9 @@ const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
 // sessionId -> { runtime, session }
 const sessions = new Map();
+
+// sessionId -> promise that settles once that session's last queued event is recorded
+const queues = new Map();
 
 // Test-only injection (lease + tracer provider). Production always uses the
 // backend lease endpoint and the SDK-owned exporter.
@@ -89,6 +95,7 @@ async function initEntry(sessionId, config) {
 
 export function __resetObsForTests() {
   sessions.clear();
+  queues.clear();
 }
 
 export function __setOtelTestHooksForTests(hooks) {
@@ -191,9 +198,8 @@ async function obsConnected(sessionId, config) {
   });
 }
 
-// Turn boundary: flush the turn's plan spans so per-turn evidence ships
-// mid-session. The root stays open for the next turn; the entry (and its
-// runtime) is dropped only on SessionEnd.
+// Turn boundary: ends the open plan span, if any, and flushes the runtime so
+// this turn's spans ship. The root stays open until SessionEnd.
 async function obsEndTurn(sessionId) {
   const entry = sessions.get(sessionId);
   if (!entry) return;
@@ -207,19 +213,36 @@ async function obsEndSession(sessionId) {
   await safeObsAsync(() => entry.session.close("ok"));
 }
 
-// Flush every live session's runtime without ending traces. Used by the daemon
-// on shutdown / idle-timeout so buffered spans ship before exit.
+// Daemon shutdown: waits for queued events, then closes every session with
+// status process_exit, which ends its open root so it ships before exit.
 // Fail-open: never throws.
 export async function obsFlushAll() {
-  for (const entry of sessions.values()) {
-    await safeObsAsync(() => entry.runtime.forceFlush());
-  }
+  await Promise.all(queues.values());
+  const open = [...sessions.values()];
+  sessions.clear();
+  await Promise.all(open.map((entry) => safeObsAsync(() => entry.session.close("process_exit"))));
 }
 
-export async function observeHook(event, input, output, config) {
-  if (!isObsEnabled(config)) return;
+/**
+ * Queues one hook event on its session's queue. The returned promise settles,
+ * never rejecting, once the event is recorded. The daemon does not await it,
+ * so its reply never waits on the policy lease or an export.
+ */
+export function observeHook(event, input, output, config) {
+  if (!isObsEnabled(config)) return Promise.resolve();
   const sessionId = typeof input?.session_id === "string" ? input.session_id : "";
-  if (!sessionId) return;
+  if (!sessionId) return Promise.resolve();
+  const recorded = (queues.get(sessionId) ?? Promise.resolve()).then(() =>
+    recordEvent(sessionId, event, input, output, config)
+  );
+  queues.set(sessionId, recorded);
+  recorded.then(() => {
+    if (queues.get(sessionId) === recorded) queues.delete(sessionId);
+  });
+  return recorded;
+}
+
+async function recordEvent(sessionId, event, input, output, config) {
   await safeObsAsync(async () => {
     switch (event) {
       case "SessionStart":
@@ -266,9 +289,8 @@ export async function observeHook(event, input, output, config) {
         );
         break;
       case "Stop":
-        // Turn boundary: flush the turn's plan spans so per-turn evidence
-        // ships mid-session instead of buffering the whole session until
-        // SessionEnd. A fresh turn starts on the next UserPromptSubmit.
+        // Turn boundary: ships this turn's spans; the root stays open until
+        // SessionEnd.
         await obsEndTurn(sessionId);
         break;
       case "SessionEnd":
@@ -280,10 +302,14 @@ export async function observeHook(event, input, output, config) {
   });
 }
 
-// In-process fallback safety net: force-flush a session's runtime.
+// In-process fallback, before the hook process exits: waits for the session's
+// queued events, then closes it with status process_exit so the process's root
+// ends and ships with its spans.
 export async function obsFlush(sessionId, config) {
   if (!isObsEnabled(config)) return;
+  await queues.get(sessionId);
   const entry = sessions.get(sessionId);
   if (!entry) return;
-  await safeObsAsync(() => entry.runtime.forceFlush());
+  sessions.delete(sessionId);
+  await safeObsAsync(() => entry.session.close("process_exit"));
 }

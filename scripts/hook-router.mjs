@@ -106,8 +106,8 @@ async function main() {
   }
 
   // In-process fallback path: emit observability with the decision output,
-  // then force-flush before this short-lived process exits (the SDK's
-  // beforeExit handler is a backstop, but flush explicitly to be safe).
+  // then close the session so its spans ship before this short-lived process
+  // exits.
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   await observeHook(event, input, output, config);
   await obsFlush(sessionId, config);
