@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import armoriqSdk from "@armoriq/sdk-dev";
 import { deviceIdentity } from "../scripts/lib/device.mjs";
 import {
   loadRuntimeState,
@@ -99,20 +98,4 @@ test("Stop reports one row per UTC day for the session and its subagents", async
     ["2026-09-20", "/work/repo-a", 10],
     ["2026-09-21", "/work/repo-a", 320],
   ]);
-});
-
-// An install whose SDK predates the session summarizer must keep reporting the
-// main transcript per day instead of dropping to zero.
-test("Stop falls back to the main transcript on an SDK without session usage", async () => {
-  const descriptor = Object.getOwnPropertyDescriptor(armoriqSdk, "summarizeSessionUsageByDay");
-  if (descriptor) delete armoriqSdk.summarizeSessionUsageByDay;
-  try {
-    assert.equal(typeof armoriqSdk.summarizeSessionUsageByDay, "undefined");
-    assert.deepEqual(await stopPosts(), [
-      ["2026-09-20", "/work/repo-a", 10],
-      ["2026-09-21", "/work/repo-a", 20],
-    ]);
-  } finally {
-    if (descriptor) Object.defineProperty(armoriqSdk, "summarizeSessionUsageByDay", descriptor);
-  }
 });

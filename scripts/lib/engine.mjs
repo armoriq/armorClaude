@@ -376,20 +376,6 @@ async function emitAudit({ dto, config, iapService }) {
   return "sent (http)";
 }
 
-// bootstrap.mjs reinstalls only on a plugin version change, so an install can
-// run an SDK without the session summarizer. Report the main transcript then,
-// never nothing.
-async function sessionUsageByDay(transcriptPath) {
-  if (typeof armoriqSdk.summarizeSessionUsageByDay === "function") {
-    return armoriqSdk.summarizeSessionUsageByDay(transcriptPath);
-  }
-  if (typeof armoriqSdk.summarizeTranscriptUsageByDay === "function") {
-    return armoriqSdk.summarizeTranscriptUsageByDay(transcriptPath);
-  }
-  const entries = await armoriqSdk.summarizeTranscriptUsage(transcriptPath);
-  return { days: entries.length ? [{ usageDate: undefined, entries }] : [] };
-}
-
 /**
  * Best-effort: report the session's token usage to the dashboard via the SDK
  * (`POST /dashboard/token-usage`), one row per UTC day with the repo and device.
@@ -405,7 +391,7 @@ async function reportTokenUsage(input, config, session, sessionId) {
   const transcriptPath = input?.transcript_path;
   if (!config.apiKey || typeof transcriptPath !== "string" || !transcriptPath) return;
   try {
-    const { days, repo } = await sessionUsageByDay(transcriptPath);
+    const { days, repo } = armoriqSdk.summarizeSessionUsageByDay(transcriptPath);
     const total = days
       .flatMap((day) => day.entries)
       .reduce(
