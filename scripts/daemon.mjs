@@ -463,7 +463,7 @@ async function handleLine(rawLine, socket) {
       );
       // Additive, fail-open observability. Never awaited into the decision path
       // above; runs after the handler with the decision output in hand.
-      await observeHook(event, input, output, effectiveConfig);
+      observeHook(event, input, output, effectiveConfig);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
       return;
     }

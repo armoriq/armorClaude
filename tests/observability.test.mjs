@@ -366,3 +366,49 @@ test("connect root carries session identity", async () => {
   assert.equal(roots[0].attributes["user.id"], "claude-user");
   await provider.shutdown();
 });
+
+test("events sent without awaiting are recorded in order once the lease arrives", async () => {
+  installHooks();
+  const config = testConfig();
+  let answerLease;
+  __setOtelTestHooksForTests({
+    tracerProvider: provider,
+    leaseFetcher: () =>
+      new Promise((resolve) => {
+        answerLease = () =>
+          resolve({
+            captureMode: "metadata",
+            revision: 1,
+            expiresAt: new Date(Date.now() + 3600_000),
+            authoritative: true,
+            contentCaptureAllowed: false,
+            externalContentCaptureAllowed: false,
+            externalContentAllowed: false,
+            contentReasonCode: "test",
+            debugExpiresAt: null,
+          });
+      }),
+  });
+  const tool = { session_id: "sess-queue", tool_name: "Bash", tool_input: {} };
+  observeHook("SessionStart", { session_id: "sess-queue" }, null, config);
+  observeHook("PreToolUse", tool, { hookSpecificOutput: { permissionDecision: "allow" } }, config);
+  const last = observeHook("PostToolUse", { ...tool, tool_response: {} }, null, config);
+  await new Promise((r) => setTimeout(r, 20));
+  answerLease();
+  await last;
+  assert.equal(spansByName("armoriq.policy.evaluate").length, 1);
+  assert.equal(spansByName("armoriq.tool").length, 1);
+  await provider.shutdown();
+});
+
+test("obsFlushAll ends every open root with status process_exit", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook("SessionStart", { session_id: "sess-shutdown" }, null, config);
+  assert.equal(spansByName("armoriq.agent.run").length, 0, "the root is open");
+  await obsFlushAll();
+  const roots = spansByName("armoriq.agent.run");
+  assert.equal(roots.length, 1);
+  assert.equal(roots[0].status.message, "process_exit");
+  await provider.shutdown();
+});
