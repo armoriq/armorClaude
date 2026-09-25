@@ -1,6 +1,6 @@
 {
   "name": "armorclaude",
-  "version": "0.2.11",
+  "version": "0.2.10",
   "private": true,
   "type": "module",
   "description": "ArmorIQ intent-based security enforcement for Claude Code",
