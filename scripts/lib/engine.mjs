@@ -387,11 +387,17 @@ async function emitAudit({ dto, config, iapService }) {
  * key has product=NULL. `session.lastTokenTotal` is mutated in place; the caller
  * persists it. Failures are swallowed: token telemetry never breaks the hook.
  */
-async function reportTokenUsage(input, config, session, sessionId) {
+async function reportTokenUsage(input, config, session, sessionId, runtimeState) {
   const transcriptPath = input?.transcript_path;
   if (!config.apiKey || typeof transcriptPath !== "string" || !transcriptPath) return;
   try {
-    const { days, repo } = armoriqSdk.summarizeSessionUsageByDay(transcriptPath);
+    const owners = runtimeState.tokenUsageOwners ?? (runtimeState.tokenUsageOwners = {});
+    const seen = new Set(
+      Object.entries(owners)
+        .filter(([, owner]) => owner !== sessionId)
+        .map(([key]) => key)
+    );
+    const { days, repo } = armoriqSdk.summarizeSessionUsageByDay(transcriptPath, { seen });
     const total = days
       .flatMap((day) => day.entries)
       .reduce(
@@ -418,7 +424,14 @@ async function reportTokenUsage(input, config, session, sessionId) {
           `[tokens] ${day.usageDate} ${day.entries.length} model(s) ${result?.ok ? "ok" : "failed:" + (result?.reason || "")}`
         );
       }
-      if (allOk) session.lastTokenTotal = total;
+      if (allOk) {
+        session.lastTokenTotal = total;
+        for (const key of seen) {
+          if (!owners[key]) owners[key] = sessionId;
+        }
+        const keys = Object.keys(owners);
+        for (const key of keys.slice(0, Math.max(0, keys.length - 250_000))) delete owners[key];
+      }
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -1623,7 +1636,7 @@ export async function handleStop(input, config) {
 
   // Report cumulative token usage from the transcript at the turn boundary.
   // Mutates session.lastTokenTotal in place (debounce marker) which we persist.
-  await reportTokenUsage(input, config, session, sessionId);
+  await reportTokenUsage(input, config, session, sessionId, runtimeState);
 
   upsertSession(runtimeState, sessionId, {
     lastStopAt: nowEpochSeconds(),

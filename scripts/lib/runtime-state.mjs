@@ -15,7 +15,14 @@ export async function loadRuntimeState(runtimeFilePath) {
       ? raw.mcpRegistry
       : {};
   const discoveredTools = Array.isArray(raw?.discoveredTools) ? raw.discoveredTools : [];
-  const state = { sessions, mcpRegistry, discoveredTools };
+  const tokenUsageOwners =
+    raw &&
+    typeof raw === "object" &&
+    raw.tokenUsageOwners &&
+    typeof raw.tokenUsageOwners === "object"
+      ? raw.tokenUsageOwners
+      : {};
+  const state = { sessions, mcpRegistry, discoveredTools, tokenUsageOwners };
   // Preserve the active-session pointer (written by the engine, read by the MCP
   // server) across load/save round-trips.
   if (typeof raw?.activeSessionId === "string") state.activeSessionId = raw.activeSessionId;

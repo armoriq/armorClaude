@@ -99,3 +99,81 @@ test("Stop reports one row per UTC day for the session and its subagents", async
     ["2026-09-21", "/work/repo-a", 320],
   ]);
 });
+
+test("Stop counts copied history only for the first local session that reported it", async () => {
+  const { handleStop } = await import("../scripts/lib/engine.mjs");
+  const intentMod = await import("../scripts/lib/intent.mjs");
+  const tmp = mkdtempSync(path.join(tmpdir(), "ac-fork-tokens-"));
+  const parent = path.join(tmp, "parent.jsonl");
+  const child = path.join(tmp, "child.jsonl");
+  const line = (id, input) =>
+    JSON.stringify({
+      type: "assistant",
+      cwd: "/work/repo-a",
+      timestamp: "2026-09-21T00:05:00Z",
+      requestId: `req-${id}`,
+      message: { id, model: "claude-opus", usage: { input_tokens: input, output_tokens: 1 } },
+    });
+  writeFileSync(parent, [line("copied", 100), line("parent-only", 20)].join("\n"));
+  writeFileSync(child, [line("copied", 100), line("child-only", 30)].join("\n"));
+  const config = {
+    mode: "enforce",
+    dataDir: tmp,
+    policyFile: path.join(tmp, "policy.json"),
+    runtimeFile: path.join(tmp, "runtime.json"),
+    backendEndpoint: "http://127.0.0.1:3000",
+    csrgEndpoint: "http://127.0.0.1:8000",
+    apiKey: "ak_test_tokens",
+    useSdkIntent: false,
+    productSlug: "armorclaude",
+    llmId: "claude-code",
+    userId: "u",
+    agentId: "a",
+    timeoutMs: 5000,
+    maxRetries: 1,
+    verifySsl: true,
+    validitySeconds: 60,
+  };
+  const state = await loadRuntimeState(config.runtimeFile);
+  upsertSession(state, "parent", { lastPrompt: "p" });
+  upsertSession(state, "child", { lastPrompt: "p" });
+  await saveRuntimeState(config.runtimeFile, state);
+  const client = intentMod.getSdkClient(config);
+  const original = client.recordTokenUsage;
+  const posts = [];
+  client.recordTokenUsage = async (payload) => {
+    posts.push(payload);
+    return { ok: true };
+  };
+  try {
+    await handleStop(
+      { hook_event_name: "Stop", session_id: "parent", transcript_path: parent },
+      config
+    );
+    await handleStop(
+      { hook_event_name: "Stop", session_id: "child", transcript_path: child },
+      config
+    );
+  } finally {
+    client.recordTokenUsage = original;
+  }
+
+  assert.deepEqual(
+    posts.map((post) => [
+      post.sessionId,
+      post.entries.reduce(
+        (sum, entry) =>
+          sum +
+          entry.inputTokens +
+          entry.outputTokens +
+          entry.cacheReadTokens +
+          entry.cacheWriteTokens,
+        0
+      ),
+    ]),
+    [
+      ["parent", 122],
+      ["child", 31],
+    ]
+  );
+});
