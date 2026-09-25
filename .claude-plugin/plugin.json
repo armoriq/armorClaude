@@ -24,6 +24,11 @@
       "type": "boolean",
       "title": "Disable observability",
       "description": "Observability (execution traces sent to your ArmorIQ dashboard) is enabled by default. Set to true to turn it off."
+    },
+    "disable_usage_sync": {
+      "type": "boolean",
+      "title": "Disable token usage sync",
+      "description": "Applies only while observability is enabled. The usage sync uploads token counts from every local Claude Code session in ~/.claude/projects to your ArmorIQ dashboard. Set to true to turn it off. Turning off observability turns it off too."
     }
   }
 }

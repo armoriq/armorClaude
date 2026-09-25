@@ -22,6 +22,7 @@ import {
 } from "../scripts/lib/runtime-state.mjs";
 import { classifyTranscripts } from "../scripts/lib/transcripts.mjs";
 import { loadSyncState, syncUsage } from "../scripts/lib/usage-sync.mjs";
+import { launchUsageSync, requestUsageSync } from "../scripts/lib/usage-sync-launch.mjs";
 
 const SYNC = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -418,4 +419,157 @@ test("an in-process Stop, with no daemon reachable, triggers the sync", async ()
   } finally {
     server.close();
   }
+});
+
+const KEY = "ak_test_usage_sync_toggle";
+const OBS_OFF = { CLAUDE_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "true" };
+const SYNC_OFF = { CLAUDE_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "true" };
+const TOGGLES = [
+  ["observability off", OBS_OFF],
+  ["usage sync off", SYNC_OFF],
+  ["both off", { ...OBS_OFF, ...SYNC_OFF }],
+];
+
+test("usageSyncEnabled needs observability on and disable_usage_sync unset", () => {
+  const cases = [
+    [{}, true, true],
+    [
+      {
+        CLAUDE_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "false",
+        CLAUDE_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "false",
+      },
+      true,
+      true,
+    ],
+    [OBS_OFF, false, false],
+    [SYNC_OFF, true, false],
+    [{ ...OBS_OFF, ...SYNC_OFF }, false, false],
+    [{ ARMORIQ_USAGE_SYNC_DISABLED: "1" }, true, false],
+    [{ ARMORIQ_OBSERVABILITY_DISABLED: "yes" }, false, false],
+  ];
+  for (const [env, observability, usageSync] of cases) {
+    const cfg = loadConfig({ ARMORIQ_ENV: "staging", CLAUDE_PLUGIN_OPTION_API_KEY: KEY, ...env });
+    assert.equal(cfg.observabilityEnabled, observability, JSON.stringify(env));
+    assert.equal(cfg.usageSyncEnabled, usageSync, JSON.stringify(env));
+  }
+});
+
+test("the launcher starts no sync and writes no request while the usage sync is off", () => {
+  for (const [name, toggles] of TOGGLES) {
+    const dataDir = mkdtempSync(path.join(tmpdir(), "ac-sync-off-"));
+    const cfg = loadConfig({
+      ARMORIQ_ENV: "staging",
+      CLAUDE_PLUGIN_OPTION_API_KEY: KEY,
+      CLAUDE_PLUGIN_DATA: dataDir,
+      ...toggles,
+    });
+    assert.equal(requestUsageSync(cfg), false, name);
+    assert.equal(launchUsageSync(cfg), false, name);
+    assert.equal(existsSync(path.join(dataDir, "usage-sync-state.json.request")), false, name);
+    assert.equal(existsSync(path.join(dataDir, "usage-sync.log")), false, name);
+  }
+});
+
+function cliAgainst(home, port, env) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [SYNC], {
+      env: {
+        PATH: process.env.PATH,
+        HOME: home,
+        ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
+        CLAUDE_PLUGIN_DATA: path.join(home, "data"),
+        ARMORIQ_ENV: "local",
+        ARMORIQ_BACKEND_URL: `http://127.0.0.1:${port}`,
+        CLAUDE_PLUGIN_OPTION_API_KEY: KEY,
+        ...env,
+      },
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("close", (status) => resolve({ status, stderr }));
+  });
+}
+
+test("usage-sync posts nothing while observability or the usage sync is off", async () => {
+  const { server, posts, port } = await fakeBackend();
+  try {
+    for (const [name, toggles] of TOGGLES) {
+      const home = fixtureHome();
+      const res = await cliAgainst(home, port, toggles);
+      assert.equal(res.status, 0, res.stderr);
+      assert.match(res.stderr, /usage sync is off .*nothing synced/, name);
+      assert.equal(existsSync(path.join(home, "data", "usage-sync-state.json")), false, name);
+    }
+    assert.equal(posts.length, 0);
+
+    const res = await cliAgainst(fixtureHome(), port, {
+      CLAUDE_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "false",
+      CLAUDE_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "false",
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(posts.length, 3);
+  } finally {
+    server.close();
+  }
+});
+
+async function withDaemon(daemonToggles, fn) {
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  const statePath = path.join(dataDir, "usage-sync-state.json");
+  const { server, posts, port } = await fakeBackend();
+  const env = { ...pluginEnv(home, dataDir, port), CLAUDE_PLUGIN_OPTION_API_KEY: KEY };
+  mkdirSync(dataDir, { recursive: true });
+  const daemon = spawn(process.execPath, [DAEMON], {
+    stdio: "ignore",
+    env: { ...env, ...daemonToggles },
+    cwd: dataDir,
+  });
+  const stop = (toggles) =>
+    dispatchViaDaemon({
+      event: "Stop",
+      input: {
+        hook_event_name: "Stop",
+        session_id: S2,
+        transcript_path: path.join(projectsOf(home), "-work-repo-a", `${S2}.jsonl`),
+      },
+      config: loadConfig({ ...env, ...toggles }),
+    });
+  const synced = () =>
+    until(
+      () => readLastRun(statePath) !== undefined && !existsSync(`${statePath}.lock`),
+      "a sync pass"
+    );
+  try {
+    await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
+    await fn({ stop, synced, posts, statePath });
+  } finally {
+    daemon.kill("SIGTERM");
+    server.close();
+  }
+}
+
+test("a Stop through the daemon starts no sync while the calling session turns it off", async () => {
+  await withDaemon({}, async ({ stop, synced, posts, statePath }) => {
+    for (const [name, toggles] of TOGGLES) {
+      await stop(toggles);
+      assert.equal(existsSync(`${statePath}.request`), false, name);
+      assert.equal(existsSync(`${statePath}.lock`), false, name);
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+    assert.equal(posts.length, 0);
+    assert.equal(existsSync(statePath), false);
+
+    await stop({});
+    await synced();
+    assert.equal(posts.length, 3);
+  });
+});
+
+test("a daemon started while the usage sync was off syncs once the calling session turns it on", async () => {
+  await withDaemon(SYNC_OFF, async ({ stop, synced, posts }) => {
+    await stop({ CLAUDE_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "false" });
+    await synced();
+    assert.equal(posts.length, 3);
+  });
 });

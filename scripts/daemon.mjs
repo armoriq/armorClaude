@@ -48,7 +48,7 @@ import {
 import { observeHook, obsFlushAll } from "./lib/observability.mjs";
 import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
 
-const DAEMON_VERSION = "0.2.20";
+const DAEMON_VERSION = "0.2.21";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 const USAGE_SYNC_INTERVAL_MS = 10 * 60 * 1000;
@@ -128,6 +128,7 @@ const OBS_AUTH_KEYS = [
   "observabilityEnabled",
   "observabilityEndpoint",
   "observabilityProduct",
+  "usageSyncEnabled",
   "auditEnabled",
   "csrgVerifyEnabled",
   "cryptoPolicyEnabled",

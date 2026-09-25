@@ -22,7 +22,7 @@ const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if da
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
 const SPAWN_RETRY_DELAY_MS = 150;
 const SPAWN_RETRIES = 3;
-const EXPECTED_DAEMON_VERSION = "0.2.20";
+const EXPECTED_DAEMON_VERSION = "0.2.21";
 
 let nextReqId = 1;
 function makeReqId() {
@@ -224,6 +224,7 @@ export async function dispatchViaDaemon({ event, input, config }) {
           observabilityEnabled: config.observabilityEnabled,
           observabilityEndpoint: config.observabilityEndpoint,
           observabilityProduct: config.observabilityProduct,
+          usageSyncEnabled: config.usageSyncEnabled,
           auditEnabled: config.auditEnabled,
           csrgVerifyEnabled: config.csrgVerifyEnabled,
           cryptoPolicyEnabled: config.cryptoPolicyEnabled,
