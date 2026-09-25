@@ -12,6 +12,7 @@ import {
 } from "./lib/engine.mjs";
 import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 import { observeHook, obsFlush } from "./lib/observability.mjs";
+import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
 
 async function readStdin() {
   const chunks = [];
@@ -104,6 +105,8 @@ async function main() {
   if (output) {
     emitJson(output);
   }
+  if (event === "SessionStart") launchUsageSync(config);
+  if (event === "Stop") requestUsageSync(config);
 
   // In-process fallback path: emit observability with the decision output,
   // then force-flush before this short-lived process exits (the SDK's
