@@ -245,3 +245,75 @@ test("daemon-client: spawnDaemon on missing socket (auto-spawn)", async () => {
     } catch {}
   }
 });
+
+function waitForExit(child) {
+  return new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+}
+
+test("daemon-client: a daemon that dies on startup reports its exit and logs to daemon.log", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-crash-"));
+  const { writeFile, readFile } = await import("node:fs/promises");
+  await writeFile(path.join(dataDir, "profiles"), "not a directory");
+  const config = await loadConfigFor(dataDir);
+  const { dispatchViaDaemon } = await import("../scripts/lib/daemon-client.mjs");
+  await assert.rejects(
+    dispatchViaDaemon({
+      event: "SessionStart",
+      input: { hook_event_name: "SessionStart", session_id: "sess-crash-1", source: "startup" },
+      config,
+    }),
+    (err) => {
+      assert.match(
+        err.message,
+        /daemon exited \(code=1, signal=null\) before accepting connections/
+      );
+      assert.ok(err.message.includes(path.join(dataDir, "daemon.log")));
+      return true;
+    }
+  );
+  const log = await readFile(path.join(dataDir, "daemon.log"), "utf8");
+  assert.match(log, /profiles/);
+});
+
+test("daemon-client: a spawned daemon logs its listening line to daemon.log", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-log-"));
+  const { readFile } = await import("node:fs/promises");
+  const config = await loadConfigFor(dataDir);
+  const { dispatchViaDaemon } = await import("../scripts/lib/daemon-client.mjs");
+  let pid;
+  try {
+    await dispatchViaDaemon({
+      event: "SessionStart",
+      input: { hook_event_name: "SessionStart", session_id: "sess-log-1", source: "startup" },
+      config,
+    });
+    pid = parseInt(await readFile(path.join(dataDir, "daemon.pid"), "utf8"), 10);
+    const log = await readFile(path.join(dataDir, "daemon.log"), "utf8");
+    assert.match(
+      log,
+      new RegExp(`\\[armorclaude-daemon\\] listening on .* pid=${pid} version=\\S+ at=`)
+    );
+  } finally {
+    if (Number.isFinite(pid)) process.kill(pid, "SIGTERM");
+  }
+});
+
+test("daemon: a server error exits 1 and removes the PID file", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-bind-"));
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(path.join(dataDir, "daemon.sock"));
+  const child = spawn(process.execPath, [daemonScript], {
+    stdio: ["ignore", "ignore", "pipe"],
+    env: buildEnv(dataDir),
+    cwd: dataDir,
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  const timer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+  const { code, signal } = await waitForExit(child);
+  clearTimeout(timer);
+  assert.equal(signal, null);
+  assert.equal(code, 1);
+  assert.match(stderr, /\[armorclaude-daemon\] server error:/);
+  assert.equal(existsSync(path.join(dataDir, "daemon.pid")), false);
+});

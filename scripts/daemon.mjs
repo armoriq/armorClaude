@@ -46,6 +46,7 @@ import {
   handleSessionEnd,
 } from "./lib/engine.mjs";
 import { observeHook, obsFlushAll } from "./lib/observability.mjs";
+import { capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
 
 const DAEMON_VERSION = "0.2.19";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
@@ -365,8 +366,15 @@ async function dispatchHook(event, input, cfg) {
 // ---- Idle timeout --------------------------------------------------------
 let lastActivity = Date.now();
 const idleTimer = setInterval(() => {
+  try {
+    capDaemonLog(daemonLogPath(config.dataDir));
+  } catch {
+    /* best-effort */
+  }
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
-    if (config.debug) process.stderr.write("[daemon] idle timeout, exiting\n");
+    process.stderr.write(
+      `[armorclaude-daemon] idle for ${IDLE_TIMEOUT_MS / 60_000} min, exiting pid=${process.pid} at=${new Date().toISOString()}\n`
+    );
     shutdown(0);
   }
 }, 60_000);
@@ -475,6 +483,7 @@ async function handleLine(rawLine, socket) {
 
 server.on("error", (err) => {
   process.stderr.write(`[armorclaude-daemon] server error: ${err?.message ?? err}\n`);
+  shutdown(1);
 });
 
 server.listen(socketPath, () => {
@@ -485,8 +494,9 @@ server.listen(socketPath, () => {
   } catch {
     /* best-effort */
   }
-  if (config.debug)
-    process.stderr.write(`[armorclaude-daemon] listening on ${socketPath} pid=${process.pid}\n`);
+  process.stderr.write(
+    `[armorclaude-daemon] listening on ${socketPath} pid=${process.pid} version=${DAEMON_VERSION} at=${new Date().toISOString()}\n`
+  );
 });
 
 // ---- Shutdown handlers ---------------------------------------------------
