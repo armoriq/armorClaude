@@ -1,11 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { stat as fsStat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { classifyTranscripts } from "../scripts/lib/transcripts.mjs";
 
+const BACKFILL = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "scripts",
+  "backfill.mjs"
+);
 const S1 = "aaaaaaaa-0000-4000-8000-000000000001";
 const S2 = "aaaaaaaa-0000-4000-8000-000000000002";
 
@@ -26,7 +34,7 @@ function writeTree(root, files) {
 }
 
 function fixtureHome() {
-  const home = mkdtempSync(path.join(tmpdir(), "ac-transcripts-"));
+  const home = mkdtempSync(path.join(tmpdir(), "ac-backfill-"));
   const history = [
     assistant("m1", "2026-09-20T09:00:00Z", 10),
     assistant("m2", "2026-09-20T09:01:00Z", 20),
@@ -58,6 +66,33 @@ test("classifyTranscripts sorts main, subagent, journal and other files", async 
     `-work-repo-a/${S1}/subagents/workflows/wf_1/journal.jsonl`,
   ]);
   assert.deepEqual(rel(groups.other), ["-work-repo-a/notes.jsonl"]);
+});
+
+test("backfill --dry-run posts one row per session-day and counts forked history once", () => {
+  const home = fixtureHome();
+  const run = spawnSync(process.execPath, [BACKFILL, "--dry-run"], {
+    encoding: "utf8",
+    env: {
+      PATH: process.env.PATH,
+      HOME: home,
+      ARMORIQ_API_KEY: "ak_test_backfill",
+      ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
+    },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const rows = run.stdout
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  assert.deepEqual(rows.map((r) => [r.sessionId, r.usageDate, r.entries[0].inputTokens]).sort(), [
+    [S1, "2026-09-20", 130],
+    [S1, "2026-09-21", 1000],
+    [S2, "2026-09-21", 7],
+  ]);
+  assert.match(run.stderr, /2 main, 2 subagent, 1 workflow journal, 1 other transcript\(s\)/);
+  assert.match(run.stderr, /not read .*notes\.jsonl/);
+  assert.match(run.stderr, /done: would post 3 session-day\(s\) \(1137 tokens\)/);
+  assert.doesNotMatch(run.stderr, /posted/);
 });
 
 test("classifyTranscripts orders by the first own line when birthtime is 0", async () => {

@@ -35,6 +35,7 @@ const DAEMON = path.join(
   "scripts",
   "daemon.mjs"
 );
+const ROUTER = path.join(path.dirname(DAEMON), "hook-router.mjs");
 const S1 = "aaaaaaaa-0000-4000-8000-000000000001";
 const S2 = "aaaaaaaa-0000-4000-8000-000000000002";
 const S3 = "aaaaaaaa-0000-4000-8000-000000000003";
@@ -329,23 +330,25 @@ const readLastRun = (statePath) => {
   }
 };
 
+const pluginEnv = (home, dataDir, port) => ({
+  PATH: process.env.PATH,
+  HOME: home,
+  ARMORCLAUDE_DATA_DIR: dataDir,
+  ARMORCLAUDE_DEBUG: "false",
+  ARMORCLAUDE_USE_SDK_INTENT: "false",
+  ARMORIQ_ENV: "local",
+  ARMORIQ_BACKEND_URL: `http://127.0.0.1:${port}`,
+  ARMORIQ_CSRG_URL: `http://127.0.0.1:${port}`,
+  CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_usage_sync_stop",
+  ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
+});
+
 test("a Stop through the daemon triggers the sync, the only writer of a forked session's rows", async () => {
   const home = fixtureHome();
   const dataDir = path.join(home, "data");
   const statePath = path.join(dataDir, "usage-sync-state.json");
   const { server, posts, port } = await fakeBackend();
-  const env = {
-    PATH: process.env.PATH,
-    HOME: home,
-    ARMORCLAUDE_DATA_DIR: dataDir,
-    ARMORCLAUDE_DEBUG: "false",
-    ARMORCLAUDE_USE_SDK_INTENT: "false",
-    ARMORIQ_ENV: "local",
-    ARMORIQ_BACKEND_URL: `http://127.0.0.1:${port}`,
-    ARMORIQ_CSRG_URL: `http://127.0.0.1:${port}`,
-    CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_usage_sync_stop",
-    ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
-  };
+  const env = pluginEnv(home, dataDir, port);
   mkdirSync(dataDir, { recursive: true });
   const runtimeFile = path.join(dataDir, "runtime.json");
   const runtime = await loadRuntimeState(runtimeFile);
@@ -392,6 +395,27 @@ test("a Stop through the daemon triggers the sync, the only writer of a forked s
     assert.equal(posts.length, 4);
   } finally {
     daemon.kill("SIGTERM");
+    server.close();
+  }
+});
+
+test("an in-process Stop, with no daemon reachable, triggers the sync", async () => {
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  const statePath = path.join(dataDir, "usage-sync-state.json");
+  mkdirSync(dataDir, { recursive: true });
+  // The daemon exits on startup when profiles is a file, so the hook runs in-process.
+  writeFileSync(path.join(dataDir, "profiles"), "not a directory");
+  const { server, posts, port } = await fakeBackend();
+  try {
+    const hook = spawn(process.execPath, [ROUTER], { env: pluginEnv(home, dataDir, port) });
+    const exited = new Promise((resolve) => hook.once("exit", resolve));
+    hook.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: S2 }));
+    assert.equal(await exited, 0);
+    await until(() => readLastRun(statePath) && !existsSync(`${statePath}.lock`), "the sync pass");
+    assert.equal(existsSync(path.join(dataDir, "daemon.sock")), false);
+    assert.equal(posts.length, 3);
+  } finally {
     server.close();
   }
 });
