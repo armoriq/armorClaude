@@ -19,7 +19,7 @@
     "node": ">=20.19.0"
   },
   "dependencies": {
-    "@armoriq/sdk-dev": "^0.8.4",
+    "@armoriq/sdk-dev": "^0.8.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "axios": "^1.20.0",
     "zod": "^4.6.5"
