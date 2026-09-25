@@ -175,6 +175,7 @@ When installed as a Claude Code plugin, these values are prompted on enable:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ARMORIQ_OBSERVABILITY_DISABLED` | `false` | Set to `true`/`1`/`yes` to stop sending execution traces to the ArmorIQ dashboard. Observability is **on by default** when an API key is set — see [Data & Privacy](#data--privacy). Equivalent to the `disable_observability` plugin option. |
+| `ARMORIQ_USAGE_SYNC_DISABLED` | `false` | Set to `true`/`1`/`yes` to stop the token usage sync. Applies only while observability is on. Equivalent to the `disable_usage_sync` plugin option. |
 
 **Policy Management:**
 | Variable | Default | Description |
@@ -250,6 +251,9 @@ machine depends entirely on whether an ArmorIQ API key is configured:**
   - Per-step **audit logs** containing the tool name and its **inputs and outputs**.
   - **Observability execution traces** (spans for planning, policy checks, and tool
     inputs/outputs) — **on by default** in connected mode.
+  - **Token usage** per Claude Code session, model and day, with the repo path and device name,
+    for every session in `~/.claude/projects`, including sessions that ran without ArmorClaude.
+    On by default while observability is on; see below to turn it off.
 
   Tool inputs and outputs are passed through secret redaction and parameter sanitization before
   transmission.
@@ -261,6 +265,18 @@ and intent enforcement still work):
 
 - **Plugin option:** set `disable_observability: true` in the plugin's userConfig, **or**
 - **Environment variable:** set `ARMORIQ_OBSERVABILITY_DISABLED=true` (also accepts `1` / `yes`).
+
+Turning off observability also stops the token usage sync.
+
+### Turning off the token usage sync
+
+While observability is on, a background sync uploads token counts (per session, model and day,
+with the repo path and device name) for every Claude Code session in `~/.claude/projects`,
+including sessions that ran without ArmorClaude. It sends no prompts or transcript text. To stop
+it and keep observability traces:
+
+- **Plugin option:** set `disable_usage_sync: true` in the plugin's userConfig, **or**
+- **Environment variable:** set `ARMORIQ_USAGE_SYNC_DISABLED=true` (also accepts `1` / `yes`).
 
 - **Product overview and setup:** <https://armoriq.ai/tools/armorclaude>
 - **Privacy policy (data collected, retention, opt-out):** <https://armoriq.ai/privacy-policy> (Section 6, "Product-Specific Data Flows")
