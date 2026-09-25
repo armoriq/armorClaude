@@ -251,6 +251,9 @@ machine depends entirely on whether an ArmorIQ API key is configured:**
   - Per-step **audit logs** containing the tool name and its **inputs and outputs**.
   - **Observability execution traces** (spans for planning, policy checks, and tool
     inputs/outputs) — **on by default** in connected mode.
+  - **Token usage** per Claude Code session, model and day, with the repo path and device name,
+    for every session in `~/.claude/projects`, including sessions that ran without ArmorClaude.
+    On by default while observability is on; see below to turn it off.
 
   Tool inputs and outputs are passed through secret redaction and parameter sanitization before
   transmission.
