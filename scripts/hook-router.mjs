@@ -11,6 +11,7 @@ import {
   handleUserPromptSubmit,
 } from "./lib/engine.mjs";
 import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
+import { appendDaemonLog } from "./lib/daemon-log.mjs";
 import { observeHook, obsFlush } from "./lib/observability.mjs";
 
 async function readStdin() {
@@ -64,8 +65,16 @@ async function main() {
       if (output) emitJson(output);
       return;
     } catch (err) {
-      debugLog(config, `daemon dispatch failed; falling back in-process: ${err?.message ?? err}`);
-      // Fall through to in-process below
+      const reason = err?.message ?? String(err);
+      debugLog(config, `daemon dispatch failed; falling back in-process: ${reason}`);
+      try {
+        appendDaemonLog(
+          config.dataDir,
+          `[armorclaude] daemon unreachable, handling ${event} in-process pid=${process.pid} at=${new Date().toISOString()}: ${reason}`
+        );
+      } catch {
+        /* best-effort */
+      }
     }
   }
 

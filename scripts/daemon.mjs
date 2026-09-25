@@ -35,6 +35,7 @@ import path from "node:path";
 import { loadConfig } from "./lib/config.mjs";
 import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
+import { capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
 import {
   handleSessionStart,
   handleUserPromptExpansion,
@@ -365,8 +366,15 @@ async function dispatchHook(event, input, cfg) {
 // ---- Idle timeout --------------------------------------------------------
 let lastActivity = Date.now();
 const idleTimer = setInterval(() => {
+  try {
+    capDaemonLog(daemonLogPath(config.dataDir));
+  } catch {
+    /* best-effort */
+  }
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
-    if (config.debug) process.stderr.write("[daemon] idle timeout, exiting\n");
+    process.stderr.write(
+      `[armorclaude-daemon] idle for ${IDLE_TIMEOUT_MS / 60_000} min, exiting pid=${process.pid} at=${new Date().toISOString()}\n`
+    );
     shutdown(0);
   }
 }, 60_000);
@@ -475,6 +483,7 @@ async function handleLine(rawLine, socket) {
 
 server.on("error", (err) => {
   process.stderr.write(`[armorclaude-daemon] server error: ${err?.message ?? err}\n`);
+  shutdown(1);
 });
 
 server.listen(socketPath, () => {
@@ -485,8 +494,9 @@ server.listen(socketPath, () => {
   } catch {
     /* best-effort */
   }
-  if (config.debug)
-    process.stderr.write(`[armorclaude-daemon] listening on ${socketPath} pid=${process.pid}\n`);
+  process.stderr.write(
+    `[armorclaude-daemon] listening on ${socketPath} pid=${process.pid} version=${DAEMON_VERSION} at=${new Date().toISOString()}\n`
+  );
 });
 
 // ---- Shutdown handlers ---------------------------------------------------
