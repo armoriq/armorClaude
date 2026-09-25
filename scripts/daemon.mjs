@@ -46,7 +46,7 @@ import {
   handleSessionEnd,
 } from "./lib/engine.mjs";
 import { observeHook, obsFlushAll } from "./lib/observability.mjs";
-import { launchUsageSync } from "./lib/usage-sync-launch.mjs";
+import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
 
 const DAEMON_VERSION = "0.2.19";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
@@ -366,7 +366,11 @@ async function dispatchHook(event, input, cfg) {
 
 // ---- Token usage sync ----------------------------------------------------
 let lastUsageSyncAt = 0;
-function maybeSyncUsage(cfg) {
+function syncUsageAfter(event, cfg) {
+  if (event === "Stop") {
+    if (requestUsageSync(cfg)) lastUsageSyncAt = Date.now();
+    return;
+  }
   if (Date.now() - lastUsageSyncAt < USAGE_SYNC_INTERVAL_MS) return;
   if (launchUsageSync(cfg)) lastUsageSyncAt = Date.now();
 }
@@ -474,7 +478,7 @@ async function handleLine(rawLine, socket) {
       // above; runs after the handler with the decision output in hand.
       await observeHook(event, input, output, effectiveConfig);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
-      maybeSyncUsage(effectiveConfig);
+      syncUsageAfter(event, effectiveConfig);
       return;
     }
     default: {

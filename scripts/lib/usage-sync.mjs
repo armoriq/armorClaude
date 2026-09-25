@@ -4,7 +4,7 @@ import { sessionTranscriptPaths, summarizeSessionUsageByDay } from "@armoriq/sdk
 import { readJson } from "./fs-store.mjs";
 import { classifyTranscripts } from "./transcripts.mjs";
 
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 
 class RecordingSet extends Set {
   added = [];
@@ -42,11 +42,40 @@ function sameFiles(a, b) {
   return keys.every((k) => a[k]?.[0] === b[k][0] && a[k]?.[1] === b[k][1]);
 }
 
-function dayTotal(entries) {
-  return entries.reduce(
-    (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
-    0
-  );
+const entryTotal = (e) => e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens;
+
+const zeroEntry = (model) => ({
+  model,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+});
+
+/**
+ * The rows to post for one session: every day whose per-model totals differ
+ * from what was posted before. A model posted before but absent from a day now
+ * is sent with zero tokens, since the backend replaces each (session, model,
+ * day) row it receives and leaves the rest alone.
+ */
+function changedDays(usage, prevDays = {}) {
+  const days = {};
+  const byDay = new Map(usage.days.map((day) => [day.usageDate, day.entries]));
+  for (const [usageDate, entries] of byDay) {
+    days[usageDate] = Object.fromEntries(entries.map((e) => [e.model, entryTotal(e)]));
+  }
+  const rows = [];
+  for (const usageDate of new Set([...byDay.keys(), ...Object.keys(prevDays)])) {
+    const now = days[usageDate] ?? {};
+    const before = prevDays[usageDate] ?? {};
+    const models = new Set([...Object.keys(now), ...Object.keys(before)]);
+    if ([...models].every((m) => now[m] === before[m])) continue;
+    const vanished = Object.keys(before).filter((m) => !Object.hasOwn(now, m));
+    const entries = [...(byDay.get(usageDate) ?? []), ...vanished.map(zeroEntry)];
+    const tokens = Object.values(now).reduce((a, b) => a + b, 0);
+    rows.push({ usageDate, entries, tokens });
+  }
+  return { days, rows };
 }
 
 /**
@@ -115,22 +144,19 @@ export async function syncUsage({
     report.read++;
     const prev = state.sessions[file];
     const armored = Boolean(prev?.armored) || isArmored(sessionId);
-    const days = {};
+    const { days, rows } = changedDays(usage, prev?.days);
     let ok = true;
-    for (const day of usage.days) {
-      const total = dayTotal(day.entries);
-      days[day.usageDate] = total;
-      if (prev?.days?.[day.usageDate] === total) continue;
+    for (const row of rows) {
       const result = await post({
         sessionId,
-        usageDate: day.usageDate,
+        usageDate: row.usageDate,
         repo: usage.repo,
-        entries: day.entries,
+        entries: row.entries,
         armored,
       });
       if (result?.ok) {
         report.sessionDays++;
-        report.tokens += total;
+        report.tokens += row.tokens;
       } else {
         ok = false;
         report.failed++;

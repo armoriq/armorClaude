@@ -1,10 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadConfig } from "../scripts/lib/config.mjs";
+import { dispatchViaDaemon } from "../scripts/lib/daemon-client.mjs";
+import {
+  loadRuntimeState,
+  saveRuntimeState,
+  upsertSession,
+} from "../scripts/lib/runtime-state.mjs";
 import { classifyTranscripts } from "../scripts/lib/transcripts.mjs";
 import { loadSyncState, syncUsage } from "../scripts/lib/usage-sync.mjs";
 
@@ -14,16 +29,22 @@ const SYNC = path.join(
   "scripts",
   "usage-sync.mjs"
 );
+const DAEMON = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "scripts",
+  "daemon.mjs"
+);
 const S1 = "aaaaaaaa-0000-4000-8000-000000000001";
 const S2 = "aaaaaaaa-0000-4000-8000-000000000002";
 const S3 = "aaaaaaaa-0000-4000-8000-000000000003";
 
-const assistant = (id, timestamp, input) => ({
+const assistant = (id, timestamp, input, model = "claude-opus") => ({
   type: "assistant",
   cwd: "/work/repo-a",
   timestamp,
   requestId: `req-${id}`,
-  message: { id, model: "claude-opus", usage: { input_tokens: input, output_tokens: 0 } },
+  message: { id, model, usage: { input_tokens: input, output_tokens: 0 } },
 });
 
 function writeTree(root, files) {
@@ -138,6 +159,58 @@ test("an appended transcript re-posts only its changed days and still skips fork
   assert.deepEqual(summary(second.rows), [[S1, "2026-09-21", 1009]]);
 });
 
+test("a changed transcript whose totals did not change posts nothing", async () => {
+  const home = fixtureHome();
+  const state = await loadSyncState(path.join(home, "none.json"));
+  await run(home, state);
+  append(home, `${S2}.jsonl`, { type: "user", timestamp: "2026-09-21T10:05:00Z" });
+  const { rows, report } = await run(home, state);
+  assert.equal(report.read, 1);
+  assert.deepEqual(rows, []);
+});
+
+test("a model that vanishes from a session-day is posted with zero tokens", async () => {
+  const home = fixtureHome();
+  const dir = path.join(projectsOf(home), "-work-repo-a");
+  writeTree(dir, {
+    [`${S2}.jsonl`]: [
+      assistant("v1", "2026-09-22T09:00:00Z", 10),
+      assistant("v2", "2026-09-22T09:01:00Z", 20, "claude-sonnet"),
+      assistant("v3", "2026-09-23T09:00:00Z", 5, "claude-sonnet"),
+    ],
+  });
+  const state = await loadSyncState(path.join(home, "none.json"));
+  await run(home, state);
+  writeTree(dir, {
+    [`${S2}.jsonl`]: [
+      assistant("v1", "2026-09-22T09:00:00Z", 10),
+      assistant("v4", "2026-09-22T09:02:00Z", 1),
+    ],
+  });
+  const { rows } = await run(home, state);
+  const models = (row) => row.entries.map((e) => [e.model, e.inputTokens]);
+  assert.deepEqual(
+    rows.map((r) => [r.sessionId, r.usageDate, models(r)]),
+    [
+      [
+        S2,
+        "2026-09-22",
+        [
+          ["claude-opus", 11],
+          ["claude-sonnet", 0],
+        ],
+      ],
+      [S2, "2026-09-23", [["claude-sonnet", 0]]],
+    ]
+  );
+  for (const e of rows.flatMap((r) => r.entries).filter((e) => e.model === "claude-sonnet")) {
+    assert.deepEqual([e.outputTokens, e.cacheReadTokens, e.cacheWriteTokens], [0, 0, 0]);
+  }
+  const again = await run(home, state);
+  assert.equal(again.report.changed, 0);
+  assert.deepEqual(again.rows, []);
+});
+
 test("files under subagents/ are never posted as sessions", async () => {
   const home = fixtureHome();
   const { rows } = await run(home, await loadSyncState(path.join(home, "none.json")));
@@ -220,4 +293,105 @@ test("usage-sync without an API key posts nothing", () => {
   const res = cli(home, []);
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stderr, /no API key, nothing synced/);
+});
+
+function fakeBackend() {
+  const posts = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      if (req.method === "POST" && req.url === "/dashboard/token-usage") {
+        posts.push(JSON.parse(body));
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+    });
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve({ server, posts, port: server.address().port }))
+  );
+}
+
+async function until(check, what, timeoutMs = 20_000) {
+  const start = Date.now();
+  while (!(await check())) {
+    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+const readLastRun = (statePath) => {
+  try {
+    return JSON.parse(readFileSync(statePath, "utf8")).lastRun?.at;
+  } catch {
+    return undefined;
+  }
+};
+
+test("a Stop through the daemon triggers the sync, the only writer of a forked session's rows", async () => {
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  const statePath = path.join(dataDir, "usage-sync-state.json");
+  const { server, posts, port } = await fakeBackend();
+  const env = {
+    PATH: process.env.PATH,
+    HOME: home,
+    ARMORCLAUDE_DATA_DIR: dataDir,
+    ARMORCLAUDE_DEBUG: "false",
+    ARMORCLAUDE_USE_SDK_INTENT: "false",
+    ARMORIQ_ENV: "local",
+    ARMORIQ_BACKEND_URL: `http://127.0.0.1:${port}`,
+    ARMORIQ_CSRG_URL: `http://127.0.0.1:${port}`,
+    CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_usage_sync_stop",
+    ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
+  };
+  mkdirSync(dataDir, { recursive: true });
+  const runtimeFile = path.join(dataDir, "runtime.json");
+  const runtime = await loadRuntimeState(runtimeFile);
+  upsertSession(runtime, S2, { lastPrompt: "p" });
+  await saveRuntimeState(runtimeFile, runtime);
+  const daemon = spawn(process.execPath, [DAEMON], { stdio: "ignore", env, cwd: dataDir });
+  try {
+    await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
+    const config = loadConfig(env);
+    const stop = (sessionId) =>
+      dispatchViaDaemon({
+        event: "Stop",
+        input: {
+          hook_event_name: "Stop",
+          session_id: sessionId,
+          transcript_path: path.join(projectsOf(home), "-work-repo-a", `${sessionId}.jsonl`),
+        },
+        config,
+      });
+    const settled = (after) => () =>
+      readLastRun(statePath) !== after && !existsSync(`${statePath}.lock`);
+
+    await stop(S2);
+    await until(settled(undefined), "the first sync pass");
+    const rows = (list) =>
+      list.map((p) => [p.sessionId, p.usageDate, p.entries[0].inputTokens, p.armored]).sort();
+    const expected = [
+      [S1, "2026-09-20", 133, false],
+      [S1, "2026-09-21", 1000, false],
+      [S2, "2026-09-21", 7, true],
+    ];
+    assert.deepEqual(rows(posts), expected);
+
+    const firstRun = readLastRun(statePath);
+    append(home, `${S2}.jsonl`, assistant("m4", "2026-09-21T10:30:00Z", 40));
+    await stop(S2);
+    await until(settled(firstRun), "the pass after a new turn");
+    assert.deepEqual(rows(posts), [...expected, [S2, "2026-09-21", 47, true]].sort());
+
+    const secondRun = readLastRun(statePath);
+    await stop(S2);
+    await stop(S1);
+    await until(settled(secondRun), "the pass after turns that changed nothing");
+    assert.equal(posts.length, 4);
+  } finally {
+    daemon.kill("SIGTERM");
+    server.close();
+  }
 });
