@@ -302,11 +302,14 @@ async function recordEvent(sessionId, event, input, output, config) {
   });
 }
 
-// In-process fallback: waits for the session's queued events, then force-flushes its runtime.
+// In-process fallback, before the hook process exits: waits for the session's
+// queued events, then closes it with status process_exit so the process's root
+// ends and ships with its spans.
 export async function obsFlush(sessionId, config) {
   if (!isObsEnabled(config)) return;
   await queues.get(sessionId);
   const entry = sessions.get(sessionId);
   if (!entry) return;
-  await safeObsAsync(() => entry.runtime.forceFlush());
+  sessions.delete(sessionId);
+  await safeObsAsync(() => entry.session.close("process_exit"));
 }

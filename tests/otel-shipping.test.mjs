@@ -171,7 +171,9 @@ test("fallback PreToolUse and PostToolUse, one process each, ship spans carrying
     const toolSpans = backend.exports.filter((s) => s.name === "armoriq.tool");
     assert.equal(policy.length, 1, "the PreToolUse process shipped its policy span");
     assert.equal(toolSpans.length, 1, "the PostToolUse process shipped its tool span");
-    for (const span of [...policy, ...toolSpans]) {
+    const roots = backend.exports.filter((s) => s.name === "armoriq.agent.run");
+    assert.equal(roots.length, 2, "each process ended and shipped its root");
+    for (const span of [...policy, ...toolSpans, ...roots]) {
       assert.equal(span.attributes["armoriq.session_id"], sessionId, span.name);
     }
   } finally {
