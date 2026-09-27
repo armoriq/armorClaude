@@ -392,6 +392,54 @@ test("day-keyed state from an older sync is dropped and every hour posts again",
   ]);
 });
 
+const HOUR_400 = "usageHour must be an integer from 0 to 23 (UTC hour of usageDate)";
+
+test("failed posts are counted once per distinct status and reason, with the first session-hour", async () => {
+  const home = fixtureHome();
+  const state = await loadSyncState(path.join(home, "none.json"));
+  const answers = {
+    [S1]: { ok: false, status: 400, reason: HOUR_400 },
+    [S2]: { ok: false, reason: "connect ECONNREFUSED 127.0.0.1:3000" },
+  };
+  const report = await syncUsage({
+    projectsDir: projectsOf(home),
+    state,
+    post: async (row) => answers[row.sessionId],
+  });
+  assert.equal(report.failed, 3);
+  assert.deepEqual(report.failures, [
+    {
+      sessionId: S1,
+      usageDate: "2026-09-20",
+      usageHour: 9,
+      status: 400,
+      reason: HOUR_400,
+      count: 2,
+    },
+    {
+      sessionId: S2,
+      usageDate: "2026-09-21",
+      usageHour: 10,
+      reason: "connect ECONNREFUSED 127.0.0.1:3000",
+      count: 1,
+    },
+  ]);
+  assert.deepEqual(state.sessions, {});
+});
+
+test("a failed post with no reason is still reported", async () => {
+  const home = fixtureHome();
+  const report = await syncUsage({
+    projectsDir: projectsOf(home),
+    state: await loadSyncState(path.join(home, "none.json")),
+    post: async () => ({ ok: false, status: 503 }),
+  });
+  assert.deepEqual(
+    report.failures.map((f) => [f.status, f.reason, f.count]),
+    [[503, "no reason given", 3]]
+  );
+});
+
 function cli(home, args) {
   return spawnSync(process.execPath, [SYNC, ...args], {
     encoding: "utf8",
@@ -438,17 +486,20 @@ test("usage-sync without an API key posts nothing", () => {
   assert.match(res.stderr, /no API key, nothing synced/);
 });
 
-function fakeBackend() {
+function fakeBackend(answer = () => [200, { ok: true }]) {
   const posts = [];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
+      let status = 200;
+      let reply = { ok: true };
       if (req.method === "POST" && req.url === "/dashboard/token-usage") {
         posts.push(JSON.parse(body));
+        [status, reply] = answer(posts.at(-1));
       }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end('{"ok":true}');
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(reply));
     });
   });
   return new Promise((resolve) =>
@@ -651,6 +702,41 @@ test("usage-sync posts nothing while observability or the usage sync is off", as
     });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(posts.length, 3);
+  } finally {
+    server.close();
+  }
+});
+
+test("usage-sync logs a backend 400 once with its session-hour, status and message, and exits 1", async () => {
+  const body = { statusCode: 400, message: [HOUR_400, HOUR_400, HOUR_400], error: "Bad Request" };
+  const { server, posts, port } = await fakeBackend(() => [400, body]);
+  try {
+    const home = fixtureHome();
+    const res = await cliAgainst(home, port, {});
+    assert.equal(posts.length, 3);
+    assert.equal(res.status, 1, res.stderr);
+    const failedLines = res.stderr.split("\n").filter((l) => l.includes("failed 3x"));
+    assert.equal(failedLines.length, 1, res.stderr);
+    assert.match(
+      failedLines[0],
+      new RegExp(
+        `first at session ${S1} 2026-09-20 09:00 UTC: HTTP 400: usageHour must be an integer`
+      )
+    );
+    assert.equal(res.stderr.includes(`${HOUR_400}; `), false, "the repeated message is dropped");
+    assert.match(
+      res.stderr,
+      /posted 0 session-hour\(s\) \(0 tokens\), 3 failed \(3x HTTP 400: usageHour must/
+    );
+    assert.equal(res.stderr.includes(KEY), false);
+    const lastRun = JSON.parse(
+      readFileSync(path.join(home, "data", "usage-sync-state.json"), "utf8")
+    ).lastRun;
+    assert.equal(lastRun.failed, 3);
+    assert.deepEqual(
+      lastRun.failures.map((f) => [f.status, f.reason, f.count]),
+      [[400, HOUR_400, 3]]
+    );
   } finally {
     server.close();
   }
