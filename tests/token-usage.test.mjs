@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { deviceIdentity } from "../scripts/lib/device.mjs";
@@ -29,15 +28,9 @@ test("deviceIdentity falls back to a stable hostname hash without a CLI id", () 
 });
 
 // The usage sync is the only writer of token-usage rows (#156, #158).
-test("Stop sends no request to the backend or CSRG", async () => {
+test("Stop posts no token usage itself", async () => {
   const { handleStop } = await import("../scripts/lib/engine.mjs");
-  const requests = [];
-  const server = createServer((req, res) => {
-    requests.push(`${req.method} ${req.url}`);
-    res.writeHead(500).end();
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const endpoint = `http://127.0.0.1:${server.address().port}`;
+  const intentMod = await import("../scripts/lib/intent.mjs");
   const tmp = mkdtempSync(path.join(tmpdir(), "ac-stop-"));
   const transcript = path.join(tmp, "sess-tokens.jsonl");
   writeFileSync(
@@ -52,11 +45,12 @@ test("Stop sends no request to the backend or CSRG", async () => {
   );
   const config = {
     mode: "enforce",
+    useProduction: false,
     dataDir: tmp,
     policyFile: path.join(tmp, "policy.json"),
     runtimeFile: path.join(tmp, "runtime.json"),
-    backendEndpoint: endpoint,
-    csrgEndpoint: endpoint,
+    backendEndpoint: "http://127.0.0.1:3000",
+    csrgEndpoint: "http://127.0.0.1:8000",
     apiKey: "ak_test_tokens",
     useSdkIntent: false,
     productSlug: "armorclaude",
@@ -71,15 +65,22 @@ test("Stop sends no request to the backend or CSRG", async () => {
   const state = await loadRuntimeState(config.runtimeFile);
   upsertSession(state, "sess-tokens", { lastPrompt: "p" });
   await saveRuntimeState(config.runtimeFile, state);
+  const client = intentMod.getSdkClient(config);
+  const original = client.recordTokenUsage;
+  const posts = [];
+  client.recordTokenUsage = async (payload) => {
+    posts.push(payload);
+    return { ok: true };
+  };
   try {
     await handleStop(
       { hook_event_name: "Stop", session_id: "sess-tokens", transcript_path: transcript },
       config
     );
   } finally {
-    await new Promise((resolve) => server.close(resolve));
+    client.recordTokenUsage = original;
   }
-  assert.deepEqual(requests, []);
+  assert.deepEqual(posts, []);
   const saved = await loadRuntimeState(config.runtimeFile);
   assert.equal(typeof saved.sessions["sess-tokens"].lastStopAt, "number");
   assert.equal(saved.sessions["sess-tokens"].lastTokenTotal, undefined);
