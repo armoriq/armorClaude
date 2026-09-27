@@ -14,9 +14,10 @@
 
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensurePrivateDirSync } from "./fs-store.mjs";
 
 const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if daemon is hung
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
@@ -67,7 +68,7 @@ async function spawnDaemon(socketPath, dataDir, config) {
     ARMORCLAUDE_RUNTIME_FILE: config?.runtimeFile || path.join(dataDir, "runtime.json"),
     ARMORCLAUDE_POLICY_FILE: config?.policyFile || path.join(dataDir, "policy.json"),
   };
-  mkdirSync(dataDir, { recursive: true });
+  ensurePrivateDirSync(dataDir);
   const nodeBin = existsSync(process.execPath) ? process.execPath : "node";
   const child = spawn(nodeBin, [daemonScript], {
     detached: true,

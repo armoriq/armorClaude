@@ -30,11 +30,12 @@
  */
 
 import { createServer } from "node:net";
-import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from "node:fs";
+import { readFileSync, unlinkSync, existsSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./lib/config.mjs";
 import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
+import { ensurePrivateDirSync, writePrivateFileSync } from "./lib/fs-store.mjs";
 import {
   handleSessionStart,
   handleUserPromptExpansion,
@@ -52,7 +53,7 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 
 let config = loadConfig();
-mkdirSync(config.dataDir, { recursive: true });
+ensurePrivateDirSync(config.dataDir);
 // Seed built-in profiles eagerly so new templates are available immediately
 // after a daemon restart — no lazy first-access required.
 await seedBuiltinProfiles(config);
@@ -84,7 +85,7 @@ function claimPid() {
       // unreadable / malformed — overwrite
     }
   }
-  writeFileSync(pidPath, String(process.pid), "utf8");
+  writePrivateFileSync(pidPath, String(process.pid));
 }
 
 // ---- Socket cleanup ------------------------------------------------------
