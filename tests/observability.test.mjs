@@ -401,7 +401,7 @@ test("events sent without awaiting are recorded in order once the lease arrives"
   await provider.shutdown();
 });
 
-test("obsFlushAll ends every open root with status process_exit", async () => {
+test("obsFlushAll ends every open root ok, with no task outcome claimed", async () => {
   installHooks();
   const config = testConfig();
   await observeHook("SessionStart", { session_id: "sess-shutdown" }, null, config);
@@ -409,7 +409,8 @@ test("obsFlushAll ends every open root with status process_exit", async () => {
   await obsFlushAll();
   const roots = spansByName("armoriq.agent.run");
   assert.equal(roots.length, 1);
-  assert.equal(roots[0].status.message, "process_exit");
+  assert.equal(roots[0].status.code, 1, "SpanStatusCode.OK");
+  assert.equal(roots[0].attributes["gen_ai.task.outcome"], "unknown");
   await provider.shutdown();
 });
 

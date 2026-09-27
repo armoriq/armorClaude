@@ -5,7 +5,14 @@
  * own ArmorIQTelemetryRuntime (a session close shuts its runtime down, so
  * runtimes cannot be shared across sessions). In the daemon (one long-lived
  * process) the registry persists across a session's hook events; in the
- * in-process fallback the registry is per-process (flat, best-effort).
+ * in-process fallback every hook process has its own registry.
+ *
+ * One trace per Claude Code session, whichever processes record it: the trace
+ * id and root span id derive from the session id, and the root's start time
+ * comes from a marker file that the first process to record the session
+ * creates. That process and SessionEnd end the root; any other process ships
+ * its spans under the root without ending it. The backend merges the two root
+ * deliveries, which share a span id.
  *
  * Event mapping (one-shot record calls — each hook event is a complete fact):
  * One root span per session: the first event opens it, SessionEnd ends it.
@@ -23,11 +30,14 @@
  * NOTHING here may throw into a hook: every emission goes through safeObsAsync().
  */
 import armoriqSdk from "@armoriq/sdk-dev";
+import { createHash, randomUUID } from "node:crypto";
+import { link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
-// sessionId -> { runtime, session }
+// sessionId -> { runtime, session, ownsRoot }
 const sessions = new Map();
 
 // sessionId -> promise that settles once that session's last queued event is recorded
@@ -62,6 +72,51 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sha256(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function sessionRootIds(sessionId) {
+  return {
+    traceId: sha256(`armorclaude.trace:${sessionId}`).slice(0, 32),
+    spanId: sha256(`armorclaude.root:${sessionId}`).slice(0, 16),
+  };
+}
+
+function rootMarkerPath(config, sessionId) {
+  return path.join(config.dataDir, "obs-roots", sha256(sessionId).slice(0, 32));
+}
+
+// The first process to record a session links its marker into place, so the
+// marker is never seen half-written. Without a data dir to coordinate in,
+// every process ends its own copy of the root, still in the one trace.
+async function claimRootStart(sessionId, config) {
+  const now = new Date();
+  if (!config.dataDir) return { startTime: now, ownsRoot: true };
+  const marker = rootMarkerPath(config, sessionId);
+  const draft = `${marker}.${randomUUID()}`;
+  try {
+    await mkdir(path.dirname(marker), { recursive: true });
+    await writeFile(draft, now.toISOString());
+    await link(draft, marker);
+    return { startTime: now, ownsRoot: true };
+  } catch (err) {
+    if (err?.code !== "EEXIST") return { startTime: now, ownsRoot: true };
+    const recorded = new Date((await readFile(marker, "utf8")).trim());
+    return {
+      startTime: Number.isFinite(recorded.getTime()) ? recorded : now,
+      ownsRoot: false,
+    };
+  } finally {
+    await rm(draft, { force: true });
+  }
+}
+
+async function releaseRootStart(sessionId, config) {
+  if (!config.dataDir) return;
+  await rm(rootMarkerPath(config, sessionId), { force: true });
+}
+
 async function initEntry(sessionId, config) {
   const sdkVersion = typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown";
   const runtimeOptions = {
@@ -79,12 +134,17 @@ async function initEntry(sessionId, config) {
     };
   }
   const runtime = new ArmorIQTelemetryRuntime(runtimeOptions);
+  const { startTime, ownsRoot } = (await safeObsAsync(() => claimRootStart(sessionId, config))) ?? {
+    startTime: new Date(),
+    ownsRoot: true,
+  };
   const session = new OtelSession(runtime, {
     sessionId,
     agentId: config.agentId || null,
     userId: config.userId || null,
+    root: { ...sessionRootIds(sessionId), startTime },
   });
-  const entry = { runtime, session };
+  const entry = { runtime, session, ownsRoot };
   sessions.set(sessionId, entry);
   // Warm the policy lease so this session's first event is governed by a real
   // answer instead of racing the background fetch (a cold runtime fails
@@ -188,14 +248,16 @@ async function obsSlashCommand(sessionId, config, command) {
   });
 }
 
+function connectedInput(config) {
+  return `ArmorClaude connected (${config.observabilityProduct || "armorclaude"})`;
+}
+
 // Record that ArmorClaude connected to this Claude Code session. Emitted once,
 // on SessionStart, on the session entry's root.
 async function obsConnected(sessionId, config) {
   const entry = await getOrInitEntry(sessionId, config);
   return safeObsAsync(async () => {
-    await entry.session.beginRoot({
-      input: `ArmorClaude connected (${config.observabilityProduct || "armorclaude"})`,
-    });
+    await entry.session.beginRoot({ input: connectedInput(config) });
   });
 }
 
@@ -211,19 +273,34 @@ async function obsEndSession(sessionId, config) {
   const entry = await getOrInitEntry(sessionId, config);
   sessions.delete(sessionId);
   await safeObsAsync(async () => {
-    await entry.session.beginRoot();
+    // The daemon's root is already open; a fallback process opens it with the
+    // same input the first process gave it.
+    await entry.session.beginRoot({ input: connectedInput(config) });
     await entry.session.close("ok");
   });
+  await safeObsAsync(() => releaseRootStart(sessionId, config));
 }
 
-// Daemon shutdown: waits for queued events, then closes every session with
-// status process_exit, which ends its open root so it ships before exit.
-// Fail-open: never throws.
+// A process stops recording a session that may continue in another process.
+// The root's owner ends it with status ok and task outcome unknown, since only
+// SessionEnd states how the session ended; any other process ships its spans
+// and leaves the root open.
+async function releaseEntry(entry) {
+  if (entry.ownsRoot) {
+    await entry.session.close("ok", "unknown");
+    return;
+  }
+  await entry.session.flush("ok");
+  await entry.runtime.close();
+}
+
+// Daemon shutdown: waits for queued events, then releases every session so
+// its spans ship before exit. Fail-open: never throws.
 export async function obsFlushAll() {
   await Promise.all(queues.values());
   const open = [...sessions.values()];
   sessions.clear();
-  await Promise.all(open.map((entry) => safeObsAsync(() => entry.session.close("process_exit"))));
+  await Promise.all(open.map((entry) => safeObsAsync(() => releaseEntry(entry))));
 }
 
 /**
@@ -306,14 +383,13 @@ async function recordEvent(sessionId, event, input, output, config) {
 }
 
 // In-process fallback, before the hook process exits: waits for the session's
-// queued events, then ends this process's root with status ok and task outcome
-// unknown. The session continues in the next hook process, so only SessionEnd
-// states how it ended.
+// queued events, then releases the session, which continues in the next hook
+// process.
 export async function obsFlush(sessionId, config) {
   if (!isObsEnabled(config)) return;
   await queues.get(sessionId);
   const entry = sessions.get(sessionId);
   if (!entry) return;
   sessions.delete(sessionId);
-  await safeObsAsync(() => entry.session.close("ok", "unknown"));
+  await safeObsAsync(() => releaseEntry(entry));
 }
