@@ -298,6 +298,66 @@ test("daemon-client: a spawned daemon logs its listening line to daemon.log", as
   }
 });
 
+// Delays the spawned daemon's start past the client's former 450 ms window (#168).
+async function withSlowDaemonStart(dataDir, ms, fn) {
+  const { writeFile } = await import("node:fs/promises");
+  const preload = path.join(dataDir, "slow-start.cjs");
+  await writeFile(
+    preload,
+    `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${ms});\n`
+  );
+  const saved = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = `--require ${preload}`;
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = saved;
+  }
+}
+
+test("daemon-client: a daemon slower to start than 450 ms still serves the hook (#168)", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-slow-"));
+  const { readFile } = await import("node:fs/promises");
+  const config = await loadConfigFor(dataDir);
+  const { dispatchViaDaemon } = await import("../scripts/lib/daemon-client.mjs");
+  try {
+    const output = await withSlowDaemonStart(dataDir, 1_000, () =>
+      dispatchViaDaemon({
+        event: "SessionStart",
+        input: { hook_event_name: "SessionStart", session_id: "sess-slow-1", source: "startup" },
+        config,
+      })
+    );
+    assert.ok(output?.hookSpecificOutput?.additionalContext);
+  } finally {
+    try {
+      process.kill(
+        parseInt(await readFile(path.join(dataDir, "daemon.pid"), "utf8"), 10),
+        "SIGTERM"
+      );
+    } catch {}
+  }
+});
+
+test("daemon-client: a daemon that crashes after a slow start reports the crash (#168)", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-slowcrash-"));
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(path.join(dataDir, "profiles"), "not a directory");
+  const config = await loadConfigFor(dataDir);
+  const { dispatchViaDaemon } = await import("../scripts/lib/daemon-client.mjs");
+  await withSlowDaemonStart(dataDir, 1_000, () =>
+    assert.rejects(
+      dispatchViaDaemon({
+        event: "SessionStart",
+        input: { hook_event_name: "SessionStart", session_id: "sess-slow-2", source: "startup" },
+        config,
+      }),
+      /daemon exited \(code=1, signal=null\) before accepting connections/
+    )
+  );
+});
+
 test("daemon: a server error exits 1 and removes the PID file", async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-bind-"));
   const { mkdir } = await import("node:fs/promises");

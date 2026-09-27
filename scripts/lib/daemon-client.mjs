@@ -21,8 +21,8 @@ import { capDaemonLog, daemonLogPath } from "./daemon-log.mjs";
 
 const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if daemon is hung
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
-const SPAWN_RETRY_DELAY_MS = 150;
-const SPAWN_RETRIES = 3;
+const SPAWN_POLL_MS = 50;
+const DAEMON_START_TIMEOUT_MS = 10_000;
 const EXPECTED_DAEMON_VERSION = "0.2.19";
 
 let nextReqId = 1;
@@ -54,7 +54,8 @@ function connectOnce(socketPath) {
 
 /**
  * Spawn the daemon as a detached child and return once it accepts a
- * connection (up to SPAWN_RETRIES × SPAWN_RETRY_DELAY_MS).
+ * connection. Throws once the child exits or fails to spawn, or when it has
+ * neither listened nor exited within DAEMON_START_TIMEOUT_MS.
  */
 async function spawnDaemon(socketPath, dataDir, config) {
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -84,41 +85,34 @@ async function spawnDaemon(socketPath, dataDir, config) {
   } finally {
     closeSync(logFd);
   }
-  let spawnError = null;
-  let exited = null;
+  let failure = null;
   child.once("error", (err) => {
-    spawnError = err;
+    failure ??= err;
   });
   child.once("exit", (code, signal) => {
-    exited = { code, signal };
+    failure ??= new Error(
+      `daemon exited (code=${code}, signal=${signal}) before accepting connections; see ${logPath}`
+    );
   });
   child.unref();
 
-  const failure = () => {
-    if (spawnError) return spawnError;
-    if (exited) {
-      return new Error(
-        `daemon exited (code=${exited.code}, signal=${exited.signal}) before accepting connections; see ${logPath}`
-      );
-    }
-    return null;
-  };
-  for (let i = 0; i < SPAWN_RETRIES; i++) {
-    await new Promise((r) => setTimeout(r, SPAWN_RETRY_DELAY_MS));
+  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, SPAWN_POLL_MS));
     if (existsSync(socketPath)) {
       try {
-        const sock = await connectOnce(socketPath);
-        return sock;
+        return await connectOnce(socketPath);
       } catch {
-        /* try again */
+        /* not accepting yet */
       }
     }
-    const err = failure();
-    if (err) throw err;
+    if (failure) throw failure;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `daemon did not accept connections within ${DAEMON_START_TIMEOUT_MS}ms; see ${logPath}`
+      );
+    }
   }
-  throw new Error(
-    `daemon did not accept connections within ${SPAWN_RETRIES * SPAWN_RETRY_DELAY_MS}ms; see ${logPath}`
-  );
 }
 
 async function shutdownDaemon(socketPath) {
