@@ -37,6 +37,14 @@ function log(message) {
   process.stderr.write(`[usage-sync] ${new Date().toISOString()} ${message}\n`);
 }
 
+const failureReason = (f) => (f.status ? `HTTP ${f.status}: ${f.reason}` : f.reason);
+
+function failedAt(f) {
+  if (f.usageDate === undefined) return `session ${f.sessionId}`;
+  const hour = String(f.usageHour).padStart(2, "0");
+  return `session ${f.sessionId} ${f.usageDate} ${hour}:00 UTC`;
+}
+
 async function acquireLock(lockPath) {
   await mkdir(path.dirname(lockPath), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -83,13 +91,17 @@ async function syncPass({ config, statePath, deadline }) {
   state.lastRun = { at: new Date().toISOString(), dryRun: DRY, ...counts };
   await writeJson(statePath, state);
   for (const file of notRead) log(`not read ${file}`);
+  for (const f of report.failures) {
+    log(`failed ${f.count}x, first at ${failedAt(f)}: ${failureReason(f)}`);
+  }
   const verb = DRY ? "would post" : "posted";
+  const why = report.failures.map((f) => `${f.count}x ${failureReason(f)}`).join("; ");
   log(
     `${report.main} session(s) under ${PROJECTS_DIR} (${report.subagent} subagent, ` +
       `${report.journal} journal, ${report.other} other file(s)); ${report.changed} changed, ` +
       `${report.read} read; ${verb} ${report.sessionHours} session-hour(s) ` +
-      `(${report.tokens} tokens), ${report.failed} failed, ${report.left} left for the next run, ` +
-      `${Date.now() - started}ms`
+      `(${report.tokens} tokens), ${report.failed} failed${why ? ` (${why})` : ""}, ` +
+      `${report.left} left for the next run, ${Date.now() - started}ms`
   );
   if (report.failed) process.exitCode = 1;
 }

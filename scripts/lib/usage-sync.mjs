@@ -81,6 +81,17 @@ function changedHours(usage, prevHours = {}) {
 }
 
 /**
+ * Counts failures by status and reason, keeping the first failure of each as
+ * the example, so a backend that rejects every row yields one entry.
+ */
+function countFailure(failures, failure) {
+  const key = `${failure.status ?? ""} ${failure.reason}`;
+  const known = failures.get(key);
+  if (known) known.count++;
+  else failures.set(key, { ...failure, count: 1 });
+}
+
+/**
  * Post the session-hours that changed since the last run, reading only sessions
  * whose main or subagent transcripts changed size or mtime.
  *
@@ -88,7 +99,9 @@ function changedHours(usage, prevHours = {}) {
  * The run's seen set starts with the keys of every session it does not read,
  * so a changed fork still skips history it copied from an unchanged original.
  * A session's entry is replaced only when all of its changed hours posted, so
- * a failed hour is retried on the next run. `state` is updated in place.
+ * a failed hour is retried on the next run. `report.failures` lists each
+ * distinct failure (status and reason) once, with its count and the first
+ * session-hour it hit. `state` is updated in place.
  */
 export async function syncUsage({
   projectsDir,
@@ -128,6 +141,7 @@ export async function syncUsage({
     failed: 0,
     left: 0,
   };
+  const failures = new Map();
 
   for (const [i, file] of changed.entries()) {
     if (Date.now() > deadline) {
@@ -139,8 +153,9 @@ export async function syncUsage({
     let usage;
     try {
       usage = summarizeSessionUsageByHour(file, { seen });
-    } catch {
+    } catch (err) {
       report.failed++;
+      countFailure(failures, { sessionId, reason: `could not read: ${err?.message ?? err}` });
       continue;
     }
     report.read++;
@@ -163,6 +178,13 @@ export async function syncUsage({
       } else {
         ok = false;
         report.failed++;
+        countFailure(failures, {
+          sessionId,
+          usageDate: row.usageDate,
+          usageHour: row.usageHour,
+          ...(result?.status ? { status: result.status } : {}),
+          reason: result?.reason ?? "no reason given",
+        });
       }
     }
     if (ok) {
@@ -174,5 +196,6 @@ export async function syncUsage({
       };
     }
   }
+  report.failures = [...failures.values()];
   return report;
 }
