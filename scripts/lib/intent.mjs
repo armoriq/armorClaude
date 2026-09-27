@@ -34,9 +34,9 @@ export function getSdkClient(config) {
   // (the SDK can also act as a tool dispatcher via invokeWithPolicy, which
   // armorclaude never uses). We pass csrgEndpoint as iapEndpoint because
   // the SDK's `/delegation/create` route lives on csrg-iap. We don't pass
-  // proxyEndpoint at all — armorclaude observes tool calls via hooks, the
-  // proxy is never hit. SDK falls back to its own default if a customer
-  // ever spawns an invokeWithPolicy path.
+  // proxyEndpoint: only invoke and invokeWithPolicy, which armorclaude never
+  // calls, and SDK constructors before armoriq-sdk-customer-ts#269 (a
+  // GET {proxy}/health probe) send a request to the SDK's default proxy.
   const client = new ArmorIQClient({
     apiKey: config.apiKey,
     userId: config.userId,
