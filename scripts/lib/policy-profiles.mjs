@@ -1,6 +1,6 @@
 import path from "node:path";
-import { mkdir, readdir, unlink } from "node:fs/promises";
-import { readJson, writeJson } from "./fs-store.mjs";
+import { readdir, unlink } from "node:fs/promises";
+import { ensurePrivateDir, readJson, tightenPrivateFile, writeJson } from "./fs-store.mjs";
 import { POLICY_TEMPLATES } from "./policy-templates.mjs";
 import { legacyRulesToPolicyIr, normalizePolicyIr, canonicalPolicyHash } from "./policy-ir.mjs";
 
@@ -13,7 +13,9 @@ function profilePath(config, name) {
 }
 
 export async function ensureProfilesDir(config) {
-  await mkdir(profilesDir(config), { recursive: true });
+  const dir = profilesDir(config);
+  await ensurePrivateDir(dir);
+  for (const file of await readdir(dir)) await tightenPrivateFile(path.join(dir, file));
 }
 
 export async function seedBuiltinProfiles(config) {
