@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -658,6 +660,34 @@ test("an in-process Stop, with no daemon reachable, triggers the sync", async ()
     await until(() => readLastRun(statePath) && !existsSync(`${statePath}.lock`), "the sync pass");
     assert.equal(existsSync(path.join(dataDir, "daemon.sock")), false);
     assert.equal(posts.length, 3);
+  } finally {
+    server.close();
+  }
+});
+
+test("the sync's log, request marker and state are owner-only, and 0644 ones are tightened", async () => {
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  const statePath = path.join(dataDir, "usage-sync-state.json");
+  mkdirSync(dataDir, { recursive: true, mode: 0o755 });
+  chmodSync(dataDir, 0o755);
+  writeFileSync(path.join(dataDir, "profiles"), "not a directory");
+  const files = [path.join(dataDir, "usage-sync.log"), `${statePath}.request`, statePath];
+  for (const file of files) {
+    writeFileSync(file, file === statePath ? "{}" : "");
+    chmodSync(file, 0o644);
+  }
+  const { server, posts, port } = await fakeBackend();
+  try {
+    const hook = spawn(process.execPath, [ROUTER], { env: pluginEnv(home, dataDir, port) });
+    const exited = new Promise((resolve) => hook.once("exit", resolve));
+    hook.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: S2 }));
+    assert.equal(await exited, 0);
+    await until(() => readLastRun(statePath) && !existsSync(`${statePath}.lock`), "the sync pass");
+    assert.equal(posts.length, 3);
+    const mode = (file) => statSync(file).mode & 0o777;
+    for (const file of files) assert.equal(mode(file), 0o600, file);
+    assert.equal(mode(dataDir), 0o700);
   } finally {
     server.close();
   }

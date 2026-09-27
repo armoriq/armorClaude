@@ -39,8 +39,8 @@ import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs
 import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
-import { readJson } from "./fs-store.mjs";
-import { mkdir, stat, unlink, writeFile } from "node:fs/promises";
+import { readJson, writePrivateFile } from "./fs-store.mjs";
+import { stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { homedir } from "node:os";
 import {
@@ -506,8 +506,7 @@ export async function handleSessionStart(input, config) {
           "  /armorclaude:armor policy add allow Read and Grep, deny Write, hold Bash\n\n" +
           "Type /armorclaude:armor for all commands.";
       }
-      await mkdir(config.dataDir, { recursive: true });
-      await writeFile(onboardingFlag, new Date().toISOString(), "utf8");
+      await writePrivateFile(onboardingFlag, new Date().toISOString());
     }
   }
 
