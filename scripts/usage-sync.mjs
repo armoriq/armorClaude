@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Uploads token usage for every local Claude Code session, with or without
-// ArmorClaude, one row per session-day to POST {backendEndpoint}/dashboard/token-usage.
+// ArmorClaude, one row per session and UTC hour to POST {backendEndpoint}/dashboard/token-usage.
 // It is the only writer of those rows. The daemon launches it every 10 minutes
 // and after each Stop, the in-process hook path on SessionStart and Stop; it
 // can also be run by hand.
@@ -87,7 +87,7 @@ async function syncPass({ config, statePath, deadline }) {
   log(
     `${report.main} session(s) under ${PROJECTS_DIR} (${report.subagent} subagent, ` +
       `${report.journal} journal, ${report.other} other file(s)); ${report.changed} changed, ` +
-      `${report.read} read; ${verb} ${report.sessionDays} session-day(s) ` +
+      `${report.read} read; ${verb} ${report.sessionHours} session-hour(s) ` +
       `(${report.tokens} tokens), ${report.failed} failed, ${report.left} left for the next run, ` +
       `${Date.now() - started}ms`
   );
