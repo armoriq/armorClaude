@@ -14,6 +14,19 @@ function pluginOpt(env, pluginKey, legacyKey) {
   return "";
 }
 
+const PRODUCT = "armorclaude";
+
+function trimSlashes(url) {
+  return typeof url === "string" ? url.replace(/\/+$/, "") : "";
+}
+
+function savedLoginScope(creds) {
+  return {
+    product: typeof creds?.product === "string" ? creds.product : "",
+    backend: trimSlashes(creds?.backend),
+  };
+}
+
 function normalizeArmoriqEnv(value) {
   const normalized = String(value || "")
     .trim()
@@ -79,6 +92,7 @@ export function loadConfig(env = process.env) {
   // Optional default policy template applied (staged for confirm) on first run.
   const defaultTemplate = pluginOpt(env, "DEFAULT_TEMPLATE");
   let orgId = env.ARMORIQ_ORG_ID?.trim() || "";
+  let ignoredSavedCredential = null;
 
   // Observability is ON by default. Users can opt out via the
   // `disable_observability` plugin option or the ARMORIQ_OBSERVABILITY_DISABLED
@@ -91,8 +105,13 @@ export function loadConfig(env = process.env) {
     const creds = JSON.parse(
       readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
     );
-    if (!apiKey && typeof creds?.apiKey === "string") apiKey = creds.apiKey;
-    if (!orgId && typeof creds?.orgId === "string") orgId = creds.orgId;
+    const scope = savedLoginScope(creds);
+    if (scope.product === PRODUCT && scope.backend === trimSlashes(backendEndpoint)) {
+      if (!apiKey && typeof creds?.apiKey === "string") apiKey = creds.apiKey;
+      if (!orgId && typeof creds?.orgId === "string") orgId = creds.orgId;
+    } else if (typeof creds?.apiKey === "string") {
+      ignoredSavedCredential = scope;
+    }
   } catch {
     // no credentials file — local-only mode
   }
@@ -152,6 +171,7 @@ export function loadConfig(env = process.env) {
     // Drives the SessionStart setup banner.
     unconfigured: !connected,
     hadUnusableKey,
+    ignoredSavedCredential,
     auditWal: true,
     autoReanchor: true,
     autoRevokeOnEnd: true,
