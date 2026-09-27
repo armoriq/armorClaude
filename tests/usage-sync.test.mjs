@@ -58,7 +58,7 @@ function writeTree(root, files) {
 }
 
 function fixtureHome() {
-  const home = mkdtempSync(path.join(tmpdir(), "ac-backfill-"));
+  const home = mkdtempSync(path.join(tmpdir(), "ac-usage-sync-"));
   const history = [
     assistant("m1", "2026-09-20T09:00:00Z", 10),
     assistant("m2", "2026-09-20T09:01:00Z", 20),
