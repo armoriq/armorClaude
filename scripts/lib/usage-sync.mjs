@@ -80,10 +80,6 @@ function changedHours(usage, prevHours = {}) {
   return { hours, rows };
 }
 
-/**
- * Counts failures by status and reason, keeping the first failure of each as
- * the example, so a backend that rejects every row yields one entry.
- */
 function countFailure(failures, failure) {
   const key = `${failure.status ?? ""} ${failure.reason}`;
   const known = failures.get(key);
@@ -99,9 +95,7 @@ function countFailure(failures, failure) {
  * The run's seen set starts with the keys of every session it does not read,
  * so a changed fork still skips history it copied from an unchanged original.
  * A session's entry is replaced only when all of its changed hours posted, so
- * a failed hour is retried on the next run. `report.failures` lists each
- * distinct failure (status and reason) once, with its count and the first
- * session-hour it hit. `state` is updated in place.
+ * a failed hour is retried on the next run. `state` is updated in place.
  */
 export async function syncUsage({
   projectsDir,
@@ -163,6 +157,7 @@ export async function syncUsage({
     const armored = Boolean(prev?.armored) || isArmored(sessionId);
     const { hours, rows } = changedHours(usage, prev?.hours);
     let ok = true;
+    let unreachable = false;
     for (const row of rows) {
       const result = await post({
         sessionId,
@@ -175,17 +170,24 @@ export async function syncUsage({
       if (result?.ok) {
         report.sessionHours++;
         report.tokens += row.tokens;
-      } else {
-        ok = false;
-        report.failed++;
-        countFailure(failures, {
-          sessionId,
-          usageDate: row.usageDate,
-          usageHour: row.usageHour,
-          ...(result?.status ? { status: result.status } : {}),
-          reason: result?.reason ?? "no reason given",
-        });
+        continue;
       }
+      ok = false;
+      report.failed++;
+      unreachable = Boolean(result?.unreachable);
+      countFailure(failures, {
+        sessionId,
+        usageDate: row.usageDate,
+        usageHour: row.usageHour,
+        ...(result?.status ? { status: result.status } : {}),
+        ...(unreachable ? { unreachable } : {}),
+        reason: result?.reason ?? "no reason given",
+      });
+      if (unreachable) break;
+    }
+    if (unreachable) {
+      report.left = changed.length - i;
+      break;
     }
     if (ok) {
       state.sessions[file] = {

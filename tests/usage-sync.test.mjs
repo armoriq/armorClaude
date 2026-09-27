@@ -427,6 +427,54 @@ test("failed posts are counted once per distinct status and reason, with the fir
   assert.deepEqual(state.sessions, {});
 });
 
+test("an unreachable backend ends the run after one post and leaves every session for the next run", async () => {
+  const home = fixtureHome();
+  const state = await loadSyncState(path.join(home, "none.json"));
+  const calls = [];
+  const down = await syncUsage({
+    projectsDir: projectsOf(home),
+    state,
+    post: async (row) => {
+      calls.push(row);
+      return { ok: false, unreachable: true, reason: "connect ECONNREFUSED 127.0.0.1:9" };
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(down.failed, 1);
+  assert.equal(down.left, 2);
+  assert.deepEqual(
+    down.failures.map((f) => [f.unreachable, f.reason, f.count]),
+    [[true, "connect ECONNREFUSED 127.0.0.1:9", 1]]
+  );
+  assert.deepEqual(state.sessions, {});
+
+  const { rows } = await run(home, state);
+  assert.deepEqual(summary(rows), [
+    [S1, "2026-09-20", 9, 133],
+    [S1, "2026-09-21", 9, 1000],
+    [S2, "2026-09-21", 10, 7],
+  ]);
+});
+
+test("an unreachable backend after some posts keeps the sessions already posted", async () => {
+  const home = fixtureHome();
+  const state = await loadSyncState(path.join(home, "none.json"));
+  let n = 0;
+  const report = await syncUsage({
+    projectsDir: projectsOf(home),
+    state,
+    post: async () =>
+      ++n <= 2 ? { ok: true } : { ok: false, unreachable: true, reason: "socket hang up" },
+  });
+  assert.equal(n, 3);
+  assert.equal(report.sessionHours, 2);
+  assert.equal(report.left, 1);
+  assert.deepEqual(
+    Object.keys(state.sessions).map((f) => path.basename(f)),
+    [`${S1}.jsonl`]
+  );
+});
+
 test("a failed post with no reason is still reported", async () => {
   const home = fixtureHome();
   const report = await syncUsage({
@@ -737,6 +785,43 @@ test("usage-sync logs a backend 400 once with its session-hour, status and messa
       lastRun.failures.map((f) => [f.status, f.reason, f.count]),
       [[400, HOUR_400, 3]]
     );
+  } finally {
+    server.close();
+  }
+});
+
+test("usage-sync against a closed port stops after one row, exits 1 fast and keeps every row", async () => {
+  const closed = createServer();
+  await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
+  const deadPort = closed.address().port;
+  await new Promise((resolve) => closed.close(resolve));
+  const home = fixtureHome();
+  const started = Date.now();
+  const res = await cliAgainst(home, deadPort, {});
+  const elapsed = Date.now() - started;
+  assert.equal(res.status, 1, res.stderr);
+  assert.ok(elapsed < 10_000, `took ${elapsed}ms`);
+  const origin = `http://127.0.0.1:${deadPort}`;
+  const failedLines = res.stderr.split("\n").filter((l) => l.includes(" failed 1x"));
+  assert.equal(failedLines.length, 1, res.stderr);
+  assert.ok(failedLines[0].includes(`backend unreachable at ${origin}: `), res.stderr);
+  assert.match(
+    res.stderr,
+    /posted 0 session-hour\(s\) \(0 tokens\), 1 failed \(1x backend unreachable at /
+  );
+  assert.match(res.stderr, /2 left for the next run/);
+  const statePath = path.join(home, "data", "usage-sync-state.json");
+  assert.deepEqual(JSON.parse(readFileSync(statePath, "utf8")).sessions, {});
+
+  const { server, posts, port } = await fakeBackend();
+  try {
+    const next = await cliAgainst(home, port, {});
+    assert.equal(next.status, 0, next.stderr);
+    assert.deepEqual(summary(posts), [
+      [S1, "2026-09-20", 9, 133],
+      [S1, "2026-09-21", 9, 1000],
+      [S2, "2026-09-21", 10, 7],
+    ]);
   } finally {
     server.close();
   }

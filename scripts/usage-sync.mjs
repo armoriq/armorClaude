@@ -37,7 +37,11 @@ function log(message) {
   process.stderr.write(`[usage-sync] ${new Date().toISOString()} ${message}\n`);
 }
 
-const failureReason = (f) => (f.status ? `HTTP ${f.status}: ${f.reason}` : f.reason);
+function failureReason(f, backendEndpoint) {
+  if (f.unreachable)
+    return `backend unreachable at ${new URL(backendEndpoint).origin}: ${f.reason}`;
+  return f.status ? `HTTP ${f.status}: ${f.reason}` : f.reason;
+}
 
 function failedAt(f) {
   if (f.usageDate === undefined) return `session ${f.sessionId}`;
@@ -91,11 +95,12 @@ async function syncPass({ config, statePath, deadline }) {
   state.lastRun = { at: new Date().toISOString(), dryRun: DRY, ...counts };
   await writeJson(statePath, state);
   for (const file of notRead) log(`not read ${file}`);
+  const reason = (f) => failureReason(f, config.backendEndpoint);
   for (const f of report.failures) {
-    log(`failed ${f.count}x, first at ${failedAt(f)}: ${failureReason(f)}`);
+    log(`failed ${f.count}x, first at ${failedAt(f)}: ${reason(f)}`);
   }
   const verb = DRY ? "would post" : "posted";
-  const why = report.failures.map((f) => `${f.count}x ${failureReason(f)}`).join("; ");
+  const why = report.failures.map((f) => `${f.count}x ${reason(f)}`).join("; ");
   log(
     `${report.main} session(s) under ${PROJECTS_DIR} (${report.subagent} subagent, ` +
       `${report.journal} journal, ${report.other} other file(s)); ${report.changed} changed, ` +
