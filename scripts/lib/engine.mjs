@@ -513,16 +513,21 @@ export async function handleSessionStart(input, config) {
   // This is the fresh `claude plugin install` path, which never ran the
   // interactive installer/onboarding. ---
   if (config.unconfigured) {
+    const ignored = config.ignoredSavedCredential;
     const staleNote = config.hadUnusableKey
       ? "\n(An existing credential was ignored — it isn't a valid ArmorIQ key.)"
-      : "";
+      : ignored
+        ? `\n(The key saved in ~/.armoriq/credentials.json is for ${ignored.product || "no product"} ` +
+          `on ${ignored.backend || "an unrecorded backend"}, not armorclaude on ${config.backendEndpoint}.)`
+        : "";
     return addPromptContext(
       `ArmorClaude installed but NOT connected — no valid ArmorIQ API key found.${staleNote}\n` +
         `Running in MONITOR mode: observing only, your tools are not blocked.\n\n` +
         `To enable protection:\n` +
+        `  Run \`armoriq login --product armorclaude\`, or\n` +
         `  1. Get an API key: https://tools.armoriq.ai/tools/api-keys\n` +
         `  2. Provide it via the plugin's API_KEY setting, or set ` +
-        `ARMORIQ_API_KEY=ak_live_… (or add it to ~/.armoriq/credentials.json).\n` +
+        `ARMORIQ_API_KEY=ak_live_….\n` +
         `Once a valid key is present, ArmorClaude enforces automatically.\n` +
         `Type /armorclaude:armor for all commands.`,
       "SessionStart"
