@@ -16,7 +16,8 @@
  *   PostToolUse       -> tool span with success/error outcome
  *   UserPromptExpansion (slash command) -> command operation span
  *   Stop              -> ends the open plan span, if any, and flushes
- *   SessionEnd        -> close the session and drop the entry
+ *   SessionEnd        -> ends the root as completed, opening one if no earlier
+ *                        event did, and drops the entry
  *
  * Each session's events are recorded in arrival order on a per-session queue.
  * NOTHING here may throw into a hook: every emission goes through safeObsAsync().
@@ -206,11 +207,13 @@ async function obsEndTurn(sessionId) {
   await safeObsAsync(() => entry.session.flush("ok"));
 }
 
-async function obsEndSession(sessionId) {
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
+async function obsEndSession(sessionId, config) {
+  const entry = await getOrInitEntry(sessionId, config);
   sessions.delete(sessionId);
-  await safeObsAsync(() => entry.session.close("ok"));
+  await safeObsAsync(async () => {
+    await entry.session.beginRoot();
+    await entry.session.close("ok");
+  });
 }
 
 // Daemon shutdown: waits for queued events, then closes every session with
@@ -294,7 +297,7 @@ async function recordEvent(sessionId, event, input, output, config) {
         await obsEndTurn(sessionId);
         break;
       case "SessionEnd":
-        await obsEndSession(sessionId);
+        await obsEndSession(sessionId, config);
         break;
       default:
         break;
@@ -303,13 +306,14 @@ async function recordEvent(sessionId, event, input, output, config) {
 }
 
 // In-process fallback, before the hook process exits: waits for the session's
-// queued events, then closes it with status process_exit so the process's root
-// ends and ships with its spans.
+// queued events, then ends this process's root with status ok and task outcome
+// unknown. The session continues in the next hook process, so only SessionEnd
+// states how it ended.
 export async function obsFlush(sessionId, config) {
   if (!isObsEnabled(config)) return;
   await queues.get(sessionId);
   const entry = sessions.get(sessionId);
   if (!entry) return;
   sessions.delete(sessionId);
-  await safeObsAsync(() => entry.session.close("process_exit"));
+  await safeObsAsync(() => entry.session.close("ok", "unknown"));
 }

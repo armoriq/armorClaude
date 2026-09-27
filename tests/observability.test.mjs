@@ -412,3 +412,33 @@ test("obsFlushAll ends every open root with status process_exit", async () => {
   assert.equal(roots[0].status.message, "process_exit");
   await provider.shutdown();
 });
+
+test("obsFlush ends the fallback process's root ok, with no task outcome claimed (#167)", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook(
+    "PreToolUse",
+    { session_id: "sess-fallback", tool_name: "Read", tool_input: {} },
+    { hookSpecificOutput: { permissionDecision: "allow" } },
+    config
+  );
+  await obsFlush("sess-fallback", config);
+  const roots = spansByName("armoriq.agent.run");
+  assert.equal(roots.length, 1);
+  assert.equal(roots[0].status.code, 1, "SpanStatusCode.OK");
+  assert.equal(roots[0].attributes["gen_ai.task.outcome"], "unknown");
+  await provider.shutdown();
+});
+
+test("SessionEnd in a process with no open root records the session as completed (#167)", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook("SessionEnd", { session_id: "sess-end-only" }, null, config);
+  await obsFlush("sess-end-only", config);
+  const roots = spansByName("armoriq.agent.run");
+  assert.equal(roots.length, 1);
+  assert.equal(roots[0].status.code, 1, "SpanStatusCode.OK");
+  assert.equal(roots[0].attributes["gen_ai.task.outcome"], "completed");
+  assert.equal(roots[0].attributes["session.id"], "sess-end-only");
+  await provider.shutdown();
+});

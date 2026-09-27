@@ -45,6 +45,15 @@ function protoFields(buf) {
 
 const sub = (buf, no) => protoFields(buf).filter((f) => f.no === no && f.bytes);
 
+const STATUS_CODES = { 0: "unset", 1: "ok", 2: "error" };
+
+// Span status(15) -> code(3)
+function spanStatus(span) {
+  const status = sub(span, 15)[0];
+  const code = status ? protoFields(status.bytes).find((f) => f.no === 3) : undefined;
+  return STATUS_CODES[Number(code?.value ?? 0n)];
+}
+
 // ExportTraceServiceRequest -> ResourceSpans(1) -> ScopeSpans(2) -> Span(2): name(5), attributes(9)
 function decodeSpans(body) {
   const spans = [];
@@ -59,7 +68,7 @@ function decodeSpans(body) {
           const text = value ? sub(value.bytes, 1)[0] : undefined;
           if (key && text) attributes[key] = text.bytes.toString("utf8");
         }
-        spans.push({ name, attributes });
+        spans.push({ name, attributes, status: spanStatus(span.bytes) });
       }
     }
   }
@@ -176,6 +185,50 @@ test("fallback PreToolUse and PostToolUse, one process each, ship spans carrying
     for (const span of [...policy, ...toolSpans, ...roots]) {
       assert.equal(span.attributes["armoriq.session_id"], sessionId, span.name);
     }
+    for (const root of roots) {
+      assert.equal(root.status, "ok");
+      assert.equal(root.attributes["gen_ai.task.outcome"], "unknown");
+    }
+  } finally {
+    await backend.close();
+  }
+});
+
+test("a session run entirely on the fallback ships no error roots and ends completed (#167)", async () => {
+  const backend = await startBackend();
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-fallback-");
+    await writeFile(path.join(dataDir, "profiles"), "not a directory");
+    const env = pluginEnv(home, dataDir, backend.url);
+    const session_id = randomUUID();
+    const hook = async (payload) => {
+      const { code } = await runHook(env, { session_id, ...payload });
+      assert.equal(code, 0, payload.hook_event_name);
+    };
+    await hook({ hook_event_name: "SessionStart", source: "startup" });
+    await hook({ hook_event_name: "UserPromptSubmit", prompt: "read package.json" });
+    for (const tool_name of ["Read", "Grep"]) {
+      const tool = { tool_name, tool_input: { file_path: "package.json" } };
+      await hook({ hook_event_name: "PreToolUse", ...tool });
+      await hook({ hook_event_name: "PostToolUse", ...tool, tool_response: { ok: true } });
+    }
+    await hook({ hook_event_name: "Stop", stop_hook_active: false });
+    await hook({ hook_event_name: "SessionEnd", reason: "other" });
+    assert.ok(!existsSync(path.join(dataDir, "daemon.sock")), "no daemon served these hooks");
+
+    const roots = backend.exports.filter((s) => s.name === "armoriq.agent.run");
+    assert.equal(roots.length, 7, "one root per hook process that recorded an event");
+    for (const root of roots) {
+      assert.equal(root.attributes["armoriq.session_id"], session_id);
+      assert.equal(root.status, "ok");
+    }
+    const outcomes = roots.map((r) => r.attributes["gen_ai.task.outcome"]);
+    assert.equal(outcomes.filter((o) => o === "completed").length, 1, outcomes.join(","));
+    assert.ok(
+      outcomes.every((o) => o === "completed" || o === "unknown"),
+      outcomes.join(",")
+    );
   } finally {
     await backend.close();
   }
