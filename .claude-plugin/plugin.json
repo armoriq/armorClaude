@@ -1,6 +1,6 @@
 {
   "name": "armorclaude",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "description": "ArmorIQ intent-based security enforcement for Claude Code: policy-based tool access control, intent verification, CSRG cryptographic proofs, and audit logging.",
   "author": { "name": "ArmorIQ", "email": "license@armoriq.io" },
   "homepage": "https://armoriq.ai/tools/armorclaude",
@@ -24,6 +24,11 @@
       "type": "boolean",
       "title": "Disable observability",
       "description": "Observability (execution traces sent to your ArmorIQ dashboard) is enabled by default. Set to true to turn it off."
+    },
+    "disable_usage_sync": {
+      "type": "boolean",
+      "title": "Disable token usage sync",
+      "description": "Applies only while observability is enabled. The usage sync uploads token counts from every local Claude Code session in ~/.claude/projects to your ArmorIQ dashboard. Set to true to turn it off. Turning off observability turns it off too."
     }
   }
 }

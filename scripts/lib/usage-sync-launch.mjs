@@ -63,6 +63,8 @@ function childEnv(config) {
   };
   const env = { ...process.env };
   for (const [key, value] of Object.entries(overrides)) if (value) env[key] = value;
+  env.CLAUDE_PLUGIN_OPTION_DISABLE_OBSERVABILITY = "false";
+  env.CLAUDE_PLUGIN_OPTION_DISABLE_USAGE_SYNC = "false";
   return env;
 }
 
@@ -70,11 +72,12 @@ function childEnv(config) {
  * Start scripts/usage-sync.mjs as a detached process with this config's
  * credentials and data dir, and return without waiting for it. Its stderr goes
  * to usage-sync.log in the data dir. Starts nothing while a live sync holds the
- * lock. Returns false when there is no API key or the process could not be
+ * lock. Returns false when the config disables the usage sync (no API key,
+ * observability off, or `disable_usage_sync` set) or the process could not be
  * started.
  */
 export function launchUsageSync(config) {
-  if (!config?.apiKey) return false;
+  if (!config?.usageSyncEnabled) return false;
   try {
     mkdirSync(config.dataDir, { recursive: true });
     if (lockHeld(syncPaths(defaultStatePath(config.dataDir)).lock)) return true;
@@ -107,7 +110,7 @@ export function launchUsageSync(config) {
  * each pass and after releasing its lock, so it runs again instead.
  */
 export function requestUsageSync(config) {
-  if (!config?.apiKey) return false;
+  if (!config?.usageSyncEnabled) return false;
   try {
     mkdirSync(config.dataDir, { recursive: true });
     writeFileSync(syncPaths(defaultStatePath(config.dataDir)).request, String(Date.now()));

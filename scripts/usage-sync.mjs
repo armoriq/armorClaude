@@ -6,8 +6,9 @@
 //
 //   node scripts/usage-sync.mjs [--dry-run] [--state <path>]
 //
-// --dry-run : print each row instead of posting it. Needs no API key and keeps
-//             its own state file, so it never changes what a real run posts.
+// --dry-run : print each row instead of posting it. Needs no API key, ignores
+//             the observability and usage sync switches, and keeps its own
+//             state file, so it never changes what a real run posts.
 // --state   : state file to read and update.
 
 import { homedir } from "node:os";
@@ -96,6 +97,10 @@ async function main() {
   const config = loadConfig(process.env);
   if (!DRY && !config.apiKey) {
     log("no API key, nothing synced");
+    return;
+  }
+  if (!DRY && !config.usageSyncEnabled) {
+    log("usage sync is off (observability disabled or disable_usage_sync set), nothing synced");
     return;
   }
   const statePath =

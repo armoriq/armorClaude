@@ -87,6 +87,10 @@ export function loadConfig(env = process.env) {
     pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORIQ_OBSERVABILITY_DISABLED"),
     false
   );
+  const usageSyncDisabled = parseBoolean(
+    pluginOpt(env, "DISABLE_USAGE_SYNC", "ARMORIQ_USAGE_SYNC_DISABLED"),
+    false
+  );
   try {
     const creds = JSON.parse(
       readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
@@ -133,6 +137,7 @@ export function loadConfig(env = process.env) {
     observabilityEnabled: !observabilityDisabled && Boolean(effectiveApiKey),
     observabilityEndpoint: backendEndpoint,
     observabilityProduct: "armorclaude",
+    usageSyncEnabled: !observabilityDisabled && !usageSyncDisabled && Boolean(effectiveApiKey),
 
     // userConfig-driven credential (see effectiveApiKey above: a bad-format key
     // is dropped, and local mock substitutes an SDK-accepted placeholder).
