@@ -1,10 +1,10 @@
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { sessionTranscriptPaths, summarizeSessionUsageByDay } from "@armoriq/sdk-dev";
+import { sessionTranscriptPaths, summarizeSessionUsageByHour } from "@armoriq/sdk-dev";
 import { readJson } from "./fs-store.mjs";
 import { classifyTranscripts } from "./transcripts.mjs";
 
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
 
 class RecordingSet extends Set {
   added = [];
@@ -52,41 +52,43 @@ const zeroEntry = (model) => ({
   cacheWriteTokens: 0,
 });
 
+const hourKey = ({ usageDate, usageHour }) => `${usageDate}T${String(usageHour).padStart(2, "0")}`;
+
 /**
- * The rows to post for one session: every day whose per-model totals differ
- * from what was posted before. A model posted before but absent from a day now
- * is sent with zero tokens, since the backend replaces each (session, model,
- * day) row it receives and leaves the rest alone.
+ * The rows to post for one session: every UTC hour whose per-model totals
+ * differ from what was posted before. A model posted before but absent from an
+ * hour now is sent with zero tokens, since the backend replaces each (session,
+ * model, date, hour) row it receives and leaves the rest alone.
  */
-function changedDays(usage, prevDays = {}) {
-  const days = {};
-  const byDay = new Map(usage.days.map((day) => [day.usageDate, day.entries]));
-  for (const [usageDate, entries] of byDay) {
-    days[usageDate] = Object.fromEntries(entries.map((e) => [e.model, entryTotal(e)]));
+function changedHours(usage, prevHours = {}) {
+  const hours = {};
+  const byHour = new Map(usage.hours.map((hour) => [hourKey(hour), hour.entries]));
+  for (const [key, entries] of byHour) {
+    hours[key] = Object.fromEntries(entries.map((e) => [e.model, entryTotal(e)]));
   }
   const rows = [];
-  for (const usageDate of new Set([...byDay.keys(), ...Object.keys(prevDays)])) {
-    const now = days[usageDate] ?? {};
-    const before = prevDays[usageDate] ?? {};
+  for (const key of new Set([...byHour.keys(), ...Object.keys(prevHours)])) {
+    const now = hours[key] ?? {};
+    const before = prevHours[key] ?? {};
     const models = new Set([...Object.keys(now), ...Object.keys(before)]);
     if ([...models].every((m) => now[m] === before[m])) continue;
     const vanished = Object.keys(before).filter((m) => !Object.hasOwn(now, m));
-    const entries = [...(byDay.get(usageDate) ?? []), ...vanished.map(zeroEntry)];
+    const entries = [...(byHour.get(key) ?? []), ...vanished.map(zeroEntry)];
     const tokens = Object.values(now).reduce((a, b) => a + b, 0);
-    rows.push({ usageDate, entries, tokens });
+    rows.push({ usageDate: key.slice(0, 10), usageHour: Number(key.slice(11)), entries, tokens });
   }
-  return { days, rows };
+  return { hours, rows };
 }
 
 /**
- * Post the session-days that changed since the last run, reading only sessions
+ * Post the session-hours that changed since the last run, reading only sessions
  * whose main or subagent transcripts changed size or mtime.
  *
  * Each session's entry in `state.sessions` keeps the message keys it counted.
  * The run's seen set starts with the keys of every session it does not read,
  * so a changed fork still skips history it copied from an unchanged original.
- * A session's entry is replaced only when all of its changed days posted, so a
- * failed day is retried on the next run. `state` is updated in place.
+ * A session's entry is replaced only when all of its changed hours posted, so
+ * a failed hour is retried on the next run. `state` is updated in place.
  */
 export async function syncUsage({
   projectsDir,
@@ -121,7 +123,7 @@ export async function syncUsage({
     notRead: [...groups.subagent.filter((f) => !folded.has(f)), ...groups.other],
     changed: changed.length,
     read: 0,
-    sessionDays: 0,
+    sessionHours: 0,
     tokens: 0,
     failed: 0,
     left: 0,
@@ -136,7 +138,7 @@ export async function syncUsage({
     seen.added = [];
     let usage;
     try {
-      usage = summarizeSessionUsageByDay(file, { seen });
+      usage = summarizeSessionUsageByHour(file, { seen });
     } catch {
       report.failed++;
       continue;
@@ -144,18 +146,19 @@ export async function syncUsage({
     report.read++;
     const prev = state.sessions[file];
     const armored = Boolean(prev?.armored) || isArmored(sessionId);
-    const { days, rows } = changedDays(usage, prev?.days);
+    const { hours, rows } = changedHours(usage, prev?.hours);
     let ok = true;
     for (const row of rows) {
       const result = await post({
         sessionId,
         usageDate: row.usageDate,
+        usageHour: row.usageHour,
         repo: usage.repo,
         entries: row.entries,
         armored,
       });
       if (result?.ok) {
-        report.sessionDays++;
+        report.sessionHours++;
         report.tokens += row.tokens;
       } else {
         ok = false;
@@ -165,7 +168,7 @@ export async function syncUsage({
     if (ok) {
       state.sessions[file] = {
         files: current.get(file),
-        days,
+        hours,
         keys: seen.added,
         ...(armored ? { armored: true } : {}),
       };
