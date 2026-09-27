@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Uploads token usage for every local Claude Code session, with or without
-// ArmorClaude, one row per session-day to POST {backendEndpoint}/dashboard/token-usage.
+// ArmorClaude, one row per session and UTC hour to POST {backendEndpoint}/dashboard/token-usage.
 // It is the only writer of those rows. The daemon launches it every 10 minutes
 // and after each Stop, the in-process hook path on SessionStart and Stop; it
 // can also be run by hand.
@@ -35,6 +35,18 @@ const PROJECTS_DIR = path.join(homedir(), ".claude", "projects");
 
 function log(message) {
   process.stderr.write(`[usage-sync] ${new Date().toISOString()} ${message}\n`);
+}
+
+function failureReason(f, backendEndpoint) {
+  if (f.unreachable)
+    return `backend unreachable at ${new URL(backendEndpoint).origin}: ${f.reason}`;
+  return f.status ? `HTTP ${f.status}: ${f.reason}` : f.reason;
+}
+
+function failedAt(f) {
+  if (f.usageDate === undefined) return `session ${f.sessionId}`;
+  const hour = String(f.usageHour).padStart(2, "0");
+  return `session ${f.sessionId} ${f.usageDate} ${hour}:00 UTC`;
 }
 
 async function acquireLock(lockPath) {
@@ -83,13 +95,18 @@ async function syncPass({ config, statePath, deadline }) {
   state.lastRun = { at: new Date().toISOString(), dryRun: DRY, ...counts };
   await writeJson(statePath, state);
   for (const file of notRead) log(`not read ${file}`);
+  const reason = (f) => failureReason(f, config.backendEndpoint);
+  for (const f of report.failures) {
+    log(`failed ${f.count}x, first at ${failedAt(f)}: ${reason(f)}`);
+  }
   const verb = DRY ? "would post" : "posted";
+  const why = report.failures.map((f) => `${f.count}x ${reason(f)}`).join("; ");
   log(
     `${report.main} session(s) under ${PROJECTS_DIR} (${report.subagent} subagent, ` +
       `${report.journal} journal, ${report.other} other file(s)); ${report.changed} changed, ` +
-      `${report.read} read; ${verb} ${report.sessionDays} session-day(s) ` +
-      `(${report.tokens} tokens), ${report.failed} failed, ${report.left} left for the next run, ` +
-      `${Date.now() - started}ms`
+      `${report.read} read; ${verb} ${report.sessionHours} session-hour(s) ` +
+      `(${report.tokens} tokens), ${report.failed} failed${why ? ` (${why})` : ""}, ` +
+      `${report.left} left for the next run, ${Date.now() - started}ms`
   );
   if (report.failed) process.exitCode = 1;
 }
