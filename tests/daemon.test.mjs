@@ -298,7 +298,6 @@ test("daemon-client: a spawned daemon logs its listening line to daemon.log", as
   }
 });
 
-// Delays the spawned daemon's start past the client's former 450 ms window (#168).
 async function withSlowDaemonStart(dataDir, ms, fn) {
   const { writeFile } = await import("node:fs/promises");
   const preload = path.join(dataDir, "slow-start.cjs");

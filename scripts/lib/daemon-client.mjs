@@ -54,9 +54,7 @@ function connectOnce(socketPath) {
 }
 
 /**
- * Spawn the daemon as a detached child and return once it accepts a
- * connection. Throws once the child exits or fails to spawn, or when it has
- * neither listened nor exited within DAEMON_START_TIMEOUT_MS.
+ * Spawn the daemon as a detached child and return once it accepts a connection.
  */
 async function spawnDaemon(socketPath, dataDir, config) {
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -100,13 +98,8 @@ async function spawnDaemon(socketPath, dataDir, config) {
   const deadline = Date.now() + DAEMON_START_TIMEOUT_MS;
   for (;;) {
     await new Promise((r) => setTimeout(r, SPAWN_POLL_MS));
-    if (existsSync(socketPath)) {
-      try {
-        return await connectOnce(socketPath);
-      } catch {
-        /* not accepting yet */
-      }
-    }
+    const sock = existsSync(socketPath) && (await connectOnce(socketPath).catch(() => null));
+    if (sock) return sock;
     if (failure) throw failure;
     if (Date.now() >= deadline) {
       throw new Error(

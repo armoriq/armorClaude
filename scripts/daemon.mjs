@@ -369,8 +369,8 @@ let lastActivity = Date.now();
 const idleTimer = setInterval(() => {
   try {
     capDaemonLog(daemonLogPath(config.dataDir));
-  } catch {
-    /* best-effort */
+  } catch (err) {
+    process.stderr.write(`[armorclaude-daemon] daemon.log cap failed: ${err?.message ?? err}\n`);
   }
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
     process.stderr.write(
