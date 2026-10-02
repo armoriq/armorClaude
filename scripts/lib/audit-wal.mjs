@@ -18,11 +18,11 @@
  * caps rows at 4000 bytes and rejects larger payloads.
  */
 
-import { open, readdir, readFile, rename, stat, unlink } from "node:fs/promises";
+import { appendFile, open, readdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import {
-  appendPrivateFile,
+  PRIVATE_FILE_MODE,
   ensurePrivateDir,
   tightenPrivateFile,
   writePrivateFile,
@@ -64,7 +64,7 @@ export function createAuditWal(opts) {
     if (Buffer.byteLength(json, "utf8") > MAX_LINE_BYTES) {
       throw new Error(`audit row too large (${json.length} bytes); cap is ${MAX_LINE_BYTES}`);
     }
-    await appendPrivateFile(currentPath, `${json}\n`);
+    await appendFile(currentPath, `${json}\n`, { encoding: "utf8", mode: PRIVATE_FILE_MODE });
   }
 
   async function readShippedOffset() {

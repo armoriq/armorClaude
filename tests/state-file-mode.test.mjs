@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 import { createAuditWal } from "../scripts/lib/audit-wal.mjs";
 import { handleSessionStart } from "../scripts/lib/engine.mjs";
 import {
-  appendPrivateFile,
+  appendPrivateFileSync,
   openPrivateSync,
   writeJson,
+  writePrivateFile,
   writePrivateFileSync,
 } from "../scripts/lib/fs-store.mjs";
 import { seedBuiltinProfiles } from "../scripts/lib/policy-profiles.mjs";
@@ -157,11 +158,11 @@ test("the onboarding flag is owner-only", async () => {
   assert.equal(await modeOf(dataDir), 0o700);
 });
 
-test("appendPrivateFile and the sync writers create 0600 files and tighten 0644 ones", async () => {
+test("the sync writers create 0600 files and tighten 0644 ones", async () => {
   const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
   const log = path.join(dataDir, "some.log");
   await openFile(log, "old\n");
-  await appendPrivateFile(log, "new\n");
+  appendPrivateFileSync(log, "new\n");
   assert.equal(await readFile(log, "utf8"), "old\nnew\n");
   assert.equal(await modeOf(log), 0o600);
   assert.equal(await modeOf(dataDir), 0o700);
@@ -175,6 +176,23 @@ test("appendPrivateFile and the sync writers create 0600 files and tighten 0644 
   const marker = path.join(syncDir, "marker");
   writePrivateFileSync(marker, "1");
   assert.equal(await modeOf(marker), 0o600);
+});
+
+test("private modes keep owner-only bits and concurrent writes never share a temp file", async () => {
+  const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
+  const readOnly = path.join(dataDir, "read-only");
+  await writeFile(readOnly, "x", { mode: 0o400 });
+  await chmod(readOnly, 0o400);
+  closeSync(openPrivateSync(readOnly, "r"));
+  assert.equal(await modeOf(readOnly), 0o400);
+
+  const target = path.join(dataDir, "state.json");
+  await Promise.all(Array.from({ length: 20 }, (_, i) => writePrivateFile(target, String(i))));
+  assert.match(await readFile(target, "utf8"), /^\d+$/);
+  assert.deepEqual(
+    (await readdir(dataDir)).filter((f) => f.includes(".tmp.")),
+    []
+  );
 });
 
 test("the daemon makes its data dir 0700 and its PID file 0600", async () => {
