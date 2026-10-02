@@ -52,9 +52,6 @@ function connectOnce(socketPath) {
   });
 }
 
-/**
- * Spawn the daemon as a detached child and return once it accepts a connection.
- */
 async function spawnDaemon(socketPath, dataDir, config) {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const daemonScript = path.resolve(here, "..", "daemon.mjs");
