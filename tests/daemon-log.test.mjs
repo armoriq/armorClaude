@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { closeSync, openSync, readFileSync, statSync, writeFileSync, writeSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +34,13 @@ test("capDaemonLog leaves a log under the cap untouched", async () => {
 test("capDaemonLog ignores a missing log", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-log-missing-"));
   capDaemonLog(daemonLogPath(dir), 1024);
+});
+
+test("capDaemonLog reports a log it cannot stat", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-log-locked-"));
+  chmodSync(dir, 0o000);
+  t.after(() => chmodSync(dir, 0o700));
+  assert.throws(() => capDaemonLog(daemonLogPath(dir), 1024), { code: "EACCES" });
 });
 
 test("capDaemonLog keeps the newest whole lines once the log passes the cap", async () => {

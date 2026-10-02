@@ -483,7 +483,7 @@ async function handleLine(rawLine, socket) {
 
 server.on("error", (err) => {
   process.stderr.write(`[armorclaude-daemon] server error: ${err?.message ?? err}\n`);
-  shutdown(1);
+  if (!server.listening) shutdown(1);
 });
 
 server.listen(socketPath, () => {
