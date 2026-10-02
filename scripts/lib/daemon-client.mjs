@@ -12,6 +12,7 @@
  * and flushes asynchronously, hook process exits immediately.
  */
 
+import { assertTrustedSocketPath, daemonSocketPath } from "./daemon-socket.mjs";
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
@@ -35,6 +36,12 @@ function makeReqId() {
  */
 function connectOnce(socketPath) {
   return new Promise((resolve, reject) => {
+    try {
+      assertTrustedSocketPath(socketPath);
+    } catch (err) {
+      reject(err);
+      return;
+    }
     const sock = createConnection(socketPath);
     const timer = setTimeout(() => {
       sock.destroy();
@@ -203,7 +210,7 @@ function exchange(sock, payload) {
  * to fall back to in-process dispatch on throw.
  */
 export async function dispatchViaDaemon({ event, input, config }) {
-  const socketPath = path.join(config.dataDir, "daemon.sock");
+  const socketPath = daemonSocketPath(config.dataDir);
   const debug = !!config?.debug;
   const t0 = debug ? Date.now() : 0;
   const sock = await ensureFreshDaemonSocket(socketPath, config);
@@ -259,7 +266,7 @@ export async function dispatchViaDaemon({ event, input, config }) {
  * createAuditLog.
  */
 export async function enqueueAuditViaDaemon({ dto, config }) {
-  const socketPath = path.join(config.dataDir, "daemon.sock");
+  const socketPath = daemonSocketPath(config.dataDir);
   let sock;
   try {
     sock = await connectOnce(socketPath);
@@ -287,7 +294,7 @@ export async function enqueueAuditViaDaemon({ dto, config }) {
 
 /** Liveness probe — used by daemon-supervisor and tests. */
 export async function pingDaemon(config) {
-  const socketPath = path.join(config.dataDir, "daemon.sock");
+  const socketPath = daemonSocketPath(config.dataDir);
   let sock;
   try {
     sock = await connectOnce(socketPath);
