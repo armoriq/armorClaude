@@ -12,7 +12,7 @@
  * and flushes asynchronously, hook process exits immediately.
  */
 
-import { daemonSocketPath } from "./daemon-socket.mjs";
+import { assertTrustedSocketPath, daemonSocketPath } from "./daemon-socket.mjs";
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
@@ -36,6 +36,12 @@ function makeReqId() {
  */
 function connectOnce(socketPath) {
   return new Promise((resolve, reject) => {
+    try {
+      assertTrustedSocketPath(socketPath);
+    } catch (err) {
+      reject(err);
+      return;
+    }
     const sock = createConnection(socketPath);
     const timer = setTimeout(() => {
       sock.destroy();

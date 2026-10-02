@@ -2,12 +2,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { MAX_SOCKET_PATH_BYTES, daemonSocketPath } from "../scripts/lib/daemon-socket.mjs";
+import {
+  MAX_SOCKET_PATH_BYTES,
+  assertTrustedSocketDir,
+  daemonSocketPath,
+  prepareSocketDir,
+} from "../scripts/lib/daemon-socket.mjs";
 import { pingDaemon } from "../scripts/lib/daemon-client.mjs";
 
 const daemonScript = path.resolve(
@@ -70,4 +75,41 @@ test("a daemon whose data dir is too long for sun_path still serves, on the shor
   } finally {
     if (child.exitCode === null && child.signalCode === null) process.kill(child.pid, "SIGKILL");
   }
+});
+
+test("a socket directory is trusted only as a 0700 directory owned by this user", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "armorclaude-trust-"));
+  const good = path.join(base, "good");
+  mkdirSync(good, { mode: 0o700 });
+  assert.doesNotThrow(() => assertTrustedSocketDir(good));
+
+  const open = path.join(base, "open");
+  mkdirSync(open, { mode: 0o700 });
+  chmodSync(open, 0o755);
+  assert.throws(() => assertTrustedSocketDir(open), /has mode 755/);
+
+  const link = path.join(base, "link");
+  symlinkSync(good, link);
+  assert.throws(() => assertTrustedSocketDir(link), /is not a directory/);
+
+  const file = path.join(base, "file");
+  writeFileSync(file, "");
+  assert.throws(() => assertTrustedSocketDir(file), /is not a directory/);
+});
+
+test("preparing a socket directory creates it 0700 and tightens one this user owns", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "armorclaude-prep-"));
+  const fresh = path.join(base, "fresh");
+  prepareSocketDir(fresh);
+  assert.equal(statSync(fresh).mode & 0o777, 0o700);
+
+  const loose = path.join(base, "loose");
+  mkdirSync(loose, { mode: 0o700 });
+  chmodSync(loose, 0o755);
+  prepareSocketDir(loose);
+  assert.equal(statSync(loose).mode & 0o777, 0o700);
+
+  const link = path.join(base, "link");
+  symlinkSync(fresh, link);
+  assert.throws(() => prepareSocketDir(link), /is not a directory/);
 });

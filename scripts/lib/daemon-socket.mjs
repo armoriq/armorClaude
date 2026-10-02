@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -17,15 +17,39 @@ export function daemonSocketPath(dataDir) {
   return path.join(shortSocketDir(), `${key}.sock`);
 }
 
-export function prepareDaemonSocketDir(socketPath) {
-  const dir = path.dirname(socketPath);
-  if (dir !== shortSocketDir()) return;
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+function untrustedReason(dir) {
   const stat = lstatSync(dir);
   const uid = os.userInfo().uid;
-  if (!stat.isDirectory() || stat.uid !== uid || (stat.mode & 0o077) !== 0) {
+  if (!stat.isDirectory()) return "is not a directory";
+  if (stat.uid !== uid) return `is owned by uid ${stat.uid}`;
+  if ((stat.mode & 0o077) !== 0) return `has mode ${(stat.mode & 0o777).toString(8)}`;
+  return null;
+}
+
+export function assertTrustedSocketDir(dir) {
+  const reason = untrustedReason(dir);
+  if (reason) {
     throw new Error(
-      `socket directory ${dir} must be a directory owned by uid ${uid} with mode 0700`
+      `socket directory ${dir} ${reason}; it must be a directory owned by uid ${os.userInfo().uid} with mode 0700`
     );
   }
+}
+
+export function prepareSocketDir(dir) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(dir);
+  if (stat.isDirectory() && stat.uid === os.userInfo().uid && (stat.mode & 0o077) !== 0) {
+    chmodSync(dir, 0o700);
+  }
+  assertTrustedSocketDir(dir);
+}
+
+export function prepareDaemonSocketDir(socketPath) {
+  const dir = path.dirname(socketPath);
+  if (dir === shortSocketDir()) prepareSocketDir(dir);
+}
+
+export function assertTrustedSocketPath(socketPath) {
+  const dir = path.dirname(socketPath);
+  if (dir === shortSocketDir()) assertTrustedSocketDir(dir);
 }
