@@ -7,8 +7,6 @@ export function daemonLogPath(dataDir) {
   return path.join(dataDir, "daemon.log");
 }
 
-// Truncates in place instead of renaming so a daemon whose stderr holds the
-// file open in append mode keeps writing into the capped file.
 export function capDaemonLog(logPath, maxBytes = DAEMON_LOG_MAX_BYTES) {
   let size;
   try {
