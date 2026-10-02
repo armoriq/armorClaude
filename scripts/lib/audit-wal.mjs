@@ -18,13 +18,13 @@
  * caps rows at 4000 bytes and rejects larger payloads.
  */
 
-import { appendFile, open, readdir, readFile, rename, stat, unlink } from "node:fs/promises";
+import { appendFile, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import {
   PRIVATE_FILE_MODE,
   ensurePrivateDir,
-  tightenPrivateFile,
+  tightenDirFilesOnce,
   writePrivateFile,
 } from "./fs-store.mjs";
 
@@ -46,8 +46,8 @@ export function createAuditWal(opts) {
     await ensurePrivateDir(opts.dataDir);
     await ensurePrivateDir(dir);
     await ensurePrivateDir(archiveDir);
-    const archived = (await readdir(archiveDir)).map((file) => path.join(archiveDir, file));
-    for (const file of [currentPath, offsetPath, ...archived]) await tightenPrivateFile(file);
+    await tightenDirFilesOnce(dir);
+    await tightenDirFilesOnce(archiveDir);
     ensured = true;
   }
 
