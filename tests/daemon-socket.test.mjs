@@ -41,7 +41,7 @@ test("a long data dir gets a short per-user socket path keyed by the dir", async
   assert.ok(Buffer.byteLength(path.join(dir, "daemon.sock")) > MAX_SOCKET_PATH_BYTES);
   const socketPath = daemonSocketPath(dir);
   assert.ok(Buffer.byteLength(socketPath) <= MAX_SOCKET_PATH_BYTES, socketPath);
-  assert.equal(path.dirname(socketPath), path.join("/tmp", `armorclaude-${os.userInfo().uid}`));
+  assert.equal(path.dirname(socketPath), path.join("/tmp", `armorclaude-${process.getuid()}`));
   assert.equal(daemonSocketPath(dir), socketPath);
   assert.notEqual(daemonSocketPath(`${dir}x`), socketPath);
 });

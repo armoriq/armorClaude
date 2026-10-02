@@ -1,13 +1,12 @@
 import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 // sun_path holds 104 bytes on macOS and 108 on Linux; 103 fits both.
 export const MAX_SOCKET_PATH_BYTES = 103;
 
 function shortSocketDir() {
-  return path.join("/tmp", `armorclaude-${os.userInfo().uid}`);
+  return path.join("/tmp", `armorclaude-${process.getuid()}`);
 }
 
 export function daemonSocketPath(dataDir) {
@@ -19,7 +18,7 @@ export function daemonSocketPath(dataDir) {
 
 function untrustedReason(dir) {
   const stat = lstatSync(dir);
-  const uid = os.userInfo().uid;
+  const uid = process.getuid();
   if (!stat.isDirectory()) return "is not a directory";
   if (stat.uid !== uid) return `is owned by uid ${stat.uid}`;
   if ((stat.mode & 0o077) !== 0) return `has mode ${(stat.mode & 0o777).toString(8)}`;
@@ -30,7 +29,7 @@ export function assertTrustedSocketDir(dir) {
   const reason = untrustedReason(dir);
   if (reason) {
     throw new Error(
-      `socket directory ${dir} ${reason}; it must be a directory owned by uid ${os.userInfo().uid} with mode 0700`
+      `socket directory ${dir} ${reason}; it must be a directory owned by uid ${process.getuid()} with mode 0700`
     );
   }
 }
@@ -38,7 +37,7 @@ export function assertTrustedSocketDir(dir) {
 export function prepareSocketDir(dir) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const stat = lstatSync(dir);
-  if (stat.isDirectory() && stat.uid === os.userInfo().uid && (stat.mode & 0o077) !== 0) {
+  if (stat.isDirectory() && stat.uid === process.getuid() && (stat.mode & 0o077) !== 0) {
     chmodSync(dir, 0o700);
   }
   assertTrustedSocketDir(dir);
