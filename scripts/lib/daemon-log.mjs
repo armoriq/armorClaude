@@ -12,8 +12,9 @@ export function capDaemonLog(logPath, maxBytes = DAEMON_LOG_MAX_BYTES) {
   let size;
   try {
     size = statSync(logPath).size;
-  } catch {
-    return;
+  } catch (err) {
+    if (err?.code === "ENOENT") return;
+    throw err;
   }
   if (size <= maxBytes) return;
   const keep = Math.floor(maxBytes / 2);
