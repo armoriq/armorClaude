@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import path from "node:path";
 import { z } from "zod";
 import { loadConfig } from "./lib/config.mjs";
-import { writeJson } from "./lib/fs-store.mjs";
+import { ensurePrivateDir, writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, getSdkClient, requestIntent } from "./lib/intent.mjs";
 import { delegateSubtreeViaSdk, reanchorViaSdk, revokeViaSdk } from "./lib/iap-service.mjs";
 import {
@@ -73,6 +73,7 @@ async function loadStateAndConfig() {
 }
 
 async function run() {
+  await ensurePrivateDir(loadConfig().dataDir);
   const server = new McpServer({
     name: "armorclaude-policy",
     version: "0.1.0",

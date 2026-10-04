@@ -15,9 +15,10 @@
 import { assertTrustedSocketPath, daemonSocketPath } from "./daemon-socket.mjs";
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensurePrivateDirSync, openPrivateSync } from "./fs-store.mjs";
 import { capDaemonLog, daemonLogPath } from "./daemon-log.mjs";
 
 const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if daemon is hung
@@ -71,10 +72,10 @@ async function spawnDaemon(socketPath, dataDir, config) {
     ARMORCLAUDE_RUNTIME_FILE: config?.runtimeFile || path.join(dataDir, "runtime.json"),
     ARMORCLAUDE_POLICY_FILE: config?.policyFile || path.join(dataDir, "policy.json"),
   };
-  mkdirSync(dataDir, { recursive: true });
+  ensurePrivateDirSync(dataDir);
   const logPath = daemonLogPath(dataDir);
   capDaemonLog(logPath);
-  const logFd = openSync(logPath, "a");
+  const logFd = openPrivateSync(logPath, "a");
   const nodeBin = existsSync(process.execPath) ? process.execPath : "node";
   let child;
   try {

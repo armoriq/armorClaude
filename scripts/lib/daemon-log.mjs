@@ -1,5 +1,6 @@
-import { appendFileSync, closeSync, openSync, readSync, statSync, truncateSync } from "node:fs";
+import { closeSync, openSync, readSync, statSync } from "node:fs";
 import path from "node:path";
+import { appendPrivateFileSync, writePrivateFileSync } from "./fs-store.mjs";
 
 export const DAEMON_LOG_MAX_BYTES = 1024 * 1024;
 
@@ -25,12 +26,11 @@ export function capDaemonLog(logPath, maxBytes = DAEMON_LOG_MAX_BYTES) {
     closeSync(fd);
   }
   const firstLineEnd = tail.indexOf(10);
-  truncateSync(logPath, 0);
-  appendFileSync(logPath, firstLineEnd === -1 ? tail : tail.subarray(firstLineEnd + 1));
+  writePrivateFileSync(logPath, firstLineEnd === -1 ? tail : tail.subarray(firstLineEnd + 1));
 }
 
 export function appendDaemonLog(dataDir, line) {
   const logPath = daemonLogPath(dataDir);
   capDaemonLog(logPath);
-  appendFileSync(logPath, `${line}\n`);
+  appendPrivateFileSync(logPath, `${line}\n`);
 }

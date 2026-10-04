@@ -126,3 +126,31 @@ test("hook router records each in-process fallback in daemon.log, not on stderr"
     /^\[armorclaude\] daemon unreachable, handling PreToolUse in-process pid=\d+ at=\S+: daemon exited \(code=1, signal=null\)/
   );
 });
+
+test(
+  "appendDaemonLog creates the log owner-only and tightens an existing one",
+  { skip: process.platform === "win32" },
+  async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-log-mode-"));
+    const logPath = daemonLogPath(dir);
+    appendDaemonLog(dir, "first");
+    assert.equal(statSync(logPath).mode & 0o777, 0o600);
+
+    writeFileSync(logPath, "old\n", { mode: 0o644 });
+    appendDaemonLog(dir, "second");
+    assert.equal(statSync(logPath).mode & 0o777, 0o600);
+    assert.equal(readFileSync(logPath, "utf8"), "old\nsecond\n");
+  }
+);
+
+test(
+  "capDaemonLog keeps the capped log owner-only",
+  { skip: process.platform === "win32" },
+  async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-log-cap-mode-"));
+    const logPath = daemonLogPath(dir);
+    writeFileSync(logPath, numberedLines(200), { mode: 0o644 });
+    capDaemonLog(logPath, 1024);
+    assert.equal(statSync(logPath).mode & 0o777, 0o600);
+  }
+);

@@ -12,6 +12,7 @@ import {
 } from "./lib/engine.mjs";
 import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 import { appendDaemonLog } from "./lib/daemon-log.mjs";
+import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
 import { observeHook, obsFlush } from "./lib/observability.mjs";
 
 async function readStdin() {
@@ -70,6 +71,7 @@ async function dispatchInDaemon(event, input, config) {
 
 async function main() {
   const config = loadConfig();
+  ensurePrivateDirSync(config.dataDir);
   const rawInput = await readStdin();
   if (!rawInput.trim()) {
     return;
