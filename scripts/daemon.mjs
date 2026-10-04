@@ -30,11 +30,14 @@
  */
 
 import { createServer } from "node:net";
-import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from "node:fs";
+import { readFileSync, unlinkSync, existsSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./lib/config.mjs";
+import { daemonSocketPath, prepareDaemonSocketDir } from "./lib/daemon-socket.mjs";
 import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
+import { ensurePrivateDirSync, writePrivateFileSync } from "./lib/fs-store.mjs";
+import { capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
 import {
   handleSessionStart,
   handleUserPromptExpansion,
@@ -52,12 +55,13 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 
 let config = loadConfig();
-mkdirSync(config.dataDir, { recursive: true });
+ensurePrivateDirSync(config.dataDir);
 // Seed built-in profiles eagerly so new templates are available immediately
 // after a daemon restart — no lazy first-access required.
 await seedBuiltinProfiles(config);
 
-const socketPath = path.join(config.dataDir, "daemon.sock");
+const socketPath = daemonSocketPath(config.dataDir);
+prepareDaemonSocketDir(socketPath);
 const pidPath = path.join(config.dataDir, "daemon.pid");
 
 // ---- PID file: claim ownership or refuse to start ------------------------
@@ -84,7 +88,7 @@ function claimPid() {
       // unreadable / malformed — overwrite
     }
   }
-  writeFileSync(pidPath, String(process.pid), "utf8");
+  writePrivateFileSync(pidPath, String(process.pid));
 }
 
 // ---- Socket cleanup ------------------------------------------------------
@@ -365,8 +369,15 @@ async function dispatchHook(event, input, cfg) {
 // ---- Idle timeout --------------------------------------------------------
 let lastActivity = Date.now();
 const idleTimer = setInterval(() => {
+  try {
+    capDaemonLog(daemonLogPath(config.dataDir));
+  } catch (err) {
+    process.stderr.write(`[armorclaude-daemon] daemon.log cap failed: ${err?.message ?? err}\n`);
+  }
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
-    if (config.debug) process.stderr.write("[daemon] idle timeout, exiting\n");
+    process.stderr.write(
+      `[armorclaude-daemon] idle for ${IDLE_TIMEOUT_MS / 60_000} min, exiting pid=${process.pid} at=${new Date().toISOString()}\n`
+    );
     shutdown(0);
   }
 }, 60_000);
@@ -475,6 +486,7 @@ async function handleLine(rawLine, socket) {
 
 server.on("error", (err) => {
   process.stderr.write(`[armorclaude-daemon] server error: ${err?.message ?? err}\n`);
+  if (!server.listening) shutdown(1);
 });
 
 server.listen(socketPath, () => {
@@ -485,8 +497,9 @@ server.listen(socketPath, () => {
   } catch {
     /* best-effort */
   }
-  if (config.debug)
-    process.stderr.write(`[armorclaude-daemon] listening on ${socketPath} pid=${process.pid}\n`);
+  process.stderr.write(
+    `[armorclaude-daemon] listening on ${socketPath} pid=${process.pid} version=${DAEMON_VERSION} at=${new Date().toISOString()}\n`
+  );
 });
 
 // ---- Shutdown handlers ---------------------------------------------------
