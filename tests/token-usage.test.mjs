@@ -51,6 +51,7 @@ test("Stop reports one row per UTC day with the repo and device", async () => {
   );
   const config = {
     mode: "enforce",
+    useProduction: false,
     dataDir: tmp,
     policyFile: path.join(tmp, "policy.json"),
     runtimeFile: path.join(tmp, "runtime.json"),
