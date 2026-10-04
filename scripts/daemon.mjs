@@ -33,6 +33,7 @@ import { createServer } from "node:net";
 import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./lib/config.mjs";
+import { daemonSocketPath, prepareDaemonSocketDir } from "./lib/daemon-socket.mjs";
 import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
 import { capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
@@ -58,7 +59,8 @@ mkdirSync(config.dataDir, { recursive: true });
 // after a daemon restart — no lazy first-access required.
 await seedBuiltinProfiles(config);
 
-const socketPath = path.join(config.dataDir, "daemon.sock");
+const socketPath = daemonSocketPath(config.dataDir);
+prepareDaemonSocketDir(socketPath);
 const pidPath = path.join(config.dataDir, "daemon.pid");
 
 // ---- PID file: claim ownership or refuse to start ------------------------
