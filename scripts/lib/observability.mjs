@@ -132,15 +132,9 @@ function toolCall(input, config) {
 
 async function obsCheck(sessionId, config, input, output) {
   const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    const reason =
-      (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
-      undefined;
-    await entry.session.recordPolicy(toolCall(input, config), {
-      decision: classifyDecision(output),
-      ...(reason ? { policyReasonCode: reason } : {}),
-    });
-  });
+  return safeObsAsync(() =>
+    entry.session.recordPolicy(toolCall(input, config), { decision: classifyDecision(output) })
+  );
 }
 
 async function obsReport(sessionId, config, input, outcome) {
