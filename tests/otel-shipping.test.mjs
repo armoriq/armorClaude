@@ -721,3 +721,30 @@ test("fallback hooks record a whole session on a 700 ms lease with one lease req
     await backend.close();
   }
 });
+
+test("fallback hooks wait once for a lease endpoint that never answers, not on every hook (#191)", async () => {
+  const backend = await startBackend({ leaseDelayMs: 6_000 });
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-lease-hung-");
+    await withoutDaemon(dataDir);
+    const env = pluginEnv(home, dataDir, backend.url);
+    const session_id = randomUUID();
+    const tool = { tool_name: "Read", tool_input: { file_path: "package.json" } };
+    const took = [];
+    for (const payload of [
+      { hook_event_name: "SessionStart", source: "startup" },
+      { hook_event_name: "UserPromptSubmit", prompt: "read package.json" },
+      { hook_event_name: "PreToolUse", ...tool },
+      { hook_event_name: "PostToolUse", ...tool, tool_response: { ok: true } },
+    ]) {
+      const started = Date.now();
+      assert.equal((await runHook(env, { session_id, ...payload })).code, 0);
+      took.push(Date.now() - started);
+    }
+    assert.ok(took[0] < 3_000, `the first hook took ${took[0]} ms`);
+    for (const ms of took.slice(1)) assert.ok(ms < 1_000, `a later hook took ${ms} ms`);
+  } finally {
+    await backend.close();
+  }
+});
