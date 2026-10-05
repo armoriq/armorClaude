@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createConnection } from "node:net";
@@ -16,6 +16,7 @@ import {
   obsFlush,
   obsFlushAll,
   observeHook,
+  obsRetrySpools,
   obsShipSpools,
 } from "../scripts/lib/observability.mjs";
 import { shipSpool, writeSpoolBatch } from "../scripts/lib/obs-spool.mjs";
@@ -871,6 +872,35 @@ test("a batch the backend keeps failing does not hold back the batches spooled a
       const took = Date.now() - written;
       assert.ok(took < 7_000, `the live batches were acknowledged after ${took} ms`);
       assert.equal(spoolLeft(dataDir), 1, "the poison batch waits for its own retry");
+    } finally {
+      await stop();
+    }
+  } finally {
+    await backend.close();
+  }
+});
+
+test("a retried batch that fails again does not hold back the shipper's next round (#193)", async () => {
+  const poisoned = (spans) => spans.some((s) => s.attributes["armoriq.session_id"] === "poison");
+  const backend = await startBackend({ exportStatus: (spans) => (poisoned(spans) ? 500 : 200) });
+  const dataDir = await tempDir("obs-spool-");
+  try {
+    await writeSpoolBatch(dataDir, (await recordedBatches(backend.url, API_KEY, "poison"))[0]);
+    const [fresh] = spoolFiles(dataDir);
+    const spool = path.join(dataDir, "obs-spool");
+    renameSync(
+      path.join(spool, fresh),
+      path.join(spool, fresh.replace(/-0-0\.json$/, "-1-0.json"))
+    );
+    const stop = shipInProcess(backend, dataDir);
+    try {
+      await waitFor(() => backend.exportTimes.length === 1, 10_000, "the retried batch to fail");
+      await writeSpoolBatch(dataDir, (await recordedBatches(backend.url, API_KEY, "live"))[0]);
+      const written = Date.now();
+      obsRetrySpools();
+      await waitFor(() => backend.delivered.length > 0, 10_000, "the live batch");
+      const took = Date.now() - written;
+      assert.ok(took < 2_000, `the live batch was acknowledged after ${took} ms`);
     } finally {
       await stop();
     }

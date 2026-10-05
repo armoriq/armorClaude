@@ -98,7 +98,7 @@ test("shipping deletes acknowledged, discarded and rejected batches, keeps faile
     shipped: 6,
     settled: 4,
     dropped: 0,
-    failed: true,
+    outage: true,
     more: false,
     nextDueAt: Infinity,
   });
@@ -147,7 +147,7 @@ test("shipping an empty spool sends nothing (#193)", async () => {
     shipped: 0,
     settled: 0,
     dropped: 0,
-    failed: false,
+    outage: false,
     more: false,
     nextDueAt: Infinity,
   });
