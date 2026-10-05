@@ -931,7 +931,12 @@ const ENFORCING_POLICY = {
   },
 };
 
-test("a deny-with-hint keeps the prompt and tool input out of the spool and the export (#201)", async () => {
+const filesUnder = (dir) =>
+  readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(entry.parentPath, entry.name));
+
+test("a deny-with-hint keeps the prompt and tool input out of the export and the data dir (#201)", async () => {
   const backend = await startBackend();
   try {
     const home = await tempDir("aq-home-");
@@ -939,19 +944,19 @@ test("a deny-with-hint keeps the prompt and tool input out of the spool and the 
     await withoutDaemon(dataDir);
     await writeFile(path.join(dataDir, "policy.json"), JSON.stringify(ENFORCING_POLICY));
     const env = pluginEnv(home, dataDir, backend.url);
-    const session_id = randomUUID();
+    const hook = (payload) => runHook(env, { session_id: "sess-hint", ...payload });
     const tool = { tool_name: "Bash", tool_input: { command: "TOOL_SECRET_41=1 ls" } };
-    await runHook(env, { session_id, hook_event_name: "SessionStart", source: "startup" });
-    const prompt = { hook_event_name: "UserPromptSubmit", prompt: "deploy with PROMPT_SECRET_77" };
-    await runHook(env, { session_id, ...prompt });
-    const { stdout } = await runHook(env, { session_id, hook_event_name: "PreToolUse", ...tool });
+    await hook({ hook_event_name: "SessionStart", source: "startup" });
+    await hook({ hook_event_name: "UserPromptSubmit", prompt: "deploy with PROMPT_SECRET_77" });
+    const { stdout } = await hook({ hook_event_name: "PreToolUse", ...tool });
     assert.match(stdout, /"permissionDecision":"deny".*PROMPT_SECRET_77/);
     const secret = /PROMPT_SECRET_77|TOOL_SECRET_41/;
-    const spooled = spoolFiles(dataDir).map((name) =>
-      readFileSync(path.join(dataDir, "obs-spool", name), "utf8")
+    const holders = filesUnder(dataDir).filter((file) => secret.test(readFileSync(file, "utf8")));
+    assert.deepEqual(
+      holders.map((file) => path.relative(dataDir, file)),
+      ["runtime.json"],
+      "only the session state keeps the prompt"
     );
-    assert.ok(spooled.length > 0, "the hook spooled its spans");
-    assert.ok(!spooled.some((text) => secret.test(text)), "no spooled batch holds the secrets");
     await shipSpoolWithDaemon(env, dataDir);
     const [policy] = backend.exports.filter((s) => s.name === "armoriq.policy.evaluate");
     assert.equal(policy.attributes["armoriq.policy.decision"], "deny");
