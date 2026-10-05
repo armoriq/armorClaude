@@ -5,8 +5,9 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
+import { appendDaemonLog } from "./daemon-log.mjs";
 import { obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
-import { shipRetryDelayMs, shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
+import { SPOOL_MAX_TRIES, shipRetryDelayMs, shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
 import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
@@ -36,6 +37,14 @@ async function safeObsAsync(fn) {
 
 export function isObsEnabled(config) {
   return Boolean(config && config.observabilityEnabled);
+}
+
+function logObs(config, message) {
+  try {
+    appendDaemonLog(config.dataDir, `[armorclaude-obs] ${message} pid=${process.pid}`);
+  } catch {
+    /* the log is best-effort */
+  }
 }
 
 function getOrInitEntry(sessionId, config) {
@@ -113,6 +122,7 @@ function shipperFor(config) {
   if (shipper) return shipper;
   const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
   shipper = {
+    config,
     dataDir: config.dataDir,
     binding: runtime.spoolBinding,
     runtime,
@@ -128,31 +138,44 @@ function shipperFor(config) {
   return shipper;
 }
 
-function shipRound(shipper) {
+async function shipRound(shipper) {
   const options = { skip: shipper.skip, ...(shipper.failures > 0 ? { limit: 1 } : {}) };
-  return safeObsAsync(() => shipSpool(shipper.dataDir, shipper.binding, shipper.runtime, options));
+  const round = await safeObsAsync(() =>
+    shipSpool(shipper.dataDir, shipper.binding, shipper.runtime, options)
+  );
+  if (round?.dropped) {
+    logObs(
+      shipper.config,
+      `dropped ${round.dropped} spooled batch(es) after ${SPOOL_MAX_TRIES} failed exports`
+    );
+  }
+  return round;
+}
+
+function wakeAt(shipper, at) {
+  if (!Number.isFinite(at)) return;
+  clearTimeout(shipper.timer);
+  shipper.timer = setTimeout(() => shipNow(shipper), Math.max(0, at - Date.now()));
+  shipper.timer.unref();
 }
 
 function retryLater(shipper) {
   shipper.failures += 1;
-  const delay = shipRetryDelayMs(shipper.failures);
-  shipper.retryAt = Date.now() + delay;
-  clearTimeout(shipper.timer);
-  shipper.timer = setTimeout(() => shipNow(shipper), delay);
-  shipper.timer.unref();
+  shipper.retryAt = Date.now() + shipRetryDelayMs(shipper.failures);
+  wakeAt(shipper, shipper.retryAt);
 }
 
 const nothingShipped = (round) => !round || (round.failed && round.settled === 0);
-const moreDue = (shipper, round) =>
-  shipper.again || (!releasingAll && (round.more || round.failed));
+const moreDue = (shipper, round) => shipper.again || (!releasingAll && round.more);
 
 async function shipRounds(shipper) {
   for (;;) {
     shipper.again = false;
     const round = await shipRound(shipper);
     if (nothingShipped(round)) return retryLater(shipper);
-    shipper.failures = 0;
-    if (!moreDue(shipper, round)) return;
+    if (round.settled > 0) shipper.failures = 0;
+    if (!moreDue(shipper, round))
+      return wakeAt(shipper, Math.max(round.nextDueAt, shipper.retryAt));
   }
 }
 
@@ -264,15 +287,9 @@ function toolCall(input, config) {
 
 async function obsCheck(sessionId, config, input, output) {
   const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    const reason =
-      (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
-      undefined;
-    await entry.session.recordPolicy(toolCall(input, config), {
-      decision: classifyDecision(output),
-      ...(reason ? { policyReasonCode: reason } : {}),
-    });
-  });
+  return safeObsAsync(() =>
+    entry.session.recordPolicy(toolCall(input, config), { decision: classifyDecision(output) })
+  );
 }
 
 async function obsReport(sessionId, config, input, outcome) {
