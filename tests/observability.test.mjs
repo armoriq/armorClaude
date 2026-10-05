@@ -246,6 +246,42 @@ test("MCP tools are bucketed as mcp operations", async () => {
   await provider.shutdown();
 });
 
+test("a tool call's policy and tool spans carry its tool_use_id as armoriq.tool.call_id (#192)", async () => {
+  installHooks();
+  const config = testConfig();
+  const allow = { hookSpecificOutput: { permissionDecision: "allow" } };
+  const calls = [
+    { tool_name: "Bash", tool_use_id: "toolu_01AbCdEf", failed: false },
+    { tool_name: "mcp__docs__fetch_doc", tool_use_id: "toolu_01GhIjKl", failed: true },
+  ];
+  for (const { failed, ...call } of calls) {
+    const tool = { session_id: "sess-call-id", tool_input: {}, ...call };
+    await observeHook("PreToolUse", tool, allow, config);
+    const post = failed ? "PostToolUseFailure" : "PostToolUse";
+    await observeHook(post, { ...tool, tool_response: {} }, null, config);
+  }
+  await observeHook("SessionEnd", { session_id: "sess-call-id" }, null, config);
+  const ids = (name) => spansByName(name).map((s) => s.attributes["armoriq.tool.call_id"]);
+  const expected = calls.map((c) => c.tool_use_id);
+  assert.deepEqual(ids("armoriq.policy.evaluate"), expected);
+  assert.deepEqual(ids("armoriq.tool"), expected);
+  await provider.shutdown();
+});
+
+test("a tool event without a string tool_use_id records no caller call id (#192)", async () => {
+  installHooks();
+  const config = testConfig();
+  const tool = { session_id: "sess-no-call-id", tool_name: "Read", tool_input: {}, tool_use_id: 7 };
+  await observeHook("PreToolUse", tool, null, config);
+  await observeHook("PostToolUse", { ...tool, tool_response: {} }, null, config);
+  await observeHook("SessionEnd", { session_id: "sess-no-call-id" }, null, config);
+  const [policy] = spansByName("armoriq.policy.evaluate");
+  const [toolSpan] = spansByName("armoriq.tool");
+  assert.equal(policy.attributes["armoriq.tool.call_id"], undefined);
+  assert.match(toolSpan.attributes["armoriq.tool.call_id"], /^op-[0-9a-f]{32}$/);
+  await provider.shutdown();
+});
+
 test("confirmed slash command expansions record a command operation", async () => {
   installHooks();
   const config = testConfig();
