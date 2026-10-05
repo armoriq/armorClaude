@@ -146,7 +146,7 @@ test("observeHook builds one turn root per session", async () => {
   await provider.shutdown();
 });
 
-test("PreToolUse deny records a blocked policy evaluation", async () => {
+test("PreToolUse deny records a blocked policy evaluation without the reason text (#201)", async () => {
   installHooks();
   const config = testConfig();
   await observeHook(
@@ -164,7 +164,7 @@ test("PreToolUse deny records a blocked policy evaluation", async () => {
   const policy = spansByName("armoriq.policy.evaluate");
   assert.equal(policy.length, 1);
   assert.equal(policy[0].attributes["armoriq.policy.decision"], "deny");
-  assert.equal(policy[0].attributes["armoriq.policy.reason_code"], "no registered plan");
+  assert.equal(policy[0].attributes["armoriq.policy.reason_code"], undefined);
   await provider.shutdown();
 });
 
@@ -640,6 +640,23 @@ test("a hook process waits at most 1.5 s for a hung lease, and the next ones ski
   writeFileSync(path.join(dataDir, miss), String(Date.now() - 31_000));
   const third = await timedHookProcess("sess-hung-3", config);
   assert.ok(third >= 1_400, `a hook after the 30 s window waited ${third} ms`);
+  await provider.shutdown();
+});
+
+test("a current stored lease wins over a lease miss recorded after it (#191)", async () => {
+  installHooks();
+  const counter = { fetches: 0 };
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: slowLease(0, counter) });
+  const dataDir = mkdtempSync(path.join(tmpdir(), "aq-lease-won-"));
+  const config = { ...testConfig(), dataDir };
+  await timedHookProcess("sess-won-1", config);
+  const [file] = await storedLeases(dataDir, 1);
+  writeFileSync(path.join(dataDir, file.replace(/\.json$/, ".miss")), String(Date.now()));
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: hungLease() });
+  const took = await timedHookProcess("sess-won-2", config);
+  assert.ok(took < 500, `the hook adopted the stored lease in ${took} ms`);
+  assert.equal(counter.fetches, 1);
+  assert.equal(spansByName("armoriq.agent.run").length, 2);
   await provider.shutdown();
 });
 

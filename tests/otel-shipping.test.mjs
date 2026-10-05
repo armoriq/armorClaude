@@ -10,7 +10,15 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import armoriqSdk from "@armoriq/sdk-dev";
-import { obsFlush, observeHook } from "../scripts/lib/observability.mjs";
+import {
+  __resetObsForTests,
+  __setOtelTestHooksForTests,
+  obsFlush,
+  obsFlushAll,
+  observeHook,
+  obsServeAsDaemon,
+} from "../scripts/lib/observability.mjs";
+import { shipSpool, writeSpoolBatch } from "../scripts/lib/obs-spool.mjs";
 import { deadPid, placeFile } from "./helpers/obs-files.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -128,10 +136,14 @@ async function startBackend({
         const apiKey = req.headers["x-api-key"];
         const spans = decodeSpans(Buffer.concat(chunks)).map((span) => ({ ...span, apiKey }));
         exports.push(...spans);
+        const status =
+          typeof exportStatus === "function"
+            ? exportStatus(spans, exportTimes.length)
+            : exportStatus;
         const answer = () => {
           if (req.socket.destroyed) return;
-          if (exportStatus === 200) delivered.push(...spans);
-          res.writeHead(exportStatus, { "content-type": "application/x-protobuf" });
+          if (status === 200) delivered.push(...spans);
+          res.writeHead(status, { "content-type": "application/x-protobuf" });
           res.end();
         };
         if (holdExports) heldExports.push(answer);
@@ -956,6 +968,26 @@ test("fallback hooks record a whole session on a 700 ms lease with one lease req
   }
 });
 
+test("a fallback hook that gives up on a 2 s lease leaves the fetch to store it for the next hook (#191)", async () => {
+  const backend = await startBackend({ leaseDelayMs: 2_000 });
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-lease-slow-");
+    await withoutDaemon(dataDir);
+    const env = pluginEnv(home, dataDir, backend.url);
+    const session_id = randomUUID();
+    await runHook(env, { session_id, hook_event_name: "SessionStart", source: "startup" });
+    const stored = () => readdirSync(dataDir).some((name) => /^obs-lease-.*\.json$/.test(name));
+    await waitFor(stored, 6_000, "the background fetch stored the lease");
+    await runSession(env, session_id);
+    assert.equal(backend.leaseRequests.length, 2, "the hook's own request and the background one");
+    await shipSpoolWithDaemon(env, dataDir);
+    assert.equal(rootOutcomes(rootsByEnd(backend.exports)).at(-1), "completed");
+  } finally {
+    await backend.close();
+  }
+});
+
 test("fallback hooks wait once for a lease endpoint that never answers, not on every hook (#191)", async () => {
   const backend = await startBackend({ leaseDelayMs: 6_000 });
   try {
@@ -978,6 +1010,244 @@ test("fallback hooks wait once for a lease endpoint that never answers, not on e
     }
     assert.ok(took[0] < 3_000, `the first hook took ${took[0]} ms`);
     for (const ms of took.slice(1)) assert.ok(ms < 1_000, `a later hook took ${ms} ms`);
+  } finally {
+    await backend.close();
+  }
+});
+
+const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
+
+const lease = async () => ({
+  captureMode: "metadata",
+  revision: 1,
+  expiresAt: new Date(Date.now() + 3_600_000),
+  authoritative: true,
+  contentCaptureAllowed: false,
+  externalContentCaptureAllowed: false,
+  externalContentAllowed: false,
+  contentReasonCode: "test",
+  debugExpiresAt: null,
+});
+
+async function recordedBatches(backendEndpoint, apiKey, sessionId = `sess-${apiKey.slice(-4)}`) {
+  const batches = [];
+  const runtime = new ArmorIQTelemetryRuntime({
+    backendEndpoint,
+    apiKey,
+    sdkVersion: "test",
+    leaseFetcher: lease,
+    spanSink: { write: async (batch) => void batches.push(batch) },
+  });
+  const session = new OtelSession(runtime, { sessionId });
+  await session.refreshPolicy();
+  await session.beginRoot({ input: "spool" });
+  await session.close({ status: "ok" });
+  return batches;
+}
+
+const spoolLeft = (dataDir) => dataFiles(dataDir).length;
+
+test("a batch another key recorded is deleted unsent, its own key's batch ships (#193)", async () => {
+  const backend = await startBackend();
+  const runtime = new ArmorIQTelemetryRuntime({
+    backendEndpoint: backend.url,
+    apiKey: API_KEY,
+    sdkVersion: "test",
+    leaseFetcher: lease,
+  });
+  try {
+    const dataDir = await tempDir("obs-spool-");
+    const binding = runtime.spoolBinding;
+    const plant = (batch) =>
+      placeFile(
+        path.join(dataDir, "obs-spool"),
+        `${Date.now()}-10-${binding}-${randomUUID()}-0-0.json`,
+        JSON.stringify(batch)
+      );
+    const [own] = await recordedBatches(backend.url, API_KEY);
+    const [foreign] = await recordedBatches(backend.url, "ak_test_spoolother000000000000000000");
+    plant(foreign);
+    await shipSpool(dataDir, binding, runtime);
+    assert.deepEqual([backend.exportTimes.length, spoolLeft(dataDir)], [0, 0]);
+    plant(own);
+    await shipSpool(dataDir, binding, runtime);
+    assert.deepEqual([backend.exportTimes.length, spoolLeft(dataDir)], [1, 0]);
+  } finally {
+    await runtime.close();
+    await backend.close();
+  }
+});
+
+async function spooledCopies(backend, count) {
+  const dataDir = await tempDir("obs-spool-");
+  const [batch] = await recordedBatches(backend.url, API_KEY);
+  for (let i = 0; i < count; i++) await writeSpoolBatch(dataDir, batch);
+  return dataDir;
+}
+
+function shipInProcess(backend, dataDir) {
+  __resetObsForTests();
+  __setOtelTestHooksForTests({ leaseFetcher: lease });
+  obsServeAsDaemon({
+    observabilityEnabled: true,
+    observabilityEndpoint: backend.url,
+    apiKey: API_KEY,
+    dataDir,
+  });
+  return async () => {
+    await obsFlushAll();
+    __setOtelTestHooksForTests(null);
+    __resetObsForTests();
+  };
+}
+
+async function shipAsDaemon(backend, dataDir, until, what) {
+  const stop = shipInProcess(backend, dataDir);
+  try {
+    await waitFor(until, 15_000, what);
+  } finally {
+    await stop();
+  }
+}
+
+test("the daemon drains more than 64 spooled batches in successive rounds (#193)", async () => {
+  const backend = await startBackend();
+  try {
+    const dataDir = await spooledCopies(backend, 70);
+    await shipAsDaemon(backend, dataDir, () => spoolLeft(dataDir) === 0, "an empty spool");
+    assert.equal(backend.exportTimes.length, 70);
+  } finally {
+    await backend.close();
+  }
+});
+
+test("a round that acknowledged some batches drains the rest at once and retries the failed ones 5 s later (#193)", async () => {
+  const backend = await startBackend({ exportStatus: (spans, n) => (n <= 2 ? 500 : 200) });
+  try {
+    const dataDir = await spooledCopies(backend, 70);
+    let drainedAt;
+    await shipAsDaemon(
+      backend,
+      dataDir,
+      () => {
+        if (spoolLeft(dataDir) === 2) drainedAt ??= Date.now();
+        return spoolLeft(dataDir) === 0;
+      },
+      "an empty spool"
+    );
+    const [first] = backend.exportTimes;
+    assert.ok(drainedAt - first < 4_000, `68 batches acknowledged after ${drainedAt - first} ms`);
+    assert.equal(backend.exportTimes.length, 72);
+    const retried = backend.exportTimes[70] - backend.exportTimes[69];
+    assert.ok(retried >= 4_500, `the 2 failed batches were retried after ${retried} ms`);
+  } finally {
+    await backend.close();
+  }
+});
+
+test("after a round that acknowledged nothing the daemon waits 5 s and then sends one batch (#193)", async () => {
+  const backend = await startBackend({ exportStatus: 500 });
+  try {
+    const dataDir = await spooledCopies(backend, 3);
+    const failedRound = () => backend.exportTimes.length >= 3;
+    let firstRoundAt;
+    await shipAsDaemon(
+      backend,
+      dataDir,
+      () => {
+        if (failedRound()) firstRoundAt ??= Date.now();
+        return firstRoundAt && Date.now() - firstRoundAt > 7_000;
+      },
+      "the retry"
+    );
+    const [, , third, probe, ...rest] = backend.exportTimes;
+    assert.ok(probe - third >= 4_500, `retried after ${probe - third} ms`);
+    assert.deepEqual(rest, [], "the retry sent one batch");
+    assert.equal(spoolLeft(dataDir), 3);
+  } finally {
+    await backend.close();
+  }
+});
+
+test("a batch the backend keeps failing does not hold back the batches spooled after it (#193)", async () => {
+  const poisoned = (spans) => spans.some((s) => s.attributes["armoriq.session_id"] === "poison");
+  const backend = await startBackend({ exportStatus: (spans) => (poisoned(spans) ? 500 : 200) });
+  const dataDir = await tempDir("obs-spool-");
+  try {
+    const [poison] = await recordedBatches(backend.url, API_KEY, "poison");
+    await writeSpoolBatch(dataDir, poison);
+    const stop = shipInProcess(backend, dataDir);
+    try {
+      await waitFor(() => backend.exportTimes.length === 1, 10_000, "the poison batch to fail");
+      const written = Date.now();
+      for (const n of [1, 2, 3]) {
+        await writeSpoolBatch(
+          dataDir,
+          (await recordedBatches(backend.url, API_KEY, `live-${n}`))[0]
+        );
+      }
+      const sessions = () =>
+        new Set(backend.delivered.map((s) => s.attributes["armoriq.session_id"]));
+      await waitFor(() => sessions().size === 3, 12_000, "the live batches");
+      const took = Date.now() - written;
+      assert.ok(took < 7_000, `the live batches were acknowledged after ${took} ms`);
+      assert.equal(spoolLeft(dataDir), 1, "the poison batch waits for its own retry");
+    } finally {
+      await stop();
+    }
+  } finally {
+    await backend.close();
+  }
+});
+
+const ENFORCING_POLICY = {
+  version: 1,
+  updatedAt: new Date().toISOString(),
+  history: [],
+  policy: {
+    schemaVersion: "armor.policy.v1",
+    kind: "PolicyProfile",
+    metadata: { name: "enforcing", description: "" },
+    defaults: { decision: "allow", conflictResolution: "deny_overrides" },
+    statements: [
+      {
+        id: "forbid-webfetch",
+        effect: "forbid",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", in: ["WebFetch"] },
+        resource: { type: "workspace", scope: "current" },
+        conditions: [],
+      },
+    ],
+  },
+};
+
+test("a deny-with-hint keeps the prompt and tool input out of the spool and the export (#201)", async () => {
+  const backend = await startBackend();
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-hint-");
+    await withoutDaemon(dataDir);
+    await writeFile(path.join(dataDir, "policy.json"), JSON.stringify(ENFORCING_POLICY));
+    const env = pluginEnv(home, dataDir, backend.url);
+    const session_id = randomUUID();
+    const tool = { tool_name: "Bash", tool_input: { command: "TOOL_SECRET_41=1 ls" } };
+    await runHook(env, { session_id, hook_event_name: "SessionStart", source: "startup" });
+    const prompt = { hook_event_name: "UserPromptSubmit", prompt: "deploy with PROMPT_SECRET_77" };
+    await runHook(env, { session_id, ...prompt });
+    const { stdout } = await runHook(env, { session_id, hook_event_name: "PreToolUse", ...tool });
+    assert.match(stdout, /"permissionDecision":"deny".*PROMPT_SECRET_77/);
+    const secret = /PROMPT_SECRET_77|TOOL_SECRET_41/;
+    const spooled = dataFiles(dataDir).map((name) =>
+      readFileSync(path.join(dataDir, "obs-spool", name), "utf8")
+    );
+    assert.ok(spooled.length > 0, "the hook spooled its spans");
+    assert.ok(!spooled.some((text) => secret.test(text)), "no spooled batch holds the secrets");
+    await shipSpoolWithDaemon(env, dataDir);
+    const [policy] = backend.exports.filter((s) => s.name === "armoriq.policy.evaluate");
+    assert.equal(policy.attributes["armoriq.policy.decision"], "deny");
+    assert.equal(policy.attributes["armoriq.policy.reason_code"], undefined);
+    assert.ok(!secret.test(JSON.stringify(backend.exports.map((span) => span.attributes))));
   } finally {
     await backend.close();
   }

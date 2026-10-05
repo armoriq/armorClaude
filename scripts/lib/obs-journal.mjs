@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readdir, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { ensurePrivateDir, writePrivateFile } from "./fs-store.mjs";
-import { processGone } from "./obs-spool.mjs";
+import { processGone } from "./obs-records.mjs";
 
 export const JOURNAL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DRAFT_MAX_AGE_MS = 60_000;
