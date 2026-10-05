@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { loadConfig } from "../scripts/lib/config.mjs";
 import {
   NodeTracerProvider,
@@ -44,12 +46,6 @@ test("installed SDK provides every required observability export", () => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Otel test harness: caller-owned provider + authoritative stub lease, so no
-// test touches the network. Mirrors what the bridge wires in production
-// (backend lease endpoint + SDK-owned exporter) without any of its I/O.
-// ---------------------------------------------------------------------------
-
 const OTEL_ENV_KEYS = [
   "ARMORIQ_OBSERVABILITY",
   "OTEL_SDK_DISABLED",
@@ -77,6 +73,18 @@ test.after(() => {
 let exporter;
 let provider;
 
+const stubLease = async () => ({
+  captureMode: "metadata",
+  revision: 1,
+  expiresAt: new Date(Date.now() + 3600_000),
+  authoritative: true,
+  contentCaptureAllowed: false,
+  externalContentCaptureAllowed: false,
+  externalContentAllowed: false,
+  contentReasonCode: "test",
+  debugExpiresAt: null,
+});
+
 function installHooks() {
   __resetObsForTests();
   exporter = new InMemorySpanExporter();
@@ -85,17 +93,7 @@ function installHooks() {
   });
   __setOtelTestHooksForTests({
     tracerProvider: provider,
-    leaseFetcher: async () => ({
-      captureMode: "metadata",
-      revision: 1,
-      expiresAt: new Date(Date.now() + 3600_000),
-      authoritative: true,
-      contentCaptureAllowed: false,
-      externalContentCaptureAllowed: false,
-      externalContentAllowed: false,
-      contentReasonCode: "test",
-      debugExpiresAt: null,
-    }),
+    leaseFetcher: stubLease,
   });
   return exporter;
 }
@@ -442,4 +440,22 @@ test("SessionEnd in a process with no open root records the session as completed
   assert.equal(roots[0].attributes["gen_ai.task.outcome"], "completed");
   assert.equal(roots[0].attributes["session.id"], "sess-end-only");
   await provider.shutdown();
+});
+
+test("a fallback hook process exits as soon as an instant lease resolves", () => {
+  const bridge = new URL("../scripts/lib/observability.mjs", import.meta.url).href;
+  const child = `
+    import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+    import * as obs from ${JSON.stringify(bridge)};
+    obs.__setOtelTestHooksForTests({ tracerProvider: new NodeTracerProvider(), leaseFetcher: ${stubLease} });
+    const config = ${JSON.stringify(testConfig())};
+    const started = performance.now();
+    process.on("exit", () => process.stdout.write(String(performance.now() - started)));
+    await obs.observeHook("PreToolUse", { session_id: "sess-exit", tool_name: "Bash" }, null, config);
+    await obs.obsFlush("sess-exit", config);`;
+  const args = ["--import", "./tests/setup/no-network.mjs", "--input-type=module", "-e", child];
+  const env = { PATH: process.env.PATH, HOME: tmpdir() };
+  const result = spawnSync(process.execPath, args, { env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(Number(result.stdout) < 250, `hook process stayed alive ${result.stdout} ms`);
 });

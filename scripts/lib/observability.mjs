@@ -68,8 +68,16 @@ function getOrInitEntry(sessionId, config) {
   return initEntry(sessionId, config);
 }
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function settledWithin(ms, promise) {
+  let timer;
+  const expired = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms).unref();
+  });
+  try {
+    return await Promise.race([promise.catch(() => undefined), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function sha256(text) {
@@ -146,11 +154,7 @@ async function initEntry(sessionId, config) {
   });
   const entry = { runtime, session, ownsRoot };
   sessions.set(sessionId, entry);
-  // Warm the policy lease so this session's first event is governed by a real
-  // answer instead of racing the background fetch (a cold runtime fails
-  // closed and would silently drop it). Bounded and fail-open: a slow backend
-  // delays this event by at most the race window, never breaks it.
-  await Promise.race([session.refreshPolicy().catch(() => undefined), delay(500)]);
+  await settledWithin(500, session.refreshPolicy());
   return entry;
 }
 
@@ -232,11 +236,7 @@ function expandedSlashCommand(input) {
   return command;
 }
 
-// Record a slash-command invocation as a command operation on the current
-// turn's trace, so the dashboard session view can show which slash commands a
-// session ran. The SDK only accepts identifier-safe tool names (must start
-// alphanumeric), so the leading slash is stripped: "/deploy" is recorded as
-// tool "deploy" under the command category.
+// The SDK accepts only tool names that start alphanumeric.
 async function obsSlashCommand(sessionId, config, command) {
   const entry = await getOrInitEntry(sessionId, config);
   return safeObsAsync(async () => {
