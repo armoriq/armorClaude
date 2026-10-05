@@ -90,8 +90,14 @@ function decodeSpans(body) {
   return spans;
 }
 
-async function startBackend({ holdExports = false, content = false, exportDelayMs = 0 } = {}) {
+async function startBackend({
+  holdExports = false,
+  content = false,
+  exportDelayMs = 0,
+  leaseDelayMs = 0,
+} = {}) {
   const exports = [];
+  const leaseRequests = [];
   const delivered = [];
   const exportTimes = [];
   const heldExports = [];
@@ -107,8 +113,11 @@ async function startBackend({ holdExports = false, content = false, exportDelayM
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       if (req.url === "/observability/policy/lease") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(lease());
+        leaseRequests.push(Date.now());
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(lease());
+        }, leaseDelayMs);
         return;
       }
       if (req.method === "POST" && req.url === "/v1/traces") {
@@ -135,6 +144,7 @@ async function startBackend({ holdExports = false, content = false, exportDelayM
     exports,
     delivered,
     exportTimes,
+    leaseRequests,
     releaseExports() {
       holdExports = false;
       for (const answer of heldExports.splice(0)) answer();
@@ -539,6 +549,21 @@ test("a replacement daemon serves hooks while the old one drains its exports (#1
   } finally {
     killIfRunning(old.child);
     if (next) killIfRunning(next.child);
+    await backend.close();
+  }
+});
+
+test("fallback hooks record a whole session on a 700 ms lease with one lease request (#191)", async () => {
+  const backend = await startBackend({ leaseDelayMs: 700 });
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-lease-");
+    await withoutDaemon(dataDir);
+    await runSession(pluginEnv(home, dataDir, backend.url), randomUUID());
+    assert.equal(backend.leaseRequests.length, 1, "later hook processes read the stored lease");
+    assert.equal(storedSpans(backend.exports).length, 5, "1 root, 2 policy and 2 tool spans");
+    assert.equal(rootOutcomes(backend.exports).at(-1), "completed");
+  } finally {
     await backend.close();
   }
 });

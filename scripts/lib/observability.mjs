@@ -3,6 +3,7 @@
 import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
+import { obsLeaseStore } from "./obs-lease-store.mjs";
 import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
@@ -36,18 +37,6 @@ function getOrInitEntry(sessionId, config) {
   return initEntry(sessionId, config);
 }
 
-async function settledWithin(ms, promise) {
-  let timer;
-  const expired = new Promise((resolve) => {
-    timer = setTimeout(resolve, ms).unref();
-  });
-  try {
-    return await Promise.race([promise.catch(() => undefined), expired]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
 }
@@ -63,7 +52,7 @@ async function rootStartTime(sessionId, config) {
   return config.dataDir ? claimRootStart(config.dataDir, sessionId) : null;
 }
 
-async function initEntry(sessionId, config) {
+function runtimeOptionsFor(config) {
   const sdkVersion = typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown";
   const runtimeOptions = {
     backendEndpoint: config.observabilityEndpoint,
@@ -71,6 +60,13 @@ async function initEntry(sessionId, config) {
     sdkVersion,
     options: { serviceName: config.observabilityProduct || "armorclaude" },
   };
+  if (config.dataDir) {
+    runtimeOptions.leaseStore = obsLeaseStore(
+      config.dataDir,
+      config.observabilityEndpoint,
+      config.apiKey
+    );
+  }
   if (testHooks?.leaseFetcher) runtimeOptions.leaseFetcher = testHooks.leaseFetcher;
   if (testHooks?.tracerProvider) {
     runtimeOptions.options = {
@@ -79,7 +75,11 @@ async function initEntry(sessionId, config) {
       tracerProvider: testHooks.tracerProvider,
     };
   }
-  const runtime = new ArmorIQTelemetryRuntime(runtimeOptions);
+  return runtimeOptions;
+}
+
+async function initEntry(sessionId, config) {
+  const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
   const startTime = await rootStartTime(sessionId, config);
   const session = new OtelSession(runtime, {
     sessionId,
@@ -89,7 +89,7 @@ async function initEntry(sessionId, config) {
   });
   const entry = { runtime, session, dataDir: startTime && config.dataDir, lastEventAt: Date.now() };
   sessions.set(sessionId, entry);
-  await settledWithin(500, session.refreshPolicy());
+  await safeObsAsync(() => session.refreshPolicy());
   await safeObsAsync(() => session.beginRoot({ input: connectedInput(config) }));
   return entry;
 }
