@@ -182,17 +182,20 @@ function retryLater(shipper) {
   wakeAt(shipper, shipper.retryAt);
 }
 
-const nothingShipped = (round) => !round || (round.failed && round.settled === 0);
-const moreDue = (shipper, round) => shipper.again || (!releasingAll && round.more);
+const backOff = (shipper, round) =>
+  !round || (round.settled === 0 && (round.outage || (shipper.failures > 0 && round.shipped > 0)));
+const moreDue = (shipper, round) =>
+  shipper.again || (!releasingAll && round.more && round.settled > 0);
 
 async function shipRounds(shipper) {
   for (;;) {
     shipper.again = false;
     const round = await shipRound(shipper);
-    if (nothingShipped(round)) return retryLater(shipper);
+    if (backOff(shipper, round)) return retryLater(shipper);
     if (round.settled > 0) shipper.failures = 0;
-    if (!moreDue(shipper, round))
+    if (!moreDue(shipper, round)) {
       return wakeAt(shipper, Math.max(round.nextDueAt, shipper.retryAt));
+    }
   }
 }
 

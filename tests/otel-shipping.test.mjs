@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createConnection } from "node:net";
@@ -16,6 +16,7 @@ import {
   obsFlush,
   obsFlushAll,
   observeHook,
+  obsRetryBacklog,
   obsServeAsDaemon,
 } from "../scripts/lib/observability.mjs";
 import { shipSpool, writeSpoolBatch } from "../scripts/lib/obs-spool.mjs";
@@ -1200,6 +1201,35 @@ test("a batch the backend keeps failing does not hold back the batches spooled a
   }
 });
 
+test("a retried batch that fails again does not hold back the shipper's next round (#193)", async () => {
+  const poisoned = (spans) => spans.some((s) => s.attributes["armoriq.session_id"] === "poison");
+  const backend = await startBackend({ exportStatus: (spans) => (poisoned(spans) ? 500 : 200) });
+  const dataDir = await tempDir("obs-spool-");
+  try {
+    await writeSpoolBatch(dataDir, (await recordedBatches(backend.url, API_KEY, "poison"))[0]);
+    const [fresh] = dataFiles(dataDir);
+    const spool = path.join(dataDir, "obs-spool");
+    renameSync(
+      path.join(spool, fresh),
+      path.join(spool, fresh.replace(/-0-0\.json$/, "-1-0.json"))
+    );
+    const stop = shipInProcess(backend, dataDir);
+    try {
+      await waitFor(() => backend.exportTimes.length === 1, 10_000, "the retried batch to fail");
+      await writeSpoolBatch(dataDir, (await recordedBatches(backend.url, API_KEY, "live"))[0]);
+      const written = Date.now();
+      obsRetryBacklog();
+      await waitFor(() => backend.delivered.length > 0, 10_000, "the live batch");
+      const took = Date.now() - written;
+      assert.ok(took < 2_000, `the live batch was acknowledged after ${took} ms`);
+    } finally {
+      await stop();
+    }
+  } finally {
+    await backend.close();
+  }
+});
+
 const ENFORCING_POLICY = {
   version: 1,
   updatedAt: new Date().toISOString(),
@@ -1222,7 +1252,12 @@ const ENFORCING_POLICY = {
   },
 };
 
-test("a deny-with-hint keeps the prompt and tool input out of the spool and the export (#201)", async () => {
+const filesUnder = (dir) =>
+  readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(entry.parentPath, entry.name));
+
+test("a deny-with-hint keeps the prompt and tool input out of the export and the data dir (#201)", async () => {
   const backend = await startBackend();
   try {
     const home = await tempDir("aq-home-");
@@ -1230,19 +1265,19 @@ test("a deny-with-hint keeps the prompt and tool input out of the spool and the 
     await withoutDaemon(dataDir);
     await writeFile(path.join(dataDir, "policy.json"), JSON.stringify(ENFORCING_POLICY));
     const env = pluginEnv(home, dataDir, backend.url);
-    const session_id = randomUUID();
+    const hook = (payload) => runHook(env, { session_id: "sess-hint", ...payload });
     const tool = { tool_name: "Bash", tool_input: { command: "TOOL_SECRET_41=1 ls" } };
-    await runHook(env, { session_id, hook_event_name: "SessionStart", source: "startup" });
-    const prompt = { hook_event_name: "UserPromptSubmit", prompt: "deploy with PROMPT_SECRET_77" };
-    await runHook(env, { session_id, ...prompt });
-    const { stdout } = await runHook(env, { session_id, hook_event_name: "PreToolUse", ...tool });
+    await hook({ hook_event_name: "SessionStart", source: "startup" });
+    await hook({ hook_event_name: "UserPromptSubmit", prompt: "deploy with PROMPT_SECRET_77" });
+    const { stdout } = await hook({ hook_event_name: "PreToolUse", ...tool });
     assert.match(stdout, /"permissionDecision":"deny".*PROMPT_SECRET_77/);
     const secret = /PROMPT_SECRET_77|TOOL_SECRET_41/;
-    const spooled = dataFiles(dataDir).map((name) =>
-      readFileSync(path.join(dataDir, "obs-spool", name), "utf8")
+    const holders = filesUnder(dataDir).filter((file) => secret.test(readFileSync(file, "utf8")));
+    assert.deepEqual(
+      holders.map((file) => path.relative(dataDir, file)),
+      ["runtime.json"],
+      "only the session state keeps the prompt"
     );
-    assert.ok(spooled.length > 0, "the hook spooled its spans");
-    assert.ok(!spooled.some((text) => secret.test(text)), "no spooled batch holds the secrets");
     await shipSpoolWithDaemon(env, dataDir);
     const [policy] = backend.exports.filter((s) => s.name === "armoriq.policy.evaluate");
     assert.equal(policy.attributes["armoriq.policy.decision"], "deny");
