@@ -770,8 +770,10 @@ test("a respawned daemon ships each journaled event under the API key its sessio
     ]);
     assert.deepEqual([...new Set(backend.delivered.map((s) => s.apiKey))], [keyB]);
   } finally {
-    killIfRunning(killed.child);
-    if (respawned) killIfRunning(respawned.child);
+    for (const daemon of [killed, respawned].filter(Boolean)) {
+      killIfRunning(daemon.child);
+      await daemon.exited;
+    }
     await backend.close();
   }
 });
@@ -782,6 +784,7 @@ test("a journal replayed after SessionEnd ships the session's spans and no root 
   const dataDir = await tempDir("aq-ended-");
   const env = pluginEnv(home, dataDir, backend.url);
   const killed = startDaemon(env, dataDir);
+  let replaying;
   try {
     await waitFor(() => existsSync(killed.socketPath), 20_000, "the daemon socket");
     const session_id = randomUUID();
@@ -800,7 +803,7 @@ test("a journal replayed after SessionEnd ships the session's spans and no root 
       assert.equal(code, 0, hook_event_name);
     }
     await rm(path.join(dataDir, "profiles"), { force: true, recursive: true });
-    const replaying = startDaemon(env, dataDir);
+    replaying = startDaemon(env, dataDir);
     const settled = () =>
       dataFiles(dataDir).length + dataFiles(dataDir, "obs-journal").length === 0;
     await waitFor(settled, 20_000, "the replay to ship");
@@ -823,7 +826,10 @@ test("a journal replayed after SessionEnd ships the session's spans and no root 
       "completed",
     ]);
   } finally {
-    killIfRunning(killed.child);
+    for (const daemon of [killed, replaying].filter(Boolean)) {
+      killIfRunning(daemon.child);
+      await daemon.exited;
+    }
     await backend.close();
   }
 });
