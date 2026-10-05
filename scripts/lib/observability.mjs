@@ -4,7 +4,7 @@ import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 import { appendDaemonLog } from "./daemon-log.mjs";
-import { obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
+import { LEASE_MISS_TTL_MS, obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
 import {
   forgetEvent,
   journalBacklog,
@@ -23,6 +23,7 @@ const sessions = new Map();
 const queues = new Map();
 const shippers = new Map();
 const inFlight = new Set();
+const hookEntries = new Set();
 const FLUSHES = new Set(["Stop", "SessionEnd"]);
 let shipping = false;
 let testHooks = null;
@@ -111,7 +112,14 @@ function runtimeOptionsFor(config, entry) {
 
 async function initEntry(key, record, config) {
   const sessionId = record.input.session_id;
-  const entry = { key, sessionId, lastEventAt: record.at, sinkFailures: 0, pending: [] };
+  const entry = {
+    key,
+    sessionId,
+    lastEventAt: record.at,
+    sinkFailures: 0,
+    pending: [],
+    records: [],
+  };
   entry.runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config, entry));
   const startTime = await rootStartTime(sessionId, config);
   entry.markerDir = startTime && config.dataDir;
@@ -122,9 +130,11 @@ async function initEntry(key, record, config) {
     root: { ...sessionRootIds(sessionId), startTime },
   });
   sessions.set(key, entry);
+  if (!shipping) hookEntries.add(entry);
   await (shipping
     ? safeObsAsync(() => entry.session.refreshPolicy())
     : awaitHookLease(entry, config));
+  entry.leaseTriedAt = Date.now();
   await safeObsAsync(() => entry.session.beginRoot({ input: connectedInput(config) }));
   return entry;
 }
@@ -246,6 +256,7 @@ export function __resetObsForTests() {
   queues.clear();
   shippers.clear();
   inFlight.clear();
+  hookEntries.clear();
   shipping = false;
   releasingAll = null;
 }
@@ -418,7 +429,7 @@ function enqueueEvent(key, record, config, journaled) {
   return enqueue(key, async () => {
     const file = (await journaled) ?? null;
     const entry = await recordEvent(key, record, config);
-    await settleEvent(entry, record, file);
+    await settleEvent(entry, record, file, config);
   });
 }
 
@@ -428,6 +439,7 @@ function replayBacklog(shipper) {
 }
 
 async function replayJournal({ config, binding }) {
+  const replayedAt = Date.now();
   const backlog = await safeObsAsync(() => journalBacklog(config.dataDir, binding, inFlight));
   const replayed = new Set();
   for (const { file, record } of backlog ?? []) {
@@ -436,7 +448,7 @@ async function replayJournal({ config, binding }) {
     else {
       const key = sessionKey(config, sessionId);
       inFlight.add(file);
-      enqueueEvent(key, record, config, file);
+      enqueueEvent(key, { ...record, replayedAt }, config, file);
       replayed.add(key);
     }
   }
@@ -445,9 +457,11 @@ async function replayJournal({ config, binding }) {
 
 const settleKey = (key) => sessions.has(key) && settleJournal(sessions.get(key));
 
-async function settleEvent(entry, record, file) {
+async function settleEvent(entry, record, file, config) {
   if (!entry) return forgetSettled(file);
+  if (entry.parked) return keepForReplay(entry, record, file, config);
   if (file) entry.pending.push({ file, failures: entry.failuresBefore });
+  if (!shipping) entry.records.push(record);
   if (FLUSHES.has(record.event)) await settleJournal(entry);
 }
 
@@ -455,6 +469,30 @@ async function forgetSettled(file) {
   if (!file) return;
   await forgetEvent(file);
   inFlight.delete(file);
+}
+
+async function keepForReplay(entry, record, file, config) {
+  if (file) return void inFlight.delete(file);
+  if (!config.dataDir) return;
+  const target = journalEntryPath(config.dataDir, entry.runtime.spoolBinding, record.at);
+  await safeObsAsync(() => journalEvent(target, record));
+}
+
+const holdsLease = (entry) => entry.runtime.currentCeilingSnapshot().authoritative === true;
+
+const leaseRetryDue = (entry, { replayedAt }) =>
+  replayedAt
+    ? entry.leaseTriedAt <= replayedAt
+    : Date.now() - entry.leaseTriedAt > LEASE_MISS_TTL_MS;
+
+async function mayRecord(entry, record) {
+  if (entry.parked && !record.replayedAt) return false;
+  if (shipping && !holdsLease(entry) && leaseRetryDue(entry, record)) {
+    entry.leaseTriedAt = Date.now();
+    await safeObsAsync(() => entry.session.refreshPolicy());
+  }
+  entry.parked = !holdsLease(entry);
+  return !entry.parked;
 }
 
 function entryFor(key, record, config) {
@@ -470,7 +508,7 @@ async function recordEvent(key, record, config) {
   if (!entry) return null;
   entry.lastEventAt = Math.max(entry.lastEventAt, record.at);
   entry.failuresBefore = entry.sinkFailures;
-  await safeObsAsync(() => applyEvent(entry, record, config));
+  if (await mayRecord(entry, record)) await safeObsAsync(() => applyEvent(entry, record, config));
   return entry;
 }
 
@@ -496,8 +534,18 @@ async function applyEvent(entry, record, config) {
   }
 }
 
+async function journalLostRecords(config) {
+  for (const entry of hookEntries) {
+    if (entry.sinkFailures > 0) {
+      for (const record of entry.records) await keepForReplay(entry, record, null, config);
+    }
+  }
+  hookEntries.clear();
+}
+
 export async function obsFlush(sessionId, config) {
   if (!isObsEnabled(config)) return;
   const entry = sessions.get(sessionKey(config, sessionId));
   if (entry) await releaseSession(entry);
+  await journalLostRecords(config);
 }

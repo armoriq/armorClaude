@@ -654,7 +654,7 @@ test("the daemon still waits out a slow lease, and the lease it stores ends the 
   __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: slowLease(2_000) });
   await observeHook("SessionStart", { session_id: "sess-daemon" }, null, config);
   await obsFlushAll();
-  assert.deepEqual(rootSessions(), ["sess-daemon"], "the daemon waited 2 s for the lease");
+  assert.deepEqual(rootSessions(), ["sess-daemon", "sess-miss"], "the daemon waited 2 s");
   const until = Date.now() + 2_000;
   while (missFiles(dataDir).length > 0 && Date.now() < until) {
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -663,11 +663,58 @@ test("the daemon still waits out a slow lease, and the lease it stores ends the 
   __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: hungLease() });
   const took = await timedHookProcess("sess-after", config);
   assert.ok(took < 500, `the hook read the stored lease in ${took} ms`);
-  assert.deepEqual(rootSessions(), ["sess-after", "sess-daemon"]);
+  assert.deepEqual(rootSessions(), ["sess-after", "sess-daemon", "sess-miss"]);
   await provider.shutdown();
 });
 
+function switchableLease() {
+  const lease = { up: false };
+  lease.fetch = async () => {
+    if (!lease.up) throw new Error("lease endpoint down");
+    return stubLease();
+  };
+  return lease;
+}
+
 const journalFiles = (dataDir) => readdirSync(path.join(dataDir, "obs-journal"));
+
+test("a daemon keeps the events it cannot record without a lease and records them once a lease arrives (#200)", async () => {
+  installHooks();
+  const lease = switchableLease();
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: lease.fetch });
+  const config = { ...testConfig(), dataDir: mkdtempSync(path.join(tmpdir(), "aq-park-")) };
+  await obsServeAsDaemon(config);
+  const tool = { session_id: "sess-park", tool_name: "Bash", tool_input: {}, tool_use_id: "t1" };
+  await observeHook("SessionStart", { session_id: "sess-park" }, null, config);
+  await observeHook("PreToolUse", tool, null, config);
+  assert.equal(spans().length, 0);
+  assert.equal(journalFiles(config.dataDir).length, 2);
+  lease.up = true;
+  await obsRetryBacklog();
+  await observeHook("Stop", { session_id: "sess-park" }, null, config);
+  assert.equal(spansByName("armoriq.policy.evaluate").length, 1);
+  assert.deepEqual(journalFiles(config.dataDir), []);
+  await obsFlushAll();
+  await provider.shutdown();
+});
+
+test("a hook process journals an event it could not record, and a daemon records it (#200)", async () => {
+  installHooks();
+  const lease = switchableLease();
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: lease.fetch });
+  const config = { ...testConfig(), dataDir: mkdtempSync(path.join(tmpdir(), "aq-hookpark-")) };
+  await observeHook("SessionStart", { session_id: "sess-hook-park" }, null, config);
+  await obsFlush("sess-hook-park", config);
+  assert.equal(spans().length, 0);
+  assert.equal(journalFiles(config.dataDir).length, 1);
+  __resetObsForTests();
+  lease.up = true;
+  await obsServeAsDaemon(config);
+  await obsFlushAll();
+  assert.deepEqual(rootSessions(), ["sess-hook-park"]);
+  assert.deepEqual(journalFiles(config.dataDir), []);
+  await provider.shutdown();
+});
 
 test("a running daemon adopts the journal of a process that died after it started (#194)", async () => {
   installHooks();

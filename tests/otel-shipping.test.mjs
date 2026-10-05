@@ -98,6 +98,7 @@ async function startBackend({
   exportDelayMs = 0,
   exportStatus = 200,
   leaseDelayMs = 0,
+  leaseStatus = 200,
 } = {}) {
   const exports = [];
   const leaseRequests = [];
@@ -118,7 +119,7 @@ async function startBackend({
       if (req.url === "/observability/policy/lease") {
         leaseRequests.push(Date.now());
         setTimeout(() => {
-          res.writeHead(200, { "content-type": "application/json" });
+          res.writeHead(leaseStatus, { "content-type": "application/json" });
           res.end(lease());
         }, leaseDelayMs);
         return;
@@ -158,6 +159,9 @@ async function startBackend({
     },
     setLeaseDelay(ms) {
       leaseDelayMs = ms;
+    },
+    setLeaseStatus(status) {
+      leaseStatus = status;
     },
     dropHeldExports() {
       holdExports = false;
@@ -973,6 +977,49 @@ test("fallback hooks wait once for a lease endpoint that never answers, not on e
     assert.ok(took[0] < 3_000, `the first hook took ${took[0]} ms`);
     for (const ms of took.slice(1)) assert.ok(ms < 1_000, `a later hook took ${ms} ms`);
   } finally {
+    await backend.close();
+  }
+});
+
+test("events a daemon answered while the lease endpoint failed ship once it answers again (#200)", async () => {
+  const backend = await startBackend({ leaseStatus: 503 });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-nolease-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const daemon = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    const tool = {
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+      tool_use_id: "toolu_01NoLease",
+    };
+    for (const [event, input] of [
+      ["SessionStart"],
+      ["PreToolUse", tool],
+      ["PostToolUse", { ...tool, tool_response: {} }],
+      ["Stop"],
+      ["SessionEnd", { reason: "other" }],
+    ]) {
+      await daemonHook(daemon.socketPath, sessionId, event, input);
+    }
+    process.kill(daemon.child.pid, "SIGTERM");
+    await daemon.exited;
+    assert.equal(backend.exportTimes.length, 0);
+    assert.equal(dataFiles(dataDir, "obs-journal").length, 5, "every event stays journaled");
+
+    backend.setLeaseStatus(200);
+    await shipSpoolWithDaemon(env, dataDir);
+    assert.deepEqual(
+      sessionSpans(backend.delivered, sessionId)
+        .map((s) => s.name)
+        .sort(),
+      ["armoriq.agent.run", "armoriq.policy.evaluate", "armoriq.tool"]
+    );
+    assert.equal(rootOutcomes(rootsByEnd(backend.delivered)).at(-1), "completed");
+  } finally {
+    killIfRunning(daemon.child);
     await backend.close();
   }
 });
