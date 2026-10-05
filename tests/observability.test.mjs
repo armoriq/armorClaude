@@ -636,6 +636,23 @@ test("a hook process waits at most 1.5 s for a hung lease, and the next ones ski
   await provider.shutdown();
 });
 
+test("a current stored lease wins over a lease miss recorded after it (#191)", async () => {
+  installHooks();
+  const counter = { fetches: 0 };
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: slowLease(0, counter) });
+  const dataDir = mkdtempSync(path.join(tmpdir(), "aq-lease-won-"));
+  const config = { ...testConfig(), dataDir };
+  await timedHookProcess("sess-won-1", config);
+  const [file] = await storedLeases(dataDir, 1);
+  writeFileSync(path.join(dataDir, file.replace(/\.json$/, ".miss")), String(Date.now()));
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: hungLease() });
+  const took = await timedHookProcess("sess-won-2", config);
+  assert.ok(took < 500, `the hook adopted the stored lease in ${took} ms`);
+  assert.equal(counter.fetches, 1);
+  assert.equal(spansByName("armoriq.agent.run").length, 2);
+  await provider.shutdown();
+});
+
 test("the daemon still waits out a slow lease, and the lease it stores ends the hooks' miss window (#191)", async () => {
   installHooks();
   __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: hungLease() });

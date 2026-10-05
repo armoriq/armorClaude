@@ -22,10 +22,17 @@ export function obsLeaseStore(dataDir, endpoint, apiKey) {
   };
 }
 
+async function leaseCurrent(file, now) {
+  const lease = await readFile(file, "utf8").then(JSON.parse, () => null);
+  return Date.parse(lease?.expiresAt) > now;
+}
+
 export function obsLeaseMiss(dataDir, endpoint, apiKey) {
+  const file = leaseFile(dataDir, endpoint, apiKey, "json");
   const miss = leaseFile(dataDir, endpoint, apiKey, "miss");
   return {
     async recent(now = Date.now()) {
+      if (await leaseCurrent(file, now)) return false;
       const at = Number(await readFile(miss, "utf8").catch(() => NaN));
       return at <= now && now - at < LEASE_MISS_TTL_MS;
     },
