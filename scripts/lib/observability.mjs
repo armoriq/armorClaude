@@ -1,33 +1,10 @@
-/**
- * armorClaude observability bridge — additive, fail-open.
- *
- * Owns a module-level per-session registry of SDK OtelSessions, each with its
- * own ArmorIQTelemetryRuntime (a session close shuts its runtime down, so
- * runtimes cannot be shared across sessions). In the daemon (one long-lived
- * process) the registry persists across a session's hook events; in the
- * in-process fallback the registry is per-process (flat, best-effort).
- *
- * Event mapping (one-shot record calls — each hook event is a complete fact):
- *   UserPromptSubmit  -> turn root with the sanitized prompt as input
- *   PreToolUse        -> policy evaluate span with the allow/block/hold verdict
- *   PostToolUse       -> tool span with success/error outcome
- *   UserPromptExpansion (slash command) -> command operation span
- *   SessionStart      -> connect root on the session entry
- *   Stop              -> flush the turn (root stays open for the next turn)
- *   SessionEnd        -> close the session and drop the entry
- *
- * NOTHING here may throw into a hook: every emission goes through safeObs().
- */
 import armoriqSdk from "@armoriq/sdk-dev";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
-// sessionId -> { runtime, session }
 const sessions = new Map();
 
-// Test-only injection (lease + tracer provider). Production always uses the
-// backend lease endpoint and the SDK-owned exporter.
 let testHooks = null;
 
 async function safeObsAsync(fn) {
@@ -51,8 +28,16 @@ function getOrInitEntry(sessionId, config) {
   return initEntry(sessionId, config);
 }
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function settledWithin(ms, promise) {
+  let timer;
+  const expired = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms).unref();
+  });
+  try {
+    return await Promise.race([promise.catch(() => undefined), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function initEntry(sessionId, config) {
@@ -79,11 +64,7 @@ async function initEntry(sessionId, config) {
   });
   const entry = { runtime, session };
   sessions.set(sessionId, entry);
-  // Warm the policy lease so this session's first event is governed by a real
-  // answer instead of racing the background fetch (a cold runtime fails
-  // closed and would silently drop it). Bounded and fail-open: a slow backend
-  // delays this event by at most the race window, never breaks it.
-  await Promise.race([session.refreshPolicy().catch(() => undefined), delay(500)]);
+  await settledWithin(500, session.refreshPolicy());
   return entry;
 }
 
@@ -164,11 +145,7 @@ function expandedSlashCommand(input) {
   return command;
 }
 
-// Record a slash-command invocation as a command operation on the current
-// turn's trace, so the dashboard session view can show which slash commands a
-// session ran. The SDK only accepts identifier-safe tool names (must start
-// alphanumeric), so the leading slash is stripped: "/deploy" is recorded as
-// tool "deploy" under the command category.
+// The SDK accepts only tool names that start alphanumeric.
 async function obsSlashCommand(sessionId, config, command) {
   const entry = await getOrInitEntry(sessionId, config);
   return safeObsAsync(async () => {
@@ -180,8 +157,6 @@ async function obsSlashCommand(sessionId, config, command) {
   });
 }
 
-// Record that ArmorClaude connected to this Claude Code session. Emitted once,
-// on SessionStart, on the session entry's root.
 async function obsConnected(sessionId, config) {
   const entry = await getOrInitEntry(sessionId, config);
   return safeObsAsync(async () => {
@@ -191,9 +166,6 @@ async function obsConnected(sessionId, config) {
   });
 }
 
-// Turn boundary: flush the turn's plan spans so per-turn evidence ships
-// mid-session. The root stays open for the next turn; the entry (and its
-// runtime) is dropped only on SessionEnd.
 async function obsEndTurn(sessionId) {
   const entry = sessions.get(sessionId);
   if (!entry) return;
@@ -207,9 +179,6 @@ async function obsEndSession(sessionId) {
   await safeObsAsync(() => entry.session.close("ok"));
 }
 
-// Flush every live session's runtime without ending traces. Used by the daemon
-// on shutdown / idle-timeout so buffered spans ship before exit.
-// Fail-open: never throws.
 export async function obsFlushAll() {
   for (const entry of sessions.values()) {
     await safeObsAsync(() => entry.runtime.forceFlush());
@@ -266,9 +235,6 @@ export async function observeHook(event, input, output, config) {
         );
         break;
       case "Stop":
-        // Turn boundary: flush the turn's plan spans so per-turn evidence
-        // ships mid-session instead of buffering the whole session until
-        // SessionEnd. A fresh turn starts on the next UserPromptSubmit.
         await obsEndTurn(sessionId);
         break;
       case "SessionEnd":
@@ -280,7 +246,6 @@ export async function observeHook(event, input, output, config) {
   });
 }
 
-// In-process fallback safety net: force-flush a session's runtime.
 export async function obsFlush(sessionId, config) {
   if (!isObsEnabled(config)) return;
   const entry = sessions.get(sessionId);
