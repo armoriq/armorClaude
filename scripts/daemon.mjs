@@ -48,7 +48,12 @@ import {
   handleStop,
   handleSessionEnd,
 } from "./lib/engine.mjs";
-import { observeHook, obsFlushAll, obsReleaseIdle } from "./lib/observability.mjs";
+import {
+  observeHook,
+  obsDrainExportsOnClose,
+  obsFlushAll,
+  obsReleaseIdle,
+} from "./lib/observability.mjs";
 import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
@@ -56,6 +61,7 @@ const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 
 let config = loadConfig();
 ensurePrivateDirSync(config.dataDir);
+obsDrainExportsOnClose();
 // Seed built-in profiles eagerly so new templates are available immediately
 // after a daemon restart — no lazy first-access required.
 await seedBuiltinProfiles(config);
@@ -512,9 +518,10 @@ function shutdown(code) {
 
 async function stopAndExit(code) {
   server.close();
-  await Promise.allSettled([flushAudit("shutdown"), obsFlushAll()]);
+  await flushAudit("shutdown").catch(() => undefined);
   cleanupSocket();
   cleanupPid();
+  await obsFlushAll();
   process.exit(code);
 }
 

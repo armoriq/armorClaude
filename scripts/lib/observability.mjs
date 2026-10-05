@@ -7,10 +7,13 @@ import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
+const EXPORT_DRAIN_MARGIN_MS = 1_000;
+
 const sessions = new Map();
 const queues = new Map();
 let testHooks = null;
 let releasingAll = null;
+let drainOnClose = false;
 
 async function safeObsAsync(fn) {
   try {
@@ -91,10 +94,19 @@ async function initEntry(sessionId, config) {
   return entry;
 }
 
+export function obsDrainExportsOnClose() {
+  drainOnClose = true;
+}
+
+function closeDeadlineMs(entry) {
+  return drainOnClose ? entry.runtime.config.timeoutMillis + EXPORT_DRAIN_MARGIN_MS : undefined;
+}
+
 export function __resetObsForTests() {
   sessions.clear();
   queues.clear();
   releasingAll = null;
+  drainOnClose = false;
 }
 
 export function __setOtelTestHooksForTests(hooks) {
@@ -187,7 +199,9 @@ async function obsEndTurn(sessionId) {
 async function obsEndSession(sessionId, config) {
   const entry = await getOrInitEntry(sessionId, config);
   sessions.delete(sessionId);
-  await safeObsAsync(() => entry.session.close("ok"));
+  await safeObsAsync(() =>
+    entry.session.close({ status: "ok", deadlineMs: closeDeadlineMs(entry) })
+  );
   if (config.dataDir) await safeObsAsync(() => releaseRootStart(config.dataDir, sessionId));
 }
 
@@ -195,10 +209,17 @@ async function releaseSession(sessionId, entry) {
   sessions.delete(sessionId);
   await safeObsAsync(async () => {
     const ended = entry.dataDir && (await rootStartReleased(entry.dataDir, sessionId));
-    if (ended) return entry.runtime.close();
+    const deadlineMs = closeDeadlineMs(entry);
+    if (ended) return entry.runtime.close(deadlineMs);
     // unknown, not process_exit: the session may go on in another process, and
     // only SessionEnd knows how it ended.
-    await entry.session.close("ok", "unknown", {}, new Date(entry.lastEventAt));
+    await entry.session.close({
+      status: "ok",
+      taskOutcome: "unknown",
+      output: {},
+      endTime: new Date(entry.lastEventAt),
+      deadlineMs,
+    });
   });
 }
 

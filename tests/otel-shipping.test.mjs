@@ -90,8 +90,9 @@ function decodeSpans(body) {
   return spans;
 }
 
-async function startBackend({ holdExports = false, content = false } = {}) {
+async function startBackend({ holdExports = false, content = false, exportDelayMs = 0 } = {}) {
   const exports = [];
+  const delivered = [];
   const exportTimes = [];
   const heldExports = [];
   const lease = () =>
@@ -112,13 +113,16 @@ async function startBackend({ holdExports = false, content = false } = {}) {
       }
       if (req.method === "POST" && req.url === "/v1/traces") {
         exportTimes.push(Date.now());
-        exports.push(...decodeSpans(Buffer.concat(chunks)));
+        const spans = decodeSpans(Buffer.concat(chunks));
+        exports.push(...spans);
         const answer = () => {
+          if (req.socket.destroyed) return;
+          delivered.push(...spans);
           res.writeHead(200, { "content-type": "application/x-protobuf" });
           res.end();
         };
         if (holdExports) heldExports.push(answer);
-        else answer();
+        else setTimeout(answer, exportDelayMs);
         return;
       }
       res.writeHead(404, { "content-type": "application/json" });
@@ -129,6 +133,7 @@ async function startBackend({ holdExports = false, content = false } = {}) {
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     exports,
+    delivered,
     exportTimes,
     releaseExports() {
       holdExports = false;
@@ -468,6 +473,72 @@ test("a second shutdown signal waits for the first shutdown's export", async () 
     assert.deepEqual(rootOutcomes(backend.exports), ["unknown"]);
   } finally {
     killIfRunning(daemon.child);
+    await backend.close();
+  }
+});
+
+test("the daemon's SessionEnd export lands although it takes longer than 1.5 s (#190)", async () => {
+  const backend = await startBackend({ exportDelayMs: 2_500 });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-slow-");
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    await daemonHook(daemon.socketPath, sessionId, "SessionStart");
+    await daemonHook(daemon.socketPath, sessionId, "SessionEnd", { reason: "other" });
+    await waitFor(() => backend.delivered.length > 0, 8_000, "the SessionEnd export to land");
+    assert.deepEqual(rootOutcomes(backend.delivered), ["completed"]);
+  } finally {
+    killIfRunning(daemon.child);
+    await backend.close();
+  }
+});
+
+test("an in-process SessionEnd gives up on a hung export within the SDK's 1.5 s bound", async () => {
+  const backend = await startBackend({ holdExports: true });
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-hung-");
+    await withoutDaemon(dataDir);
+    const started = Date.now();
+    const end = await runHook(pluginEnv(home, dataDir, backend.url), {
+      session_id: randomUUID(),
+      hook_event_name: "SessionEnd",
+      reason: "other",
+    });
+    assert.equal(end.code, 0);
+    assert.ok(backend.exportTimes.length > 0, "the hook started its export");
+    assert.ok(Date.now() - started < 3_000, `the hook took ${Date.now() - started} ms`);
+  } finally {
+    await backend.close();
+  }
+});
+
+test("a replacement daemon serves hooks while the old one drains its exports (#190)", async () => {
+  const backend = await startBackend({ holdExports: true });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-swap-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const old = startDaemon(env, dataDir);
+  let next;
+  try {
+    await waitFor(() => existsSync(old.socketPath), 20_000, "the first daemon socket");
+    await daemonHook(old.socketPath, randomUUID(), "SessionStart");
+    await daemonRequest(old.socketPath, { type: "shutdown", reqId: "upgrade" });
+    await waitFor(() => backend.exportTimes.length > 0, 10_000, "the draining export");
+    next = startDaemon(env, dataDir);
+    await waitFor(() => existsSync(next.socketPath), 20_000, "the replacement socket");
+    const ping = await daemonRequest(next.socketPath, { type: "ping", reqId: "next" });
+    assert.equal(ping.ok, true);
+    assert.equal(old.child.exitCode, null, "the old daemon is still draining");
+    assert.equal(Number(readFileSync(path.join(dataDir, "daemon.pid"), "utf8")), next.child.pid);
+    backend.releaseExports();
+    await old.exited;
+    assert.ok(existsSync(next.socketPath), "the old daemon left the new socket in place");
+  } finally {
+    killIfRunning(old.child);
+    if (next) killIfRunning(next.child);
     await backend.close();
   }
 });
