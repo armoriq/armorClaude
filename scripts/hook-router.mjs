@@ -104,9 +104,6 @@ async function main() {
     emitJson(output);
   }
 
-  // In-process fallback path: emit observability with the decision output,
-  // then close the session so its spans ship before this short-lived process
-  // exits.
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   await observeHook(event, input, output, config);
   await obsFlush(sessionId, config);

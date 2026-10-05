@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
+import path from "node:path";
 import { loadConfig } from "../scripts/lib/config.mjs";
 import {
   NodeTracerProvider,
@@ -38,7 +40,12 @@ test("__resetObsForTests exists and is callable", () => {
 });
 
 import armoriqSdk from "@armoriq/sdk-dev";
-import { observeHook, obsFlush, obsFlushAll } from "../scripts/lib/observability.mjs";
+import {
+  observeHook,
+  obsFlush,
+  obsFlushAll,
+  obsReleaseIdle,
+} from "../scripts/lib/observability.mjs";
 
 test("installed SDK provides every required observability export", () => {
   for (const name of ["ArmorIQTelemetryRuntime", "OtelSession"]) {
@@ -373,18 +380,7 @@ test("events sent without awaiting are recorded in order once the lease arrives"
     tracerProvider: provider,
     leaseFetcher: () =>
       new Promise((resolve) => {
-        answerLease = () =>
-          resolve({
-            captureMode: "metadata",
-            revision: 1,
-            expiresAt: new Date(Date.now() + 3600_000),
-            authoritative: true,
-            contentCaptureAllowed: false,
-            externalContentCaptureAllowed: false,
-            externalContentAllowed: false,
-            contentReasonCode: "test",
-            debugExpiresAt: null,
-          });
+        answerLease = () => resolve(stubLease());
       }),
   });
   const tool = { session_id: "sess-queue", tool_name: "Bash", tool_input: {} };
@@ -458,4 +454,47 @@ test("a fallback hook process exits as soon as an instant lease resolves", () =>
   const result = spawnSync(process.execPath, args, { env, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.ok(Number(result.stdout) < 250, `hook process stayed alive ${result.stdout} ms`);
+});
+
+test("root markers are readable only by the user", async () => {
+  installHooks();
+  const dataDir = mkdtempSync(path.join(tmpdir(), "obs-marker-"));
+  await observeHook("SessionStart", { session_id: "sess-private" }, null, {
+    ...testConfig(),
+    dataDir,
+  });
+  const dir = path.join(dataDir, "obs-roots");
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+  assert.deepEqual(
+    readdirSync(dir).map((name) => statSync(path.join(dir, name)).mode & 0o777),
+    [0o600]
+  );
+  await provider.shutdown();
+});
+
+test("a second obsFlushAll waits for the first, and later events are not recorded", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook("SessionStart", { session_id: "sess-stop-a" }, null, config);
+  let firstDone = false;
+  obsFlushAll().then(() => (firstDone = true));
+  await obsFlushAll();
+  assert.ok(firstDone, "the second call resolved before the first finished");
+  const tool = { session_id: "sess-stop-b", tool_name: "Bash", tool_input: {} };
+  await observeHook("PreToolUse", tool, null, config);
+  assert.equal(spansByName("armoriq.policy.evaluate").length, 0);
+  await provider.shutdown();
+});
+
+test("obsReleaseIdle ends the root of a session idle past the bound and keeps active ones", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook("SessionStart", { session_id: "sess-idle" }, null, config);
+  await obsReleaseIdle(60_000);
+  assert.equal(spansByName("armoriq.agent.run").length, 0, "an active session stays open");
+  await obsReleaseIdle(0);
+  const roots = spansByName("armoriq.agent.run");
+  assert.equal(roots.length, 1);
+  assert.equal(roots[0].attributes["gen_ai.task.outcome"], "unknown");
+  await provider.shutdown();
 });

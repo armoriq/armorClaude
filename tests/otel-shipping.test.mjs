@@ -1,15 +1,15 @@
-// Spans shipped over OTLP to a local backend by real hook and daemon processes (#157).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createConnection } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { obsFlush, observeHook } from "../scripts/lib/observability.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
@@ -143,6 +143,12 @@ async function tempDir(prefix) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
+// The daemon exits on startup when profiles is a file, so each hook runs in-process.
+async function withoutDaemon(dataDir) {
+  await rm(path.join(dataDir, "profiles"), { recursive: true, force: true });
+  await writeFile(path.join(dataDir, "profiles"), "not a directory");
+}
+
 function pluginEnv(home, dataDir, backendUrl) {
   return {
     PATH: process.env.PATH,
@@ -173,8 +179,7 @@ test("fallback PreToolUse and PostToolUse, one process each, ship spans carrying
   try {
     const home = await tempDir("aq-home-");
     const dataDir = await tempDir("aq-fallback-");
-    // The daemon exits on startup when profiles is a file, so each hook runs in-process.
-    await writeFile(path.join(dataDir, "profiles"), "not a directory");
+    await withoutDaemon(dataDir);
     const env = pluginEnv(home, dataDir, backend.url);
     const sessionId = randomUUID();
     const tool = { session_id: sessionId, tool_name: "Bash", tool_input: { command: "ls" } };
@@ -225,7 +230,6 @@ async function runSession(env, session_id) {
   await hook({ hook_event_name: "SessionEnd", reason: "other" });
 }
 
-// What the backend stores: deliveries of one span id merge into one row.
 function storedSpans(exports) {
   return [...new Map(exports.map((s) => [`${s.traceId}/${s.spanId}`, s])).values()];
 }
@@ -235,7 +239,7 @@ test("a session run entirely on the fallback is one trace under one root that en
   try {
     const home = await tempDir("aq-home-");
     const dataDir = await tempDir("aq-fallback-");
-    await writeFile(path.join(dataDir, "profiles"), "not a directory");
+    await withoutDaemon(dataDir);
     const env = pluginEnv(home, dataDir, backend.url);
     const session_id = randomUUID();
     await runSession(env, session_id);
@@ -295,27 +299,40 @@ async function waitFor(predicate, ms, what) {
   }
 }
 
+function startDaemon(env, dataDir) {
+  const child = spawn(process.execPath, [daemonScript], { env, stdio: "ignore", cwd: dataDir });
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  return { child, exited, socketPath: path.join(dataDir, "daemon.sock") };
+}
+
+function daemonHook(socketPath, sessionId, event, input = {}) {
+  return daemonRequest(socketPath, {
+    type: "hook",
+    reqId: event,
+    event,
+    input: { session_id: sessionId, hook_event_name: event, ...input },
+  });
+}
+
+const rootOutcomes = (exports) =>
+  exports
+    .filter((s) => s.name === "armoriq.agent.run")
+    .map((r) => r.attributes["gen_ai.task.outcome"]);
+
+function killIfRunning(child) {
+  if (child.exitCode === null && child.signalCode === null) process.kill(child.pid, "SIGKILL");
+}
+
 test("daemon replies to Stop without waiting on the span export, and its shutdown ships the open root", async () => {
   const backend = await startBackend({ holdExports: true });
   const home = await tempDir("aq-home-");
   const dataDir = await tempDir("aq-daemon-");
-  const child = spawn(process.execPath, [daemonScript], {
-    env: pluginEnv(home, dataDir, backend.url),
-    stdio: "ignore",
-    cwd: dataDir,
-  });
-  const exited = new Promise((resolve) => child.once("exit", resolve));
+  const { child, exited, socketPath } = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
   try {
-    const socketPath = path.join(dataDir, "daemon.sock");
     await waitFor(() => existsSync(socketPath), 20_000, "the daemon socket");
     const sessionId = randomUUID();
-    const hook = async (event, input = {}) => {
-      const reply = await daemonRequest(socketPath, {
-        type: "hook",
-        reqId: event,
-        event,
-        input: { session_id: sessionId, hook_event_name: event, ...input },
-      });
+    const hook = async (event, input) => {
+      const reply = await daemonHook(socketPath, sessionId, event, input);
       assert.ok(!reply.error, reply.error);
       return Date.now();
     };
@@ -347,7 +364,7 @@ test("daemon replies to Stop without waiting on the span export, and its shutdow
       assert.equal(span.attributes["armoriq.session_id"], sessionId, span.name);
     }
   } finally {
-    if (child.exitCode === null && child.signalCode === null) process.kill(child.pid, "SIGKILL");
+    killIfRunning(child);
     await backend.close();
   }
 });
@@ -393,7 +410,7 @@ test("one session stores the same trace with the daemon up and with it down (#17
     assert.ok(existsSync(path.join(daemonDir, "daemon.pid")), "a daemon served these hooks");
     await stopDaemon(daemonDir);
 
-    await writeFile(path.join(fallbackDir, "profiles"), "not a directory");
+    await withoutDaemon(fallbackDir);
     await runSession(pluginEnv(home, fallbackDir, fallbackBackend.url), randomUUID());
 
     const up = shape(daemonBackend.exports);
@@ -413,5 +430,92 @@ test("one session stores the same trace with the daemon up and with it down (#17
     await stopDaemon(daemonDir);
     await daemonBackend.close();
     await fallbackBackend.close();
+  }
+});
+
+test("a root owner leaves the root alone once SessionEnd in another process ended it", async () => {
+  const backend = await startBackend();
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-owner-");
+    await withoutDaemon(dataDir);
+    const session_id = randomUUID();
+    const config = {
+      observabilityEnabled: true,
+      observabilityEndpoint: backend.url,
+      apiKey: API_KEY,
+      agentId: "claude-code",
+      dataDir,
+    };
+    await observeHook("SessionStart", { session_id }, null, config);
+    const end = await runHook(pluginEnv(home, dataDir, backend.url), {
+      session_id,
+      hook_event_name: "SessionEnd",
+      reason: "other",
+    });
+    assert.equal(end.code, 0);
+    await obsFlush(session_id, config);
+    assert.deepEqual(rootOutcomes(backend.exports), ["completed"]);
+  } finally {
+    await backend.close();
+  }
+});
+
+test("the next process ships the root of a session whose daemon was SIGKILLed", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-killed-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const daemon = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const session_id = randomUUID();
+    await daemonHook(daemon.socketPath, session_id, "SessionStart");
+    const roots = path.join(dataDir, "obs-roots");
+    await waitFor(() => existsSync(roots) && readdirSync(roots).length > 0, 10_000, "the marker");
+    const marker = JSON.parse(readFileSync(path.join(roots, readdirSync(roots)[0]), "utf8"));
+    process.kill(daemon.child.pid, "SIGKILL");
+    await daemon.exited;
+    await withoutDaemon(dataDir);
+
+    const tool = { session_id, tool_name: "Read", tool_input: { file_path: "a" } };
+    for (const hook_event_name of ["PreToolUse", "PostToolUse"]) {
+      const { code } = await runHook(env, { ...tool, hook_event_name, tool_response: {} });
+      assert.equal(code, 0, hook_event_name);
+    }
+    const [root] = backend.exports.filter((s) => s.name === "armoriq.agent.run");
+    assert.deepEqual(rootOutcomes(backend.exports), ["unknown"], "one process took the root over");
+    assert.equal(root.startTimeUnixNano / 1_000_000n, BigInt(Date.parse(marker.startTime)));
+    for (const span of backend.exports.filter((s) => s.name !== "armoriq.agent.run")) {
+      assert.equal(span.parentSpanId, root.spanId, `${span.name} hangs off the root`);
+    }
+
+    await runHook(env, { session_id, hook_event_name: "SessionEnd", reason: "other" });
+    assert.deepEqual(rootOutcomes(backend.exports), ["unknown", "completed"]);
+  } finally {
+    killIfRunning(daemon.child);
+    await backend.close();
+  }
+});
+
+test("a second shutdown signal waits for the first shutdown's export", async () => {
+  const backend = await startBackend({ holdExports: true });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-twice-");
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    await daemonHook(daemon.socketPath, randomUUID(), "SessionStart");
+    await daemonRequest(daemon.socketPath, { type: "shutdown", reqId: "first" });
+    await waitFor(() => backend.exportTimes.length > 0, 10_000, "the shutdown export");
+    process.kill(daemon.child.pid, "SIGTERM");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(daemon.child.exitCode, null, "the daemon exited with its export in flight");
+    backend.releaseExports();
+    await daemon.exited;
+    assert.deepEqual(rootOutcomes(backend.exports), ["unknown"]);
+  } finally {
+    killIfRunning(daemon.child);
+    await backend.close();
   }
 });

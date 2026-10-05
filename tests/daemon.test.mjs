@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -75,7 +75,7 @@ async function loadConfigFor(dataDir) {
   return mod.loadConfig(env);
 }
 
-test("daemon: ping responds with version + uptime", async () => {
+test("daemon: ping responds with the plugin's package version + uptime", async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-ping-"));
   const { child } = await spawnDaemonChild(dataDir);
   try {
@@ -84,7 +84,8 @@ test("daemon: ping responds with version + uptime", async () => {
     const reply = await pingDaemon(config);
     assert.ok(reply, "ping should return a reply");
     assert.equal(reply.ok, true);
-    assert.ok(typeof reply.version === "string");
+    const pkg = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+    assert.equal(reply.version, pkg.version);
     assert.ok(reply.uptime >= 0);
   } finally {
     await killDaemon(child, dataDir);

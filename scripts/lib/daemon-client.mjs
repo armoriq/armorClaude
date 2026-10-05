@@ -20,12 +20,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensurePrivateDirSync, openPrivateSync } from "./fs-store.mjs";
 import { capDaemonLog, daemonLogPath } from "./daemon-log.mjs";
+import { DAEMON_VERSION } from "./daemon-version.mjs";
 
 const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if daemon is hung
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
 const SPAWN_POLL_MS = 50;
 const DAEMON_START_TIMEOUT_MS = 10_000;
-const EXPECTED_DAEMON_VERSION = "0.2.19";
 
 let nextReqId = 1;
 function makeReqId() {
@@ -148,7 +148,7 @@ async function ensureFreshDaemonSocket(socketPath, config) {
 
   try {
     const ping = await exchange(sock, { type: "ping", reqId: makeReqId() });
-    if (ping?.version === EXPECTED_DAEMON_VERSION) {
+    if (ping?.version === DAEMON_VERSION) {
       return sock;
     }
   } catch {

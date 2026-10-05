@@ -48,9 +48,9 @@ import {
   handleStop,
   handleSessionEnd,
 } from "./lib/engine.mjs";
-import { observeHook, obsFlushAll } from "./lib/observability.mjs";
+import { observeHook, obsFlushAll, obsReleaseIdle } from "./lib/observability.mjs";
+import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
 
-const DAEMON_VERSION = "0.2.19";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 
@@ -374,6 +374,7 @@ const idleTimer = setInterval(() => {
   } catch (err) {
     process.stderr.write(`[armorclaude-daemon] daemon.log cap failed: ${err?.message ?? err}\n`);
   }
+  obsReleaseIdle(IDLE_TIMEOUT_MS);
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
     process.stderr.write(
       `[armorclaude-daemon] idle for ${IDLE_TIMEOUT_MS / 60_000} min, exiting pid=${process.pid} at=${new Date().toISOString()}\n`
@@ -503,19 +504,18 @@ server.listen(socketPath, () => {
 });
 
 // ---- Shutdown handlers ---------------------------------------------------
+let stopping = null;
 function shutdown(code) {
-  // Try to flush audits AND observability one last time before exit, so any
-  // ended-but-unshipped turn traces reach the backend. Both are fail-open.
-  Promise.allSettled([flushAudit("shutdown"), obsFlushAll()]).finally(() => {
-    try {
-      server.close();
-    } catch {
-      /* empty */
-    }
-    cleanupSocket();
-    cleanupPid();
-    process.exit(code);
-  });
+  stopping ??= stopAndExit(code);
+  return stopping;
+}
+
+async function stopAndExit(code) {
+  server.close();
+  await Promise.allSettled([flushAudit("shutdown"), obsFlushAll()]);
+  cleanupSocket();
+  cleanupPid();
+  process.exit(code);
 }
 
 process.on("SIGTERM", () => shutdown(0));
