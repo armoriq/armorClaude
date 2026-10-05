@@ -1,4 +1,3 @@
-// Every module under scripts/lib must be reachable from a scripts/ entry point (#164).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
