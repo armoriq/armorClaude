@@ -124,31 +124,34 @@ function operationCategory(toolName) {
   return typeof toolName === "string" && toolName.startsWith("mcp__") ? "mcp" : "tool";
 }
 
-async function obsCheck(sessionId, config, toolName, toolInput, output) {
+function toolCall(input, config) {
+  const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
+  const toolCallId = typeof input.tool_use_id === "string" ? input.tool_use_id : undefined;
+  return { toolName, toolCallId, arguments: sanitizeParams(input.tool_input, config.sanitize) };
+}
+
+async function obsCheck(sessionId, config, input, output) {
   const entry = await getOrInitEntry(sessionId, config);
   return safeObsAsync(async () => {
     const reason =
       (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
       undefined;
-    await entry.session.recordPolicy(
-      { toolName, arguments: sanitizeParams(toolInput, config.sanitize) },
-      { decision: classifyDecision(output), ...(reason ? { policyReasonCode: reason } : {}) }
-    );
+    await entry.session.recordPolicy(toolCall(input, config), {
+      decision: classifyDecision(output),
+      ...(reason ? { policyReasonCode: reason } : {}),
+    });
   });
 }
 
-async function obsReport(sessionId, config, toolName, toolInput, toolResponse, outcome) {
+async function obsReport(sessionId, config, input, outcome) {
   const entry = await getOrInitEntry(sessionId, config);
   return safeObsAsync(async () => {
+    const call = toolCall(input, config);
     await entry.session.recordTool(
-      {
-        toolName,
-        arguments: sanitizeParams(toolInput, config.sanitize),
-        operation: { category: operationCategory(toolName) },
-      },
+      { ...call, operation: { category: operationCategory(call.toolName) } },
       {
         outcome,
-        result: redactSecrets(sanitizeParams(toolResponse, config.sanitize)),
+        result: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
       }
     );
   });
@@ -277,33 +280,13 @@ async function recordEvent(sessionId, event, input, output, config) {
         break;
       }
       case "PreToolUse":
-        await obsCheck(
-          sessionId,
-          config,
-          typeof input.tool_name === "string" ? input.tool_name : "",
-          input.tool_input,
-          output
-        );
+        await obsCheck(sessionId, config, input, output);
         break;
       case "PostToolUse":
-        await obsReport(
-          sessionId,
-          config,
-          input.tool_name,
-          input.tool_input,
-          input.tool_response,
-          "success"
-        );
+        await obsReport(sessionId, config, input, "success");
         break;
       case "PostToolUseFailure":
-        await obsReport(
-          sessionId,
-          config,
-          input.tool_name,
-          input.tool_input,
-          input.tool_response,
-          "error"
-        );
+        await obsReport(sessionId, config, input, "error");
         break;
       case "Stop":
         await obsEndTurn(sessionId);

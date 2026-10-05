@@ -415,6 +415,34 @@ test("a process leaves the root alone once SessionEnd in another process ended i
   }
 });
 
+test("hook processes ship a call's policy and tool spans under its tool_use_id (#192)", async () => {
+  const backend = await startBackend();
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-callid-");
+    await withoutDaemon(dataDir);
+    const env = pluginEnv(home, dataDir, backend.url);
+    const session_id = randomUUID();
+    const tool = {
+      session_id,
+      tool_name: "Read",
+      tool_input: { file_path: "package.json" },
+      tool_use_id: "toolu_01CallIdShip",
+    };
+    for (const hook_event_name of ["PreToolUse", "PostToolUse", "SessionEnd"]) {
+      const { code } = await runHook(env, { ...tool, hook_event_name, tool_response: {} });
+      assert.equal(code, 0, hook_event_name);
+    }
+    const linked = storedSpans(backend.exports)
+      .filter((s) => s.attributes["armoriq.tool.call_id"] === tool.tool_use_id)
+      .map((s) => s.name)
+      .sort();
+    assert.deepEqual(linked, ["armoriq.policy.evaluate", "armoriq.tool"]);
+  } finally {
+    await backend.close();
+  }
+});
+
 test("the next processes ship the root of a session whose daemon was SIGKILLed, with the connect input", async () => {
   const backend = await startBackend({ content: true });
   const home = await tempDir("aq-home-");
