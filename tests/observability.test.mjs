@@ -141,7 +141,7 @@ test("observeHook builds one turn root per session", async () => {
   await provider.shutdown();
 });
 
-test("PreToolUse deny records a blocked policy evaluation", async () => {
+test("PreToolUse deny records a blocked policy evaluation without the reason text (#201)", async () => {
   installHooks();
   const config = testConfig();
   await observeHook(
@@ -159,7 +159,7 @@ test("PreToolUse deny records a blocked policy evaluation", async () => {
   const policy = spansByName("armoriq.policy.evaluate");
   assert.equal(policy.length, 1);
   assert.equal(policy[0].attributes["armoriq.policy.decision"], "deny");
-  assert.equal(policy[0].attributes["armoriq.policy.reason_code"], "no registered plan");
+  assert.equal(policy[0].attributes["armoriq.policy.reason_code"], undefined);
   await provider.shutdown();
 });
 

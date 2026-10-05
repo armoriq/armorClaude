@@ -542,3 +542,60 @@ test("a replacement daemon serves hooks while the old one drains its exports (#1
     await backend.close();
   }
 });
+
+const ENFORCING_POLICY = {
+  version: 1,
+  updatedAt: new Date().toISOString(),
+  history: [],
+  policy: {
+    schemaVersion: "armor.policy.v1",
+    kind: "PolicyProfile",
+    metadata: { name: "enforcing", description: "" },
+    defaults: { decision: "allow", conflictResolution: "deny_overrides" },
+    statements: [
+      {
+        id: "forbid-webfetch",
+        effect: "forbid",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", in: ["WebFetch"] },
+        resource: { type: "workspace", scope: "current" },
+        conditions: [],
+      },
+    ],
+  },
+};
+
+const filesUnder = (dir) =>
+  readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(entry.parentPath, entry.name));
+
+test("a deny-with-hint keeps the prompt and tool input out of the export and the data dir (#201)", async () => {
+  const backend = await startBackend();
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-hint-");
+    await withoutDaemon(dataDir);
+    await writeFile(path.join(dataDir, "policy.json"), JSON.stringify(ENFORCING_POLICY));
+    const env = pluginEnv(home, dataDir, backend.url);
+    const hook = (payload) => runHook(env, { session_id: "sess-hint", ...payload });
+    const tool = { tool_name: "Bash", tool_input: { command: "TOOL_SECRET_41=1 ls" } };
+    await hook({ hook_event_name: "SessionStart", source: "startup" });
+    await hook({ hook_event_name: "UserPromptSubmit", prompt: "deploy with PROMPT_SECRET_77" });
+    const { stdout } = await hook({ hook_event_name: "PreToolUse", ...tool });
+    assert.match(stdout, /"permissionDecision":"deny".*PROMPT_SECRET_77/);
+    const secret = /PROMPT_SECRET_77|TOOL_SECRET_41/;
+    const holders = filesUnder(dataDir).filter((file) => secret.test(readFileSync(file, "utf8")));
+    assert.deepEqual(
+      holders.map((file) => path.relative(dataDir, file)),
+      ["runtime.json"],
+      "only the session state keeps the prompt"
+    );
+    const [policy] = backend.exports.filter((s) => s.name === "armoriq.policy.evaluate");
+    assert.equal(policy.attributes["armoriq.policy.decision"], "deny");
+    assert.equal(policy.attributes["armoriq.policy.reason_code"], undefined);
+    assert.ok(!secret.test(JSON.stringify(backend.exports.map((span) => span.attributes))));
+  } finally {
+    await backend.close();
+  }
+});

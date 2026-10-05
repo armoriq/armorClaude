@@ -126,15 +126,12 @@ function operationCategory(toolName) {
 
 async function obsCheck(sessionId, config, toolName, toolInput, output) {
   const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    const reason =
-      (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
-      undefined;
-    await entry.session.recordPolicy(
+  return safeObsAsync(() =>
+    entry.session.recordPolicy(
       { toolName, arguments: sanitizeParams(toolInput, config.sanitize) },
-      { decision: classifyDecision(output), ...(reason ? { policyReasonCode: reason } : {}) }
-    );
-  });
+      { decision: classifyDecision(output) }
+    )
+  );
 }
 
 async function obsReport(sessionId, config, toolName, toolInput, toolResponse, outcome) {
