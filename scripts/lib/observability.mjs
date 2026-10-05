@@ -3,7 +3,8 @@
 import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
-import { obsLeaseStore } from "./obs-lease-store.mjs";
+import { obsBindingKey, obsLeaseStore } from "./obs-lease-store.mjs";
+import { shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
 import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
@@ -12,6 +13,8 @@ const EXPORT_DRAIN_MARGIN_MS = 1_000;
 
 const sessions = new Map();
 const queues = new Map();
+const shippers = new Map();
+let shipping = false;
 let testHooks = null;
 let releasingAll = null;
 let drainOnClose = false;
@@ -52,6 +55,22 @@ async function rootStartTime(sessionId, config) {
   return config.dataDir ? claimRootStart(config.dataDir, sessionId) : null;
 }
 
+function bindingOf(config) {
+  return obsBindingKey(config.observabilityEndpoint, config.apiKey);
+}
+
+function spoolSink(config) {
+  const binding = bindingOf(config);
+  return {
+    write: (batch) => safeObsAsync(() => writeSpoolBatch(config.dataDir, binding, batch)),
+  };
+}
+
+function dataDirOptions(config) {
+  const leaseStore = obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey);
+  return drainOnClose ? { leaseStore } : { leaseStore, spanSink: spoolSink(config) };
+}
+
 function runtimeOptionsFor(config) {
   const sdkVersion = typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown";
   const runtimeOptions = {
@@ -60,13 +79,7 @@ function runtimeOptionsFor(config) {
     sdkVersion,
     options: { serviceName: config.observabilityProduct || "armorclaude" },
   };
-  if (config.dataDir) {
-    runtimeOptions.leaseStore = obsLeaseStore(
-      config.dataDir,
-      config.observabilityEndpoint,
-      config.apiKey
-    );
-  }
+  if (config.dataDir) Object.assign(runtimeOptions, dataDirOptions(config));
   if (testHooks?.leaseFetcher) runtimeOptions.leaseFetcher = testHooks.leaseFetcher;
   if (testHooks?.tracerProvider) {
     runtimeOptions.options = {
@@ -89,9 +102,63 @@ async function initEntry(sessionId, config) {
   });
   const entry = { runtime, session, dataDir: startTime && config.dataDir, lastEventAt: Date.now() };
   sessions.set(sessionId, entry);
+  if (shipping && config.dataDir) shipperFor(config);
   await safeObsAsync(() => session.refreshPolicy());
   await safeObsAsync(() => session.beginRoot({ input: connectedInput(config) }));
   return entry;
+}
+
+function shipperFor(config) {
+  const key = `${config.dataDir}\n${bindingOf(config)}`;
+  let shipper = shippers.get(key);
+  if (shipper) return shipper;
+  shipper = {
+    dataDir: config.dataDir,
+    binding: bindingOf(config),
+    runtime: new ArmorIQTelemetryRuntime(runtimeOptionsFor(config)),
+    running: null,
+    again: false,
+  };
+  shippers.set(key, shipper);
+  shipNow(shipper);
+  return shipper;
+}
+
+async function shipRounds(shipper) {
+  let round;
+  do {
+    shipper.again = false;
+    round = await safeObsAsync(() => shipSpool(shipper.dataDir, shipper.binding, shipper.runtime));
+  } while (round && !round.failed && (shipper.again || (round.more && !releasingAll)));
+}
+
+function shipNow(shipper) {
+  if (shipper.running) {
+    shipper.again = true;
+    return shipper.running;
+  }
+  shipper.running = shipRounds(shipper).finally(() => (shipper.running = null));
+  return shipper.running;
+}
+
+export function obsShipSpools(config) {
+  shipping = true;
+  if (isObsEnabled(config) && config.dataDir) shipperFor(config);
+}
+
+export function obsRetrySpools() {
+  return Promise.all([...shippers.values()].map(shipNow));
+}
+
+async function closeShippers() {
+  const all = [...shippers.values()];
+  shippers.clear();
+  await Promise.all(
+    all.map(async (shipper) => {
+      await shipper.running;
+      await safeObsAsync(() => shipper.runtime.close());
+    })
+  );
 }
 
 export function obsDrainExportsOnClose() {
@@ -105,6 +172,8 @@ function closeDeadlineMs(entry) {
 export function __resetObsForTests() {
   sessions.clear();
   queues.clear();
+  shippers.clear();
+  shipping = false;
   releasingAll = null;
   drainOnClose = false;
 }
@@ -238,6 +307,7 @@ function enqueue(sessionId, task) {
 async function releaseAll() {
   await Promise.all(queues.values());
   await Promise.all([...sessions].map(([sessionId, entry]) => releaseSession(sessionId, entry)));
+  await closeShippers();
 }
 
 export function obsFlushAll() {

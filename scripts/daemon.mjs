@@ -53,6 +53,8 @@ import {
   obsDrainExportsOnClose,
   obsFlushAll,
   obsReleaseIdle,
+  obsRetrySpools,
+  obsShipSpools,
 } from "./lib/observability.mjs";
 import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
 
@@ -381,6 +383,7 @@ const idleTimer = setInterval(() => {
     process.stderr.write(`[armorclaude-daemon] daemon.log cap failed: ${err?.message ?? err}\n`);
   }
   obsReleaseIdle(IDLE_TIMEOUT_MS);
+  obsRetrySpools();
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
     process.stderr.write(
       `[armorclaude-daemon] idle for ${IDLE_TIMEOUT_MS / 60_000} min, exiting pid=${process.pid} at=${new Date().toISOString()}\n`
@@ -504,6 +507,7 @@ server.listen(socketPath, () => {
   } catch {
     /* best-effort */
   }
+  obsShipSpools(config);
   process.stderr.write(
     `[armorclaude-daemon] listening on ${socketPath} pid=${process.pid} version=${DAEMON_VERSION} at=${new Date().toISOString()}\n`
   );

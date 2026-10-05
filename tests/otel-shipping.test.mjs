@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createConnection } from "node:net";
@@ -212,6 +212,27 @@ function storedSpans(exports) {
   return [...new Map(exports.map((s) => [`${s.traceId}/${s.spanId}`, s])).values()];
 }
 
+const rootsByEnd = (exports) =>
+  exports
+    .filter((s) => s.name === "armoriq.agent.run")
+    .sort((a, b) => (a.endTimeUnixNano < b.endTimeUnixNano ? -1 : 1));
+
+function spoolFiles(dataDir) {
+  const dir = path.join(dataDir, "obs-spool");
+  return existsSync(dir) ? readdirSync(dir) : [];
+}
+
+async function shipSpoolWithDaemon(env, dataDir) {
+  await rm(path.join(dataDir, "profiles"), { force: true });
+  const daemon = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => spoolFiles(dataDir).length === 0, 20_000, "the daemon to ship the spool");
+  } finally {
+    killIfRunning(daemon.child);
+    await daemon.exited;
+  }
+}
+
 test("a session run entirely on the fallback is one trace under one root that ends completed (#167, #178)", async () => {
   const backend = await startBackend();
   try {
@@ -222,10 +243,12 @@ test("a session run entirely on the fallback is one trace under one root that en
     const session_id = randomUUID();
     await runSession(env, session_id);
     assert.ok(!existsSync(path.join(dataDir, "daemon.sock")), "no daemon served these hooks");
+    assert.equal(backend.exportTimes.length, 0, "no hook process exported");
+    await shipSpoolWithDaemon(env, dataDir);
 
     const traces = new Set(backend.exports.map((s) => s.traceId));
     assert.equal(traces.size, 1, "one trace for the session");
-    const roots = backend.exports.filter((s) => s.name === "armoriq.agent.run");
+    const roots = rootsByEnd(backend.exports);
     const ends = roots.map((r) => r.endTimeUnixNano);
     assert.deepEqual(rootOutcomes(roots), [...Array(6).fill("unknown"), "completed"]);
     assert.equal(new Set(roots.map((r) => r.spanId)).size, 1, "every delivery is one root span");
@@ -367,9 +390,7 @@ function shape(exports) {
   return {
     traces: new Set(exports.map((s) => s.traceId)).size,
     spans: stored.map((s) => s.name).sort(),
-    rootOutcome: exports.filter((s) => s.name === "armoriq.agent.run").at(-1)?.attributes[
-      "gen_ai.task.outcome"
-    ],
+    rootOutcome: rootsByEnd(exports).at(-1)?.attributes["gen_ai.task.outcome"],
   };
 }
 
@@ -385,7 +406,9 @@ test("one session stores the same trace with the daemon up and with it down (#17
     await stopDaemon(daemonDir);
 
     await withoutDaemon(fallbackDir);
-    await runSession(pluginEnv(home, fallbackDir, fallbackBackend.url), randomUUID());
+    const fallbackEnv = pluginEnv(home, fallbackDir, fallbackBackend.url);
+    await runSession(fallbackEnv, randomUUID());
+    await shipSpoolWithDaemon(fallbackEnv, fallbackDir);
 
     const up = shape(daemonBackend.exports);
     assert.deepEqual([up.traces, up.spans.length, up.rootOutcome], [1, 5, "completed"]);
@@ -412,13 +435,11 @@ test("a process leaves the root alone once SessionEnd in another process ended i
       dataDir,
     };
     await observeHook("SessionStart", { session_id }, null, config);
-    const end = await runHook(pluginEnv(home, dataDir, backend.url), {
-      session_id,
-      hook_event_name: "SessionEnd",
-      reason: "other",
-    });
+    const env = pluginEnv(home, dataDir, backend.url);
+    const end = await runHook(env, { session_id, hook_event_name: "SessionEnd", reason: "other" });
     assert.equal(end.code, 0);
     await obsFlush(session_id, config);
+    await shipSpoolWithDaemon(env, dataDir);
     assert.deepEqual(rootOutcomes(backend.exports), ["completed"]);
   } finally {
     await backend.close();
@@ -443,6 +464,7 @@ test("hook processes ship a call's policy and tool spans under its tool_use_id (
       const { code } = await runHook(env, { ...tool, hook_event_name, tool_response: {} });
       assert.equal(code, 0, hook_event_name);
     }
+    await shipSpoolWithDaemon(env, dataDir);
     const linked = storedSpans(backend.exports)
       .filter((s) => s.attributes["armoriq.tool.call_id"] === tool.tool_use_id)
       .map((s) => s.name)
@@ -471,12 +493,13 @@ test("the next processes ship the root of a session whose daemon was SIGKILLed, 
     await withoutDaemon(dataDir);
 
     const tool = { session_id, tool_name: "Read", tool_input: { file_path: "a" } };
-    for (const hook_event_name of ["PreToolUse", "PostToolUse"]) {
+    for (const hook_event_name of ["PreToolUse", "PostToolUse", "SessionEnd"]) {
       const { code } = await runHook(env, { ...tool, hook_event_name, tool_response: {} });
       assert.equal(code, 0, hook_event_name);
     }
-    const roots = backend.exports.filter((s) => s.name === "armoriq.agent.run");
-    assert.deepEqual(rootOutcomes(backend.exports), ["unknown", "unknown"]);
+    await shipSpoolWithDaemon(env, dataDir);
+    const roots = rootsByEnd(backend.exports);
+    assert.deepEqual(rootOutcomes(roots), ["unknown", "unknown", "completed"]);
     for (const root of roots) {
       assert.equal(root.startTimeUnixNano / 1_000_000n, BigInt(Date.parse(marker.startTime)));
       assert.match(root.attributes["gen_ai.input.messages"], /ArmorClaude connected/);
@@ -484,9 +507,6 @@ test("the next processes ship the root of a session whose daemon was SIGKILLed, 
     for (const span of backend.exports.filter((s) => s.name !== "armoriq.agent.run")) {
       assert.equal(span.parentSpanId, roots[0].spanId, `${span.name} hangs off the root`);
     }
-
-    await runHook(env, { session_id, hook_event_name: "SessionEnd", reason: "other" });
-    assert.deepEqual(rootOutcomes(backend.exports), ["unknown", "unknown", "completed"]);
   } finally {
     killIfRunning(daemon.child);
     await backend.close();
@@ -533,21 +553,35 @@ test("the daemon's SessionEnd export lands although it takes longer than 1.5 s (
   }
 });
 
-test("an in-process SessionEnd gives up on a hung export within the SDK's 1.5 s bound", async () => {
-  const backend = await startBackend({ holdExports: true });
+test("fallback hooks spool their spans without waiting on a 2.5 s export, and a later daemon ships them (#193)", async () => {
+  const backend = await startBackend({ exportDelayMs: 2_500 });
   try {
     const home = await tempDir("aq-home-");
-    const dataDir = await tempDir("aq-hung-");
+    const dataDir = await tempDir("aq-spool-");
     await withoutDaemon(dataDir);
-    const started = Date.now();
-    const end = await runHook(pluginEnv(home, dataDir, backend.url), {
-      session_id: randomUUID(),
-      hook_event_name: "SessionEnd",
-      reason: "other",
-    });
-    assert.equal(end.code, 0);
-    assert.ok(backend.exportTimes.length > 0, "the hook started its export");
-    assert.ok(Date.now() - started < 3_000, `the hook took ${Date.now() - started} ms`);
+    const env = pluginEnv(home, dataDir, backend.url);
+    const session_id = randomUUID();
+    const tool = { session_id, tool_name: "Bash", tool_input: { command: "ls" } };
+    for (const hook_event_name of ["PreToolUse", "PostToolUse", "SessionEnd"]) {
+      const started = Date.now();
+      const { code } = await runHook(env, { ...tool, hook_event_name, tool_response: {} });
+      assert.equal(code, 0, hook_event_name);
+      assert.ok(Date.now() - started < 1_000, `${hook_event_name} took ${Date.now() - started} ms`);
+    }
+    assert.equal(backend.exportTimes.length, 0, "no hook process exported");
+    const files = spoolFiles(dataDir);
+    assert.ok(files.length > 0, "the hooks spooled their spans");
+    for (const file of files) {
+      assert.equal(statSync(path.join(dataDir, "obs-spool", file)).mode & 0o777, 0o600);
+    }
+    await shipSpoolWithDaemon(env, dataDir);
+    assert.deepEqual(
+      storedSpans(backend.delivered)
+        .map((s) => s.name)
+        .sort(),
+      ["armoriq.agent.run", "armoriq.policy.evaluate", "armoriq.tool"]
+    );
+    assert.equal(rootOutcomes(rootsByEnd(backend.delivered)).at(-1), "completed");
   } finally {
     await backend.close();
   }
@@ -587,10 +621,12 @@ test("fallback hooks record a whole session on a 700 ms lease with one lease req
     const home = await tempDir("aq-home-");
     const dataDir = await tempDir("aq-lease-");
     await withoutDaemon(dataDir);
-    await runSession(pluginEnv(home, dataDir, backend.url), randomUUID());
+    const env = pluginEnv(home, dataDir, backend.url);
+    await runSession(env, randomUUID());
     assert.equal(backend.leaseRequests.length, 1, "later hook processes read the stored lease");
+    await shipSpoolWithDaemon(env, dataDir);
     assert.equal(storedSpans(backend.exports).length, 5, "1 root, 2 policy and 2 tool spans");
-    assert.equal(rootOutcomes(backend.exports).at(-1), "completed");
+    assert.equal(rootOutcomes(rootsByEnd(backend.exports)).at(-1), "completed");
   } finally {
     await backend.close();
   }
