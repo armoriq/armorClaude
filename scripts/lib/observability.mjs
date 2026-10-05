@@ -140,7 +140,8 @@ function retryLater(shipper) {
 }
 
 const nothingShipped = (round) => !round || (round.failed && round.settled === 0);
-const moreDue = (shipper, round) => shipper.again || round.more || round.failed;
+const moreDue = (shipper, round) =>
+  shipper.again || (!releasingAll && (round.more || round.failed));
 
 async function shipRounds(shipper) {
   for (;;) {
@@ -148,7 +149,7 @@ async function shipRounds(shipper) {
     const round = await shipRound(shipper);
     if (nothingShipped(round)) return retryLater(shipper);
     shipper.failures = 0;
-    if (releasingAll || !moreDue(shipper, round)) return;
+    if (!moreDue(shipper, round)) return;
   }
 }
 
