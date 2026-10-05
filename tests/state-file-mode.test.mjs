@@ -57,6 +57,26 @@ async function openFile(file, text) {
   await chmod(file, 0o644);
 }
 
+function isRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function daemonPid(dataDir) {
+  return Number(await readFile(path.join(dataDir, "daemon.pid"), "utf8").catch(() => ""));
+}
+
+async function stopProcess(pid) {
+  if (!pid || !isRunning(pid)) return;
+  process.kill(pid, "SIGTERM");
+  for (let i = 0; i < 100 && isRunning(pid); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(!isRunning(pid), `process ${pid} still running`);
+}
+
 test("writeJson creates a missing data dir 0700 and the file 0600", async () => {
   const dataDir = path.join(await tmpRoot(), "fresh", "armorclaude");
   await writeJson(path.join(dataDir, "policy.json"), { rules: [] });
@@ -173,14 +193,17 @@ test("the hook router makes an existing data dir 0700", async () => {
       HOME: process.env.HOME,
       NODE_OPTIONS: process.env.NODE_OPTIONS ?? "",
       ARMORCLAUDE_DATA_DIR: dataDir,
-      ARMORCLAUDE_DAEMON: "false",
       ARMORIQ_ENV: "local",
       ARMORIQ_API_KEY: "",
     },
   });
-  child.stdin.end(JSON.stringify({ hook_event_name: "SessionEnd", session_id: "mode-router" }));
-  await new Promise((resolve) => child.once("exit", resolve));
-  assert.equal(await modeOf(dataDir), 0o700);
+  try {
+    child.stdin.end(JSON.stringify({ hook_event_name: "SessionEnd", session_id: "mode-router" }));
+    await new Promise((resolve) => child.once("exit", resolve));
+    assert.equal(await modeOf(dataDir), 0o700);
+  } finally {
+    await stopProcess(await daemonPid(dataDir));
+  }
 });
 
 test("the sync writers create 0600 files and tighten 0644 ones", async () => {
@@ -253,6 +276,6 @@ test("the daemon makes its data dir 0700 and its PID file 0600", async () => {
     assert.equal(await modeOf(dataDir), 0o700);
     assert.equal(await modeOf(path.join(dataDir, "profiles")), 0o700);
   } finally {
-    child.kill("SIGTERM");
+    await stopProcess(child.pid);
   }
 });
