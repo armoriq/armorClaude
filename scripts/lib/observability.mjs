@@ -3,8 +3,8 @@
 import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
-import { obsBindingKey, obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
-import { shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
+import { obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
+import { shipRetryDelayMs, shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
 import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
@@ -56,15 +56,8 @@ async function rootStartTime(sessionId, config) {
   return config.dataDir ? claimRootStart(config.dataDir, sessionId) : null;
 }
 
-function bindingOf(config) {
-  return obsBindingKey(config.observabilityEndpoint, config.apiKey);
-}
-
 function spoolSink(config) {
-  const binding = bindingOf(config);
-  return {
-    write: (batch) => safeObsAsync(() => writeSpoolBatch(config.dataDir, binding, batch)),
-  };
+  return { write: (batch) => safeObsAsync(() => writeSpoolBatch(config.dataDir, batch)) };
 }
 
 function dataDirOptions(config) {
@@ -112,27 +105,51 @@ async function initEntry(sessionId, config) {
 }
 
 function shipperFor(config) {
-  const key = `${config.dataDir}\n${bindingOf(config)}`;
+  const key = `${config.dataDir}\n${config.observabilityEndpoint}\n${config.apiKey}`;
   let shipper = shippers.get(key);
   if (shipper) return shipper;
+  const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
   shipper = {
     dataDir: config.dataDir,
-    binding: bindingOf(config),
-    runtime: new ArmorIQTelemetryRuntime(runtimeOptionsFor(config)),
+    binding: runtime.spoolBinding,
+    runtime,
+    skip: new Set(),
     running: null,
     again: false,
+    failures: 0,
+    retryAt: 0,
+    timer: null,
   };
   shippers.set(key, shipper);
   shipNow(shipper);
   return shipper;
 }
 
+function shipRound(shipper) {
+  const options = { skip: shipper.skip, ...(shipper.failures > 0 ? { limit: 1 } : {}) };
+  return safeObsAsync(() => shipSpool(shipper.dataDir, shipper.binding, shipper.runtime, options));
+}
+
+function retryLater(shipper) {
+  shipper.failures += 1;
+  const delay = shipRetryDelayMs(shipper.failures);
+  shipper.retryAt = Date.now() + delay;
+  clearTimeout(shipper.timer);
+  shipper.timer = setTimeout(() => shipNow(shipper), delay);
+  shipper.timer.unref();
+}
+
+const nothingShipped = (round) => !round || (round.failed && round.settled === 0);
+const moreDue = (shipper, round) => shipper.again || round.more || round.failed;
+
 async function shipRounds(shipper) {
-  let round;
-  do {
+  for (;;) {
     shipper.again = false;
-    round = await safeObsAsync(() => shipSpool(shipper.dataDir, shipper.binding, shipper.runtime));
-  } while (round && !round.failed && (shipper.again || (round.more && !releasingAll)));
+    const round = await shipRound(shipper);
+    if (nothingShipped(round)) return retryLater(shipper);
+    shipper.failures = 0;
+    if (releasingAll || !moreDue(shipper, round)) return;
+  }
 }
 
 function shipNow(shipper) {
@@ -149,8 +166,10 @@ export function obsShipSpools(config) {
   if (isObsEnabled(config) && config.dataDir) shipperFor(config);
 }
 
+const shipDue = (shipper) => (Date.now() >= shipper.retryAt ? shipNow(shipper) : shipper.running);
+
 export function obsRetrySpools() {
-  return Promise.all([...shippers.values()].map(shipNow));
+  return Promise.all([...shippers.values()].map(shipDue));
 }
 
 async function closeShippers() {
@@ -158,6 +177,7 @@ async function closeShippers() {
   shippers.clear();
   await Promise.all(
     all.map(async (shipper) => {
+      clearTimeout(shipper.timer);
       await shipper.running;
       await safeObsAsync(() => shipper.runtime.close());
     })

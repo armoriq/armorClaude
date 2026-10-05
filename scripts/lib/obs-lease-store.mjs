@@ -5,12 +5,9 @@ import { writePrivateFile } from "./fs-store.mjs";
 
 export const LEASE_MISS_TTL_MS = 30_000;
 
-export function obsBindingKey(endpoint, apiKey) {
-  return createHash("sha256").update(`${endpoint}\n${apiKey}`).digest("hex").slice(0, 32);
-}
-
 function leaseFile(dataDir, endpoint, apiKey, extension) {
-  return path.join(dataDir, `obs-lease-${obsBindingKey(endpoint, apiKey)}.${extension}`);
+  const key = createHash("sha256").update(`${endpoint}\n${apiKey}`).digest("hex").slice(0, 32);
+  return path.join(dataDir, `obs-lease-${key}.${extension}`);
 }
 
 export function obsLeaseStore(dataDir, endpoint, apiKey) {
