@@ -552,6 +552,14 @@ function leaseFiles(dataDir) {
   return readdirSync(dataDir).filter((name) => /^obs-lease-[0-9a-f]{32}\.json$/.test(name));
 }
 
+async function storedLeases(dataDir, count) {
+  const until = Date.now() + 2_000;
+  while (leaseFiles(dataDir).length < count && Date.now() < until) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return leaseFiles(dataDir);
+}
+
 test("a later process reuses the stored lease, and another API key fetches its own (#191)", async () => {
   installHooks();
   const counter = { fetches: 0 };
@@ -559,7 +567,7 @@ test("a later process reuses the stored lease, and another API key fetches its o
   const dataDir = mkdtempSync(path.join(tmpdir(), "aq-lease-"));
   const config = { ...testConfig(), dataDir };
   await observeHook("SessionStart", { session_id: "sess-lease-a" }, null, config);
-  const [file] = leaseFiles(dataDir);
+  const [file] = await storedLeases(dataDir, 1);
   assert.ok(file, "the lease was stored");
   assert.equal(statSync(path.join(dataDir, file)).mode & 0o777, 0o600);
   await obsFlushAll();
@@ -572,7 +580,7 @@ test("a later process reuses the stored lease, and another API key fetches its o
   const other = { ...config, apiKey: "ak_test_otelhooks111111111111111111" };
   await observeHook("SessionStart", { session_id: "sess-lease-c" }, null, other);
   assert.equal(counter.fetches, 2);
-  assert.equal(leaseFiles(dataDir).length, 2);
+  assert.equal((await storedLeases(dataDir, 2)).length, 2);
   await obsFlushAll();
   await provider.shutdown();
 });
