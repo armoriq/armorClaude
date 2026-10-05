@@ -42,6 +42,7 @@ test("__resetObsForTests exists and is callable", () => {
 import armoriqSdk from "@armoriq/sdk-dev";
 import {
   observeHook,
+  obsDrainExportsOnClose,
   obsFlush,
   obsFlushAll,
   obsReleaseIdle,
@@ -599,5 +600,62 @@ test("an unreadable or unwritable lease store costs only a lease request (#191)"
   await obsFlushAll();
   assert.equal(counter.fetches, 1);
   assert.equal(spansByName("armoriq.agent.run").length, 1);
+  await provider.shutdown();
+});
+
+function hungLease() {
+  return (signal) =>
+    new Promise((_, reject) =>
+      signal?.addEventListener("abort", () => reject(new Error("aborted")))
+    );
+}
+
+async function timedHookProcess(sessionId, config) {
+  __resetObsForTests();
+  const started = Date.now();
+  await observeHook("SessionStart", { session_id: sessionId }, null, config);
+  await obsFlush(sessionId, config);
+  return Date.now() - started;
+}
+
+const missFiles = (dataDir) => readdirSync(dataDir).filter((name) => name.endsWith(".miss"));
+
+test("a hook process waits at most 1.5 s for a hung lease, and the next ones skip the wait for 30 s (#191)", async () => {
+  installHooks();
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: hungLease() });
+  const dataDir = mkdtempSync(path.join(tmpdir(), "aq-lease-hung-"));
+  const config = { ...testConfig(), dataDir };
+  const first = await timedHookProcess("sess-hung-1", config);
+  assert.ok(first >= 1_400 && first < 3_000, `the first hook waited ${first} ms`);
+  const second = await timedHookProcess("sess-hung-2", config);
+  assert.ok(second < 500, `the second hook waited ${second} ms`);
+  const [miss] = missFiles(dataDir);
+  writeFileSync(path.join(dataDir, miss), String(Date.now() - 31_000));
+  const third = await timedHookProcess("sess-hung-3", config);
+  assert.ok(third >= 1_400, `a hook after the 30 s window waited ${third} ms`);
+  await provider.shutdown();
+});
+
+test("the daemon still waits out a slow lease, and the lease it stores ends the hooks' miss window (#191)", async () => {
+  installHooks();
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: hungLease() });
+  const dataDir = mkdtempSync(path.join(tmpdir(), "aq-lease-miss-"));
+  const config = { ...testConfig(), dataDir };
+  await timedHookProcess("sess-miss", config);
+  __resetObsForTests();
+  obsDrainExportsOnClose();
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: slowLease(2_000) });
+  await observeHook("SessionStart", { session_id: "sess-daemon" }, null, config);
+  await obsFlushAll();
+  assert.equal(spansByName("armoriq.agent.run").length, 1, "the daemon waited 2 s for the lease");
+  const until = Date.now() + 2_000;
+  while (missFiles(dataDir).length > 0 && Date.now() < until) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.deepEqual(missFiles(dataDir), []);
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: hungLease() });
+  const took = await timedHookProcess("sess-after", config);
+  assert.ok(took < 500, `the hook read the stored lease in ${took} ms`);
+  assert.equal(spansByName("armoriq.agent.run").length, 2);
   await provider.shutdown();
 });

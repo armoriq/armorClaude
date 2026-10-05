@@ -3,13 +3,14 @@
 import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
-import { obsBindingKey, obsLeaseStore } from "./obs-lease-store.mjs";
+import { obsBindingKey, obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
 import { shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
 import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
 const EXPORT_DRAIN_MARGIN_MS = 1_000;
+const HOOK_LEASE_WAIT_MS = 1_500;
 
 const sessions = new Map();
 const queues = new Map();
@@ -103,7 +104,9 @@ async function initEntry(sessionId, config) {
   const entry = { runtime, session, dataDir: startTime && config.dataDir, lastEventAt: Date.now() };
   sessions.set(sessionId, entry);
   if (shipping && config.dataDir) shipperFor(config);
-  await safeObsAsync(() => session.refreshPolicy());
+  await (drainOnClose
+    ? safeObsAsync(() => session.refreshPolicy())
+    : awaitHookLease(entry, config));
   await safeObsAsync(() => session.beginRoot({ input: connectedInput(config) }));
   return entry;
 }
@@ -159,6 +162,25 @@ async function closeShippers() {
       await safeObsAsync(() => shipper.runtime.close());
     })
   );
+}
+
+function within(promise, ms) {
+  let timer;
+  const expired = new Promise((resolve) => (timer = setTimeout(resolve, ms)));
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
+async function awaitHookLease(entry, config) {
+  const miss = config.dataDir
+    ? obsLeaseMiss(config.dataDir, config.observabilityEndpoint, config.apiKey)
+    : null;
+  if (await safeObsAsync(() => miss?.recent())) return;
+  await within(
+    safeObsAsync(() => entry.session.refreshPolicy()),
+    HOOK_LEASE_WAIT_MS
+  );
+  const leased = entry.runtime.currentCeilingSnapshot().authoritative;
+  if (!leased) await safeObsAsync(() => miss?.record());
 }
 
 export function obsDrainExportsOnClose() {
