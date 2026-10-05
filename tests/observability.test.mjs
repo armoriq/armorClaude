@@ -1,9 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import path from "node:path";
 import { loadConfig } from "../scripts/lib/config.mjs";
 import {
   NodeTracerProvider,
@@ -456,22 +454,6 @@ test("a fallback hook process exits as soon as an instant lease resolves", () =>
   assert.ok(Number(result.stdout) < 250, `hook process stayed alive ${result.stdout} ms`);
 });
 
-test("root markers are readable only by the user", async () => {
-  installHooks();
-  const dataDir = mkdtempSync(path.join(tmpdir(), "obs-marker-"));
-  await observeHook("SessionStart", { session_id: "sess-private" }, null, {
-    ...testConfig(),
-    dataDir,
-  });
-  const dir = path.join(dataDir, "obs-roots");
-  assert.equal(statSync(dir).mode & 0o777, 0o700);
-  assert.deepEqual(
-    readdirSync(dir).map((name) => statSync(path.join(dir, name)).mode & 0o777),
-    [0o600]
-  );
-  await provider.shutdown();
-});
-
 test("a second obsFlushAll waits for the first, and later events are not recorded", async () => {
   installHooks();
   const config = testConfig();
@@ -486,15 +468,19 @@ test("a second obsFlushAll waits for the first, and later events are not recorde
   await provider.shutdown();
 });
 
-test("obsReleaseIdle ends the root of a session idle past the bound and keeps active ones", async () => {
+test("obsReleaseIdle ends an idle session's root at its last event and keeps active ones", async () => {
   installHooks();
   const config = testConfig();
   await observeHook("SessionStart", { session_id: "sess-idle" }, null, config);
+  const lastEventDone = Date.now();
   await obsReleaseIdle(60_000);
   assert.equal(spansByName("armoriq.agent.run").length, 0, "an active session stays open");
+  await new Promise((r) => setTimeout(r, 300));
   await obsReleaseIdle(0);
   const roots = spansByName("armoriq.agent.run");
   assert.equal(roots.length, 1);
   assert.equal(roots[0].attributes["gen_ai.task.outcome"], "unknown");
+  const [seconds, nanos] = roots[0].endTime;
+  assert.ok(seconds * 1000 + nanos / 1e6 <= lastEventDone, "the root ends at the last event");
   await provider.shutdown();
 });

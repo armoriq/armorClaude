@@ -1,18 +1,9 @@
-/**
- * One trace per Claude Code session, whichever processes record it: the trace
- * id and root span id derive from the session id, and the root's start time
- * comes from a marker file that the first process to record the session
- * creates. The backend merges every delivery of the root, which share a span id.
- */
+// Every process that records a session ships its own copy of the session's
+// root span; the backend merges copies that share a span id.
 import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
-import {
-  claimRootStart,
-  markRootEnded,
-  releaseRootStart,
-  takeRootEnd,
-} from "./obs-root-marker.mjs";
+import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
@@ -66,8 +57,7 @@ function sessionRootIds(sessionId) {
 }
 
 async function rootStartTime(sessionId, config) {
-  if (!config.dataDir) return new Date();
-  return (await safeObsAsync(() => claimRootStart(config.dataDir, sessionId))) ?? new Date();
+  return config.dataDir ? claimRootStart(config.dataDir, sessionId) : null;
 }
 
 async function initEntry(sessionId, config) {
@@ -94,9 +84,10 @@ async function initEntry(sessionId, config) {
     userId: config.userId || null,
     root: { ...sessionRootIds(sessionId), startTime },
   });
-  const entry = { runtime, session, dataDir: config.dataDir, lastEventAt: Date.now() };
+  const entry = { runtime, session, dataDir: startTime && config.dataDir, lastEventAt: Date.now() };
   sessions.set(sessionId, entry);
   await settledWithin(500, session.refreshPolicy());
+  await safeObsAsync(() => session.beginRoot({ input: connectedInput(config) }));
   return entry;
 }
 
@@ -119,14 +110,6 @@ function classifyDecision(output) {
 
 function operationCategory(toolName) {
   return typeof toolName === "string" && toolName.startsWith("mcp__") ? "mcp" : "tool";
-}
-
-async function obsStartPlan(sessionId, config, prompt) {
-  const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    const { prompt: sanitizedInput } = sanitizeParams({ prompt }, config.sanitize);
-    await entry.session.beginRoot({ input: sanitizedInput ?? null });
-  });
 }
 
 async function obsCheck(sessionId, config, toolName, toolInput, output) {
@@ -195,13 +178,6 @@ function connectedInput(config) {
   return `ArmorClaude connected (${config.observabilityProduct || "armorclaude"})`;
 }
 
-async function obsConnected(sessionId, config) {
-  const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    await entry.session.beginRoot({ input: connectedInput(config) });
-  });
-}
-
 async function obsEndTurn(sessionId) {
   const entry = sessions.get(sessionId);
   if (!entry) return;
@@ -211,26 +187,18 @@ async function obsEndTurn(sessionId) {
 async function obsEndSession(sessionId, config) {
   const entry = await getOrInitEntry(sessionId, config);
   sessions.delete(sessionId);
-  await safeObsAsync(async () => {
-    await entry.session.beginRoot({ input: connectedInput(config) });
-    await entry.session.close("ok");
-  });
+  await safeObsAsync(() => entry.session.close("ok"));
   if (config.dataDir) await safeObsAsync(() => releaseRootStart(config.dataDir, sessionId));
-}
-
-async function mayEndRoot(sessionId, entry) {
-  if (!entry.dataDir) return true;
-  return (await safeObsAsync(() => takeRootEnd(entry.dataDir, sessionId))) ?? true;
 }
 
 async function releaseSession(sessionId, entry) {
   sessions.delete(sessionId);
   await safeObsAsync(async () => {
-    if (!(await mayEndRoot(sessionId, entry))) return entry.runtime.close();
+    const ended = entry.dataDir && (await rootStartReleased(entry.dataDir, sessionId));
+    if (ended) return entry.runtime.close();
     // unknown, not process_exit: the session may go on in another process, and
     // only SessionEnd knows how it ended.
-    await entry.session.close("ok", "unknown");
-    if (entry.dataDir) await markRootEnded(entry.dataDir, sessionId);
+    await entry.session.close("ok", "unknown", {}, new Date(entry.lastEventAt));
   });
 }
 
@@ -279,14 +247,9 @@ async function recordEvent(sessionId, event, input, output, config) {
   await safeObsAsync(async () => {
     switch (event) {
       case "SessionStart":
-        // "ArmorClaude connected to Claude" — one connect record per session.
-        await obsConnected(sessionId, config);
+      case "UserPromptSubmit":
+        await getOrInitEntry(sessionId, config);
         break;
-      case "UserPromptSubmit": {
-        const prompt = typeof input.prompt === "string" ? input.prompt : "";
-        await obsStartPlan(sessionId, config, prompt);
-        break;
-      }
       case "UserPromptExpansion": {
         const slash = expandedSlashCommand(input);
         if (slash) await obsSlashCommand(sessionId, config, slash);

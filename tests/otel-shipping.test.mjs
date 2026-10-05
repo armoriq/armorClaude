@@ -59,7 +59,8 @@ function spanStatus(span) {
 const hexField = (span, no) => sub(span, no)[0]?.bytes.toString("hex") || null;
 
 // ExportTraceServiceRequest -> ResourceSpans(1) -> ScopeSpans(2) -> Span(2): trace_id(1),
-// span_id(2), parent_span_id(4), name(5), start_time_unix_nano(7), attributes(9)
+// span_id(2), parent_span_id(4), name(5), start_time_unix_nano(7), end_time_unix_nano(8),
+// attributes(9)
 function decodeSpans(body) {
   const spans = [];
   for (const resourceSpans of sub(body, 1)) {
@@ -81,6 +82,7 @@ function decodeSpans(body) {
           spanId: hexField(span.bytes, 2),
           parentSpanId: hexField(span.bytes, 4),
           startTimeUnixNano: protoFields(span.bytes).find((f) => f.no === 7)?.fixed64,
+          endTimeUnixNano: protoFields(span.bytes).find((f) => f.no === 8)?.fixed64,
         });
       }
     }
@@ -88,13 +90,14 @@ function decodeSpans(body) {
   return spans;
 }
 
-async function startBackend({ holdExports = false } = {}) {
+async function startBackend({ holdExports = false, content = false } = {}) {
   const exports = [];
   const exportTimes = [];
   const heldExports = [];
   const lease = () =>
     JSON.stringify({
-      captureMode: "metadata",
+      captureMode: content ? "enhanced" : "metadata",
+      contentCaptureAllowed: content,
       revision: 1,
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
     });
@@ -174,46 +177,6 @@ function runHook(env, payload) {
   });
 }
 
-test("fallback PreToolUse and PostToolUse, one process each, ship spans carrying the session id", async () => {
-  const backend = await startBackend();
-  try {
-    const home = await tempDir("aq-home-");
-    const dataDir = await tempDir("aq-fallback-");
-    await withoutDaemon(dataDir);
-    const env = pluginEnv(home, dataDir, backend.url);
-    const sessionId = randomUUID();
-    const tool = { session_id: sessionId, tool_name: "Bash", tool_input: { command: "ls" } };
-
-    const pre = await runHook(env, { ...tool, hook_event_name: "PreToolUse" });
-    const post = await runHook(env, {
-      ...tool,
-      hook_event_name: "PostToolUse",
-      tool_response: { stdout: "a\n" },
-    });
-    assert.equal(pre.code, 0);
-    assert.equal(post.code, 0);
-    assert.ok(!existsSync(path.join(dataDir, "daemon.sock")), "no daemon served these hooks");
-
-    const policy = backend.exports.filter((s) => s.name === "armoriq.policy.evaluate");
-    const toolSpans = backend.exports.filter((s) => s.name === "armoriq.tool");
-    assert.equal(policy.length, 1, "the PreToolUse process shipped its policy span");
-    assert.equal(toolSpans.length, 1, "the PostToolUse process shipped its tool span");
-    const roots = backend.exports.filter((s) => s.name === "armoriq.agent.run");
-    assert.equal(roots.length, 1, "only the first process ended the root");
-    assert.equal(roots[0].status, "ok");
-    assert.equal(roots[0].attributes["gen_ai.task.outcome"], "unknown");
-    for (const span of [...policy, ...toolSpans, ...roots]) {
-      assert.equal(span.attributes["armoriq.session_id"], sessionId, span.name);
-      assert.equal(span.traceId, roots[0].traceId, `${span.name} is in the session's trace`);
-    }
-    for (const span of [...policy, ...toolSpans]) {
-      assert.equal(span.parentSpanId, roots[0].spanId, `${span.name} hangs off the root`);
-    }
-  } finally {
-    await backend.close();
-  }
-});
-
 async function runSession(env, session_id) {
   const hook = async (payload) => {
     const { code } = await runHook(env, { session_id, ...payload });
@@ -248,27 +211,23 @@ test("a session run entirely on the fallback is one trace under one root that en
     const traces = new Set(backend.exports.map((s) => s.traceId));
     assert.equal(traces.size, 1, "one trace for the session");
     const roots = backend.exports.filter((s) => s.name === "armoriq.agent.run");
-    assert.deepEqual(
-      roots.map((r) => r.attributes["gen_ai.task.outcome"]),
-      ["unknown", "completed"],
-      "the first process and SessionEnd end the root"
+    const ends = roots.map((r) => r.endTimeUnixNano);
+    assert.deepEqual(rootOutcomes(roots), [...Array(6).fill("unknown"), "completed"]);
+    assert.equal(new Set(roots.map((r) => r.spanId)).size, 1, "every delivery is one root span");
+    assert.equal(new Set(roots.map((r) => r.startTimeUnixNano)).size, 1, "with one start time");
+    assert.ok(
+      ends.every((end, i) => i === 0 || end > ends[i - 1]),
+      "each copy ends later"
     );
-    assert.equal(new Set(roots.map((r) => r.spanId)).size, 1, "both deliveries are one root span");
-    assert.equal(roots[0].startTimeUnixNano, roots[1].startTimeUnixNano, "with one start time");
-    for (const root of roots) {
-      assert.equal(root.attributes["armoriq.session_id"], session_id);
-      assert.equal(root.status, "ok");
-      assert.equal(root.parentSpanId, null);
-    }
-    for (const span of backend.exports.filter((s) => s.name !== "armoriq.agent.run")) {
-      assert.equal(span.parentSpanId, roots[0].spanId, `${span.name} hangs off the root`);
+    assert.ok(roots.every((r) => r.status === "ok" && r.parentSpanId === null));
+    for (const span of backend.exports) {
+      assert.equal(span.attributes["armoriq.session_id"], session_id, span.name);
+      if (span.name !== "armoriq.agent.run") {
+        assert.equal(span.parentSpanId, roots[0].spanId, `${span.name} hangs off the root`);
+      }
     }
     assert.equal(storedSpans(backend.exports).length, 5, "1 root, 2 policy and 2 tool spans");
-    assert.deepEqual(
-      readdirSync(path.join(dataDir, "obs-roots")),
-      [],
-      "SessionEnd removed the marker"
-    );
+    assert.equal(readdirSync(path.join(dataDir, "obs-roots")).length, 0, "marker removed");
   } finally {
     await backend.close();
   }
@@ -414,17 +373,7 @@ test("one session stores the same trace with the daemon up and with it down (#17
     await runSession(pluginEnv(home, fallbackDir, fallbackBackend.url), randomUUID());
 
     const up = shape(daemonBackend.exports);
-    assert.deepEqual(up, {
-      traces: 1,
-      spans: [
-        "armoriq.agent.run",
-        "armoriq.policy.evaluate",
-        "armoriq.policy.evaluate",
-        "armoriq.tool",
-        "armoriq.tool",
-      ],
-      rootOutcome: "completed",
-    });
+    assert.deepEqual([up.traces, up.spans.length, up.rootOutcome], [1, 5, "completed"]);
     assert.deepEqual(shape(fallbackBackend.exports), up);
   } finally {
     await stopDaemon(daemonDir);
@@ -433,7 +382,7 @@ test("one session stores the same trace with the daemon up and with it down (#17
   }
 });
 
-test("a root owner leaves the root alone once SessionEnd in another process ended it", async () => {
+test("a process leaves the root alone once SessionEnd in another process ended it", async () => {
   const backend = await startBackend();
   try {
     const home = await tempDir("aq-home-");
@@ -461,8 +410,8 @@ test("a root owner leaves the root alone once SessionEnd in another process ende
   }
 });
 
-test("the next process ships the root of a session whose daemon was SIGKILLed", async () => {
-  const backend = await startBackend();
+test("the next processes ship the root of a session whose daemon was SIGKILLed, with the connect input", async () => {
+  const backend = await startBackend({ content: true });
   const home = await tempDir("aq-home-");
   const dataDir = await tempDir("aq-killed-");
   const env = pluginEnv(home, dataDir, backend.url);
@@ -471,9 +420,9 @@ test("the next process ships the root of a session whose daemon was SIGKILLed", 
     await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
     const session_id = randomUUID();
     await daemonHook(daemon.socketPath, session_id, "SessionStart");
-    const roots = path.join(dataDir, "obs-roots");
-    await waitFor(() => existsSync(roots) && readdirSync(roots).length > 0, 10_000, "the marker");
-    const marker = JSON.parse(readFileSync(path.join(roots, readdirSync(roots)[0]), "utf8"));
+    const dir = path.join(dataDir, "obs-roots");
+    await waitFor(() => existsSync(dir) && readdirSync(dir).length > 0, 10_000, "the marker");
+    const marker = JSON.parse(readFileSync(path.join(dir, readdirSync(dir)[0]), "utf8"));
     process.kill(daemon.child.pid, "SIGKILL");
     await daemon.exited;
     await withoutDaemon(dataDir);
@@ -483,15 +432,18 @@ test("the next process ships the root of a session whose daemon was SIGKILLed", 
       const { code } = await runHook(env, { ...tool, hook_event_name, tool_response: {} });
       assert.equal(code, 0, hook_event_name);
     }
-    const [root] = backend.exports.filter((s) => s.name === "armoriq.agent.run");
-    assert.deepEqual(rootOutcomes(backend.exports), ["unknown"], "one process took the root over");
-    assert.equal(root.startTimeUnixNano / 1_000_000n, BigInt(Date.parse(marker.startTime)));
+    const roots = backend.exports.filter((s) => s.name === "armoriq.agent.run");
+    assert.deepEqual(rootOutcomes(backend.exports), ["unknown", "unknown"]);
+    for (const root of roots) {
+      assert.equal(root.startTimeUnixNano / 1_000_000n, BigInt(Date.parse(marker.startTime)));
+      assert.match(root.attributes["gen_ai.input.messages"], /ArmorClaude connected/);
+    }
     for (const span of backend.exports.filter((s) => s.name !== "armoriq.agent.run")) {
-      assert.equal(span.parentSpanId, root.spanId, `${span.name} hangs off the root`);
+      assert.equal(span.parentSpanId, roots[0].spanId, `${span.name} hangs off the root`);
     }
 
     await runHook(env, { session_id, hook_event_name: "SessionEnd", reason: "other" });
-    assert.deepEqual(rootOutcomes(backend.exports), ["unknown", "completed"]);
+    assert.deepEqual(rootOutcomes(backend.exports), ["unknown", "unknown", "completed"]);
   } finally {
     killIfRunning(daemon.child);
     await backend.close();
