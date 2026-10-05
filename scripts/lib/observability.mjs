@@ -4,12 +4,11 @@ import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 import { obsBindingKey, obsLeaseStore } from "./obs-lease-store.mjs";
+import { adoptOrphanedEvents, forgetEvent, journalEvent } from "./obs-journal.mjs";
 import { shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
 import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
-
-const EXPORT_DRAIN_MARGIN_MS = 1_000;
 
 const sessions = new Map();
 const queues = new Map();
@@ -17,7 +16,6 @@ const shippers = new Map();
 let shipping = false;
 let testHooks = null;
 let releasingAll = null;
-let drainOnClose = false;
 
 async function safeObsAsync(fn) {
   try {
@@ -62,13 +60,18 @@ function bindingOf(config) {
 function spoolSink(config) {
   const binding = bindingOf(config);
   return {
-    write: (batch) => safeObsAsync(() => writeSpoolBatch(config.dataDir, binding, batch)),
+    async write(batch) {
+      await safeObsAsync(() => writeSpoolBatch(config.dataDir, binding, batch));
+      if (shipping) shipUnlessFailing(shipperFor(config));
+    },
   };
 }
 
 function dataDirOptions(config) {
-  const leaseStore = obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey);
-  return drainOnClose ? { leaseStore } : { leaseStore, spanSink: spoolSink(config) };
+  return {
+    leaseStore: obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey),
+    spanSink: spoolSink(config),
+  };
 }
 
 function runtimeOptionsFor(config) {
@@ -118,6 +121,7 @@ function shipperFor(config) {
     runtime: new ArmorIQTelemetryRuntime(runtimeOptionsFor(config)),
     running: null,
     again: false,
+    failing: false,
   };
   shippers.set(key, shipper);
   shipNow(shipper);
@@ -130,6 +134,11 @@ async function shipRounds(shipper) {
     shipper.again = false;
     round = await safeObsAsync(() => shipSpool(shipper.dataDir, shipper.binding, shipper.runtime));
   } while (round && !round.failed && (shipper.again || (round.more && !releasingAll)));
+  shipper.failing = !round || round.failed;
+}
+
+function shipUnlessFailing(shipper) {
+  if (!shipper.failing) shipNow(shipper);
 }
 
 function shipNow(shipper) {
@@ -141,9 +150,11 @@ function shipNow(shipper) {
   return shipper.running;
 }
 
-export function obsShipSpools(config) {
+export function obsServeAsDaemon(config) {
   shipping = true;
-  if (isObsEnabled(config) && config.dataDir) shipperFor(config);
+  if (!isObsEnabled(config) || !config.dataDir) return Promise.resolve();
+  shipperFor(config);
+  return replayOrphanedEvents(config);
 }
 
 export function obsRetrySpools() {
@@ -161,21 +172,12 @@ async function closeShippers() {
   );
 }
 
-export function obsDrainExportsOnClose() {
-  drainOnClose = true;
-}
-
-function closeDeadlineMs(entry) {
-  return drainOnClose ? entry.runtime.config.timeoutMillis + EXPORT_DRAIN_MARGIN_MS : undefined;
-}
-
 export function __resetObsForTests() {
   sessions.clear();
   queues.clear();
   shippers.clear();
   shipping = false;
   releasingAll = null;
-  drainOnClose = false;
 }
 
 export function __setOtelTestHooksForTests(hooks) {
@@ -271,9 +273,7 @@ async function obsEndTurn(sessionId) {
 async function obsEndSession(sessionId, config) {
   const entry = await getOrInitEntry(sessionId, config);
   sessions.delete(sessionId);
-  await safeObsAsync(() =>
-    entry.session.close({ status: "ok", deadlineMs: closeDeadlineMs(entry) })
-  );
+  await safeObsAsync(() => entry.session.close({ status: "ok" }));
   if (config.dataDir) await safeObsAsync(() => releaseRootStart(config.dataDir, sessionId));
 }
 
@@ -281,8 +281,7 @@ async function releaseSession(sessionId, entry) {
   sessions.delete(sessionId);
   await safeObsAsync(async () => {
     const ended = entry.dataDir && (await rootStartReleased(entry.dataDir, sessionId));
-    const deadlineMs = closeDeadlineMs(entry);
-    if (ended) return entry.runtime.close(deadlineMs);
+    if (ended) return entry.runtime.close();
     // unknown, not process_exit: the session may go on in another process, and
     // only SessionEnd knows how it ended.
     await entry.session.close({
@@ -290,7 +289,6 @@ async function releaseSession(sessionId, entry) {
       taskOutcome: "unknown",
       output: {},
       endTime: new Date(entry.lastEventAt),
-      deadlineMs,
     });
   });
 }
@@ -334,7 +332,28 @@ export function observeHook(event, input, output, config) {
   if (!isObsEnabled(config) || releasingAll) return Promise.resolve();
   const sessionId = typeof input?.session_id === "string" ? input.session_id : "";
   if (!sessionId) return Promise.resolve();
-  return enqueue(sessionId, () => recordEvent(sessionId, event, input, output, config));
+  const journaled =
+    shipping && config.dataDir
+      ? safeObsAsync(() => journalEvent(config.dataDir, event, input, output))
+      : null;
+  return enqueueEvent(sessionId, { event, input, output }, config, journaled);
+}
+
+function enqueueEvent(sessionId, { event, input, output }, config, journaled) {
+  return enqueue(sessionId, async () => {
+    await recordEvent(sessionId, event, input, output, config);
+    const file = await journaled;
+    if (file) await forgetEvent(file);
+  });
+}
+
+async function replayOrphanedEvents(config) {
+  const adopted = (await safeObsAsync(() => adoptOrphanedEvents(config.dataDir))) ?? [];
+  for (const { file, record } of adopted) {
+    const sessionId = typeof record?.input?.session_id === "string" ? record.input.session_id : "";
+    if (sessionId) enqueueEvent(sessionId, record, config, Promise.resolve(file));
+    else await forgetEvent(file);
+  }
 }
 
 async function recordEvent(sessionId, event, input, output, config) {
@@ -369,7 +388,9 @@ async function recordEvent(sessionId, event, input, output, config) {
     }
   });
   const entry = sessions.get(sessionId);
-  if (entry) entry.lastEventAt = Date.now();
+  if (!entry) return;
+  entry.lastEventAt = Date.now();
+  if (shipping) await safeObsAsync(() => entry.runtime.forceFlush());
 }
 
 export async function obsFlush(sessionId, config) {

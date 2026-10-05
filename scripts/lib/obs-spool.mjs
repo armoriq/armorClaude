@@ -61,8 +61,7 @@ export async function writeSpoolBatch(dataDir, binding, batch) {
   await pruneSpool(dataDir);
 }
 
-function ownerGone(pid) {
-  if (pid === process.pid) return true;
+export function processGone(pid) {
   try {
     process.kill(pid, 0);
     return false;
@@ -72,7 +71,8 @@ function ownerGone(pid) {
 }
 
 const claimable = (entry) =>
-  entry.kind === "ready" || (entry.kind === "claim" && ownerGone(entry.owner));
+  entry.kind === "ready" ||
+  (entry.kind === "claim" && (entry.owner === process.pid || processGone(entry.owner)));
 
 async function claim(dir, entry) {
   const claimed = `${entry.ready}.claim-${process.pid}`;

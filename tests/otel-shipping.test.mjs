@@ -94,6 +94,7 @@ async function startBackend({
   holdExports = false,
   content = false,
   exportDelayMs = 0,
+  exportStatus = 200,
   leaseDelayMs = 0,
 } = {}) {
   const exports = [];
@@ -126,8 +127,8 @@ async function startBackend({
         exports.push(...spans);
         const answer = () => {
           if (req.socket.destroyed) return;
-          delivered.push(...spans);
-          res.writeHead(200, { "content-type": "application/x-protobuf" });
+          if (exportStatus === 200) delivered.push(...spans);
+          res.writeHead(exportStatus, { "content-type": "application/x-protobuf" });
           res.end();
         };
         if (holdExports) heldExports.push(answer);
@@ -148,6 +149,10 @@ async function startBackend({
     releaseExports() {
       holdExports = false;
       for (const answer of heldExports.splice(0)) answer();
+    },
+    dropHeldExports() {
+      holdExports = false;
+      heldExports.length = 0;
     },
     close: () =>
       new Promise((resolve) => {
@@ -217,16 +222,18 @@ const rootsByEnd = (exports) =>
     .filter((s) => s.name === "armoriq.agent.run")
     .sort((a, b) => (a.endTimeUnixNano < b.endTimeUnixNano ? -1 : 1));
 
-function spoolFiles(dataDir) {
-  const dir = path.join(dataDir, "obs-spool");
+function spoolFiles(dataDir, name = "obs-spool") {
+  const dir = path.join(dataDir, name);
   return existsSync(dir) ? readdirSync(dir) : [];
 }
 
 async function shipSpoolWithDaemon(env, dataDir) {
-  await rm(path.join(dataDir, "profiles"), { force: true });
+  await rm(path.join(dataDir, "profiles"), { force: true, recursive: true });
   const daemon = startDaemon(env, dataDir);
   try {
-    await waitFor(() => spoolFiles(dataDir).length === 0, 20_000, "the daemon to ship the spool");
+    const settled = () =>
+      spoolFiles(dataDir).length === 0 && spoolFiles(dataDir, "obs-journal").length === 0;
+    await waitFor(settled, 20_000, "the daemon to replay its journal and ship the spool");
   } finally {
     killIfRunning(daemon.child);
     await daemon.exited;
@@ -583,6 +590,89 @@ test("fallback hooks spool their spans without waiting on a 2.5 s export, and a 
     );
     assert.equal(rootOutcomes(rootsByEnd(backend.delivered)).at(-1), "completed");
   } finally {
+    await backend.close();
+  }
+});
+
+test("a daemon SIGKILLed after a tool call loses none of its ended spans (#194)", async () => {
+  const backend = await startBackend({ holdExports: true });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-sigkill-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const killed = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => existsSync(killed.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    const tool = { tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "toolu_01Kill" };
+    await daemonHook(killed.socketPath, sessionId, "SessionStart");
+    await daemonHook(killed.socketPath, sessionId, "PreToolUse", tool);
+    await daemonHook(killed.socketPath, sessionId, "PostToolUse", { ...tool, tool_response: {} });
+    await new Promise((r) => setTimeout(r, 300));
+    process.kill(killed.child.pid, "SIGKILL");
+    await killed.exited;
+    backend.dropHeldExports();
+
+    await shipSpoolWithDaemon(env, dataDir);
+    const ids = storedSpans(backend.delivered)
+      .filter((s) => s.name !== "armoriq.agent.run")
+      .map((s) => `${s.name} ${s.attributes["armoriq.tool.call_id"]}`)
+      .sort();
+    assert.deepEqual(ids, ["armoriq.policy.evaluate toolu_01Kill", "armoriq.tool toolu_01Kill"]);
+  } finally {
+    killIfRunning(killed.child);
+    await backend.close();
+  }
+});
+
+test("a daemon SIGKILLed while it waits for the lease loses none of the events it answered (#194)", async () => {
+  const backend = await startBackend({ leaseDelayMs: 1_500 });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-leasekill-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const killed = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => existsSync(killed.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    const tool = { tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "toolu_01Wait" };
+    await daemonHook(killed.socketPath, sessionId, "SessionStart");
+    await daemonHook(killed.socketPath, sessionId, "PreToolUse", tool);
+    await daemonHook(killed.socketPath, sessionId, "PostToolUse", { ...tool, tool_response: {} });
+    await new Promise((r) => setTimeout(r, 200));
+    process.kill(killed.child.pid, "SIGKILL");
+    await killed.exited;
+    assert.equal(backend.exportTimes.length, 0, "the daemon was killed before the lease arrived");
+
+    await shipSpoolWithDaemon(env, dataDir);
+    const ids = storedSpans(backend.delivered)
+      .filter((s) => s.name !== "armoriq.agent.run")
+      .map((s) => `${s.name} ${s.attributes["armoriq.tool.call_id"]}`)
+      .sort();
+    assert.deepEqual(ids, ["armoriq.policy.evaluate toolu_01Wait", "armoriq.tool toolu_01Wait"]);
+    assert.deepEqual(readdirSync(path.join(dataDir, "obs-journal")), []);
+  } finally {
+    killIfRunning(killed.child);
+    await backend.close();
+  }
+});
+
+test("after a failed export the daemon waits for its timer instead of retrying on every span (#194)", async () => {
+  const backend = await startBackend({ exportStatus: 400 });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-failing-");
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    await daemonHook(daemon.socketPath, sessionId, "SessionStart");
+    for (let i = 0; i < 4; i++) {
+      const tool = { tool_name: "Read", tool_input: { file_path: `f${i}` }, tool_use_id: `t${i}` };
+      await daemonHook(daemon.socketPath, sessionId, "PreToolUse", tool);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await waitFor(() => spoolFiles(dataDir).length === 4, 5_000, "four spooled policy spans");
+    assert.equal(backend.exportTimes.length, 1, "one export attempt for four spans");
+  } finally {
+    killIfRunning(daemon.child);
     await backend.close();
   }
 });
