@@ -1,82 +1,93 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { denyPreToolWithHint } from "../scripts/lib/hook-output.mjs";
 import {
   JOURNAL_MAX_AGE_MS,
-  adoptOrphanedEvents,
+  journalBacklog,
   journalDir,
+  journalEntryPath,
   journalEvent,
 } from "../scripts/lib/obs-journal.mjs";
+import { deadPid, placeFile } from "./helpers/obs-files.mjs";
 
+const BINDING = "a".repeat(64);
+const OTHER = "b".repeat(64);
 const UUID = "00000000-0000-4000-8000-00000000000";
 
-function deadPid() {
-  return spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], {
-    encoding: "utf8",
-  }).stdout;
+const tempDataDir = () => mkdtempSync(path.join(tmpdir(), "obs-journal-"));
+
+function place(dataDir, { at, seq = 0, owner, binding = BINDING, n, suffix = "" }) {
+  const name = `${at}-${seq}-${owner}-${binding}-${UUID}${n}.json${suffix}`;
+  return placeFile(journalDir(dataDir), name, JSON.stringify({ event: `e${n}`, input: {} }));
 }
 
-function place(dataDir, at, seq, owner, n) {
-  const dir = journalDir(dataDir);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const name = `${at}-${seq}-${owner}-${UUID}${n}.json`;
-  writeFileSync(path.join(dir, name), JSON.stringify({ event: `e${n}`, input: {} }));
-  return name;
-}
-
-test("a journaled event is an owner-only file holding the call's identity and decision, no content (#194)", async () => {
-  const dataDir = mkdtempSync(path.join(tmpdir(), "obs-journal-"));
+test("a journaled event is an owner-only file with the call's identity and decision, no tool input (#194)", async () => {
+  const dataDir = tempDataDir();
   const input = {
     session_id: "sess-j",
-    hook_event_name: "PostToolUse",
+    hook_event_name: "PreToolUse",
     tool_name: "Bash",
     tool_use_id: "toolu_01J",
-    tool_input: { command: "cat secrets.txt" },
-    tool_response: { stdout: "hunter2" },
+    tool_input: { command: "curl -H 'Authorization: Bearer SECRET_TOKEN_123' https://x" },
   };
-  const output = { hookSpecificOutput: { permissionDecision: "allow", additionalContext: "x" } };
-  const file = await journalEvent(dataDir, "PostToolUse", input, output);
+  const output = denyPreToolWithHint("Tool not in plan", {
+    toolName: "Bash",
+    toolInput: input.tool_input,
+    goal: "g",
+  });
+  const at = Date.now();
+  const file = await journalEvent(journalEntryPath(dataDir, BINDING, at), {
+    event: "PreToolUse",
+    input,
+    output,
+    at,
+  });
+  assert.match(path.basename(file), new RegExp(`^${at}-\\d+-${process.pid}-${BINDING}-`));
   assert.equal(statSync(journalDir(dataDir)).mode & 0o777, 0o700);
   assert.equal(statSync(file).mode & 0o777, 0o600);
-  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), {
-    event: "PostToolUse",
+  const text = readFileSync(file, "utf8");
+  assert.ok(!text.includes("SECRET_TOKEN_123"));
+  assert.deepEqual(JSON.parse(text), {
+    event: "PreToolUse",
+    at,
     input: {
       session_id: "sess-j",
-      hook_event_name: "PostToolUse",
+      hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_use_id: "toolu_01J",
     },
-    output: { hookSpecificOutput: { permissionDecision: "allow" } },
+    output: { hookSpecificOutput: { permissionDecision: "deny" } },
   });
 });
 
-test("a starting daemon adopts a dead process's events in order and leaves a live one's (#194)", async () => {
-  const dataDir = mkdtempSync(path.join(tmpdir(), "obs-journal-"));
+test("the backlog of one key adopts dead processes' events in order and prunes old entries and drafts (#194)", async () => {
+  const dataDir = tempDataDir();
   const dead = deadPid();
   const now = Date.now();
-  place(dataDir, now - 10, 1, dead, 2);
-  place(dataDir, now - 10, 0, dead, 1);
-  place(dataDir, now - 20, 5, dead, 0);
-  const live = place(dataDir, now - 30, 0, process.ppid, 3);
-  const stale = place(dataDir, now - JOURNAL_MAX_AGE_MS - 1, 0, dead, 4);
-  const adopted = await adoptOrphanedEvents(dataDir, now);
+  place(dataDir, { at: now - 10, seq: 1, owner: dead, n: 2 });
+  place(dataDir, { at: now - 10, seq: 0, owner: dead, n: 1 });
+  place(dataDir, { at: now - 20, seq: 5, owner: dead, n: 0 });
+  place(dataDir, { at: now - 5, owner: process.pid, n: 3 });
+  const busy = place(dataDir, { at: now - 4, owner: process.pid, n: 4 });
+  const live = place(dataDir, { at: now - 30, owner: process.ppid, n: 5 });
+  const otherKey = place(dataDir, { at: now - 30, owner: dead, binding: OTHER, n: 6 });
+  const stale = place(dataDir, { at: now - JOURNAL_MAX_AGE_MS - 1, owner: dead, n: 7 });
+  const oldDraft = place(dataDir, { at: now - 61_000, owner: dead, n: 8, suffix: ".tmp.1.x" });
+  const youngDraft = place(dataDir, { at: now - 1_000, owner: dead, n: 9, suffix: ".tmp.1.y" });
+  const busyFiles = new Set([path.join(journalDir(dataDir), busy)]);
+
+  const backlog = await journalBacklog(dataDir, BINDING, busyFiles, now);
+
   assert.deepEqual(
-    adopted.map((a) => a.record.event),
-    ["e0", "e1", "e2"]
+    backlog.map((b) => b.record.event),
+    ["e0", "e1", "e2", "e3"]
   );
-  for (const { file } of adopted) assert.match(path.basename(file), new RegExp(`-${process.pid}-`));
+  for (const { file } of backlog) assert.match(path.basename(file), new RegExp(`-${process.pid}-`));
   const left = readdirSync(journalDir(dataDir));
-  assert.ok(left.includes(live));
-  assert.ok(!left.includes(stale));
-  assert.equal(left.length, 4);
+  for (const kept of [busy, live, otherKey, youngDraft]) assert.ok(left.includes(kept), kept);
+  for (const gone of [stale, oldDraft]) assert.ok(!left.includes(gone), gone);
+  assert.equal(left.length, 8);
 });

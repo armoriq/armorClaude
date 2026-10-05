@@ -52,7 +52,7 @@ import {
   observeHook,
   obsFlushAll,
   obsReleaseIdle,
-  obsRetrySpools,
+  obsRetryBacklog,
   obsServeAsDaemon,
 } from "./lib/observability.mjs";
 import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
@@ -381,7 +381,7 @@ const idleTimer = setInterval(() => {
     process.stderr.write(`[armorclaude-daemon] daemon.log cap failed: ${err?.message ?? err}\n`);
   }
   obsReleaseIdle(IDLE_TIMEOUT_MS);
-  obsRetrySpools();
+  obsRetryBacklog();
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
     process.stderr.write(
       `[armorclaude-daemon] idle for ${IDLE_TIMEOUT_MS / 60_000} min, exiting pid=${process.pid} at=${new Date().toISOString()}\n`
@@ -497,6 +497,7 @@ server.on("error", (err) => {
   if (!server.listening) shutdown(1);
 });
 
+await obsServeAsDaemon(config);
 server.listen(socketPath, () => {
   // 0600 so only this user can connect (defense in depth — Unix sockets
   // already inherit dir perms, but we set explicitly).
@@ -505,7 +506,6 @@ server.listen(socketPath, () => {
   } catch {
     /* best-effort */
   }
-  obsServeAsDaemon(config);
   process.stderr.write(
     `[armorclaude-daemon] listening on ${socketPath} pid=${process.pid} version=${DAEMON_VERSION} at=${new Date().toISOString()}\n`
   );

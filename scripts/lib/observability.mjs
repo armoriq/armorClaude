@@ -3,10 +3,17 @@
 import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
+import { appendDaemonLog } from "./daemon-log.mjs";
 import { obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
-import { adoptOrphanedEvents, forgetEvent, journalEvent } from "./obs-journal.mjs";
+import {
+  forgetEvent,
+  journalBacklog,
+  journalEntryPath,
+  journalEvent,
+  pruneJournal,
+} from "./obs-journal.mjs";
 import { shipRetryDelayMs, shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
-import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
+import { claimRootStart, markRootEnded, rootEndedAt } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
@@ -15,6 +22,8 @@ const HOOK_LEASE_WAIT_MS = 1_500;
 const sessions = new Map();
 const queues = new Map();
 const shippers = new Map();
+const inFlight = new Set();
+const FLUSHES = new Set(["Stop", "SessionEnd"]);
 let shipping = false;
 let testHooks = null;
 let releasingAll = null;
@@ -34,10 +43,15 @@ export function isObsEnabled(config) {
   return Boolean(config && config.observabilityEnabled);
 }
 
-function getOrInitEntry(sessionId, config) {
-  let entry = sessions.get(sessionId);
-  if (entry) return Promise.resolve(entry);
-  return initEntry(sessionId, config);
+const sessionKey = (config, sessionId) =>
+  `${config.observabilityEndpoint}\n${config.apiKey}\n${sessionId}`;
+
+function logObs(config, message) {
+  try {
+    appendDaemonLog(config.dataDir, `[armorclaude-obs] ${message} pid=${process.pid}`);
+  } catch {
+    /* the log is best-effort */
+  }
 }
 
 function sha256(text) {
@@ -55,23 +69,27 @@ async function rootStartTime(sessionId, config) {
   return config.dataDir ? claimRootStart(config.dataDir, sessionId) : null;
 }
 
-function spoolSink(config) {
+function spoolSink(config, entry) {
   return {
     async write(batch) {
-      await safeObsAsync(() => writeSpoolBatch(config.dataDir, batch));
-      if (shipping) shipDue(shipperFor(config));
+      try {
+        await writeSpoolBatch(config.dataDir, batch);
+      } catch (err) {
+        entry.sinkFailures += 1;
+        logObs(config, `spool write failed, events stay in obs-journal: ${err?.message ?? err}`);
+        throw err;
+      }
+      if (shipping) afterSpoolWrite(config, entry);
     },
   };
 }
 
-function dataDirOptions(config) {
-  return {
-    leaseStore: obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey),
-    spanSink: spoolSink(config),
-  };
+function dataDirOptions(config, entry) {
+  const leaseStore = obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey);
+  return entry ? { leaseStore, spanSink: spoolSink(config, entry) } : { leaseStore };
 }
 
-function runtimeOptionsFor(config) {
+function runtimeOptionsFor(config, entry) {
   const sdkVersion = typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown";
   const runtimeOptions = {
     backendEndpoint: config.observabilityEndpoint,
@@ -79,7 +97,7 @@ function runtimeOptionsFor(config) {
     sdkVersion,
     options: { serviceName: config.observabilityProduct || "armorclaude" },
   };
-  if (config.dataDir) Object.assign(runtimeOptions, dataDirOptions(config));
+  if (config.dataDir) Object.assign(runtimeOptions, dataDirOptions(config, entry));
   if (testHooks?.leaseFetcher) runtimeOptions.leaseFetcher = testHooks.leaseFetcher;
   if (testHooks?.tracerProvider) {
     runtimeOptions.options = {
@@ -91,20 +109,23 @@ function runtimeOptionsFor(config) {
   return runtimeOptions;
 }
 
-async function initEntry(sessionId, config) {
-  const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
+async function initEntry(key, record, config) {
+  const sessionId = record.input.session_id;
+  const entry = { key, sessionId, lastEventAt: record.at, sinkFailures: 0, pending: [] };
+  entry.runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config, entry));
   const startTime = await rootStartTime(sessionId, config);
-  const session = new OtelSession(runtime, {
+  entry.markerDir = startTime && config.dataDir;
+  entry.session = new OtelSession(entry.runtime, {
     sessionId,
     agentId: config.agentId || null,
     userId: config.userId || null,
     root: { ...sessionRootIds(sessionId), startTime },
   });
-  const entry = { runtime, session, dataDir: startTime && config.dataDir, lastEventAt: Date.now() };
-  sessions.set(sessionId, entry);
-  if (shipping && config.dataDir) shipperFor(config);
-  await (shipping ? safeObsAsync(() => session.refreshPolicy()) : awaitHookLease(entry, config));
-  await safeObsAsync(() => session.beginRoot({ input: connectedInput(config) }));
+  sessions.set(key, entry);
+  await (shipping
+    ? safeObsAsync(() => entry.session.refreshPolicy())
+    : awaitHookLease(entry, config));
+  await safeObsAsync(() => entry.session.beginRoot({ input: connectedInput(config) }));
   return entry;
 }
 
@@ -114,6 +135,7 @@ function shipperFor(config) {
   if (shipper) return shipper;
   const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
   shipper = {
+    config,
     dataDir: config.dataDir,
     binding: runtime.spoolBinding,
     runtime,
@@ -126,6 +148,7 @@ function shipperFor(config) {
   };
   shippers.set(key, shipper);
   shipNow(shipper);
+  shipper.ready = replayBacklog(shipper);
   return shipper;
 }
 
@@ -166,17 +189,25 @@ function shipNow(shipper) {
   return shipper.running;
 }
 
-export function obsServeAsDaemon(config) {
+export async function obsServeAsDaemon(config) {
   shipping = true;
-  if (!isObsEnabled(config) || !config.dataDir) return Promise.resolve();
-  shipperFor(config);
-  return replayOrphanedEvents(config);
+  if (!config.dataDir) return;
+  if (!isObsEnabled(config)) return void (await safeObsAsync(() => pruneJournal(config.dataDir)));
+  await safeObsAsync(() => shipperFor(config).ready);
 }
 
 const shipDue = (shipper) => (Date.now() >= shipper.retryAt ? shipNow(shipper) : shipper.running);
 
-export function obsRetrySpools() {
-  return Promise.all([...shippers.values()].map(shipDue));
+function afterSpoolWrite(config, entry) {
+  shipDue(shipperFor(config));
+  if (entry.settleQueued || entry.pending.length === 0) return;
+  entry.settleQueued = true;
+  enqueue(entry.key, () => settleJournal(entry));
+}
+
+export function obsRetryBacklog() {
+  const all = [...shippers.values()];
+  return Promise.all([...all.map(shipDue), ...all.map(replayBacklog)]);
 }
 
 async function closeShippers() {
@@ -214,6 +245,7 @@ export function __resetObsForTests() {
   sessions.clear();
   queues.clear();
   shippers.clear();
+  inFlight.clear();
   shipping = false;
   releasingAll = null;
 }
@@ -239,31 +271,23 @@ function toolCall(input, config) {
   return { toolName, toolCallId, arguments: sanitizeParams(input.tool_input, config.sanitize) };
 }
 
-async function obsCheck(sessionId, config, input, output) {
-  const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    const reason =
-      (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
-      undefined;
-    await entry.session.recordPolicy(toolCall(input, config), {
-      decision: classifyDecision(output),
-      ...(reason ? { policyReasonCode: reason } : {}),
-    });
+async function obsCheck(entry, config, { input, output }) {
+  const reason = output?.hookSpecificOutput?.permissionDecisionReason || undefined;
+  await entry.session.recordPolicy(toolCall(input, config), {
+    decision: classifyDecision(output),
+    ...(reason ? { policyReasonCode: reason } : {}),
   });
 }
 
-async function obsReport(sessionId, config, input, outcome) {
-  const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    const call = toolCall(input, config);
-    await entry.session.recordTool(
-      { ...call, operation: { category: operationCategory(call.toolName) } },
-      {
-        outcome,
-        result: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
-      }
-    );
-  });
+async function obsReport(entry, config, { input }, outcome) {
+  const call = toolCall(input, config);
+  await entry.session.recordTool(
+    { ...call, operation: { category: operationCategory(call.toolName) } },
+    {
+      outcome,
+      result: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
+    }
+  );
 }
 
 // Only structured expansion events confirm command activity. Keep the label
@@ -287,14 +311,11 @@ function expandedSlashCommand(input) {
 }
 
 // The SDK accepts only tool names that start alphanumeric.
-async function obsSlashCommand(sessionId, config, command) {
-  const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    await entry.session.recordOperation({
-      category: "command",
-      name: "command.execute",
-      toolName: command.replace(/^\//, ""),
-    });
+async function obsSlashCommand(entry, command) {
+  await entry.session.recordOperation({
+    category: "command",
+    name: "command.execute",
+    toolName: command.replace(/^\//, ""),
   });
 }
 
@@ -302,24 +323,24 @@ function connectedInput(config) {
   return `ArmorClaude connected (${config.observabilityProduct || "armorclaude"})`;
 }
 
-async function obsEndTurn(sessionId) {
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
-  await safeObsAsync(() => entry.session.flush("ok"));
+async function obsEndSession(entry, config) {
+  sessions.delete(entry.key);
+  const endTime = new Date(entry.lastEventAt);
+  await safeObsAsync(() => entry.session.close({ status: "ok", endTime }));
+  if (config.dataDir) {
+    await safeObsAsync(() => markRootEnded(config.dataDir, entry.sessionId, endTime));
+  }
 }
 
-async function obsEndSession(sessionId, config) {
-  const entry = await getOrInitEntry(sessionId, config);
-  sessions.delete(sessionId);
-  await safeObsAsync(() => entry.session.close({ status: "ok" }));
-  if (config.dataDir) await safeObsAsync(() => releaseRootStart(config.dataDir, sessionId));
+async function endedSince(entry) {
+  const endedAt = entry.markerDir && (await rootEndedAt(entry.markerDir, entry.sessionId));
+  return Boolean(endedAt) && endedAt.getTime() >= entry.lastEventAt;
 }
 
-async function releaseSession(sessionId, entry) {
-  sessions.delete(sessionId);
+async function releaseSession(entry) {
+  if (sessions.get(entry.key) === entry) sessions.delete(entry.key);
   await safeObsAsync(async () => {
-    const ended = entry.dataDir && (await rootStartReleased(entry.dataDir, sessionId));
-    if (ended) return entry.runtime.close();
+    if (await endedSince(entry)) return entry.runtime.close();
     // unknown, not process_exit: the session may go on in another process, and
     // only SessionEnd knows how it ended.
     await entry.session.close({
@@ -329,6 +350,17 @@ async function releaseSession(sessionId, entry) {
       endTime: new Date(entry.lastEventAt),
     });
   });
+  await settleJournal(entry);
+}
+
+async function settleJournal(entry) {
+  entry.settleQueued = false;
+  const settling = entry.pending.splice(0);
+  if (settling.length === 0) return;
+  await safeObsAsync(() => entry.runtime.forceFlush());
+  const written = settling.filter((item) => item.failures === entry.sinkFailures);
+  await Promise.all(written.map((item) => forgetEvent(item.file)));
+  for (const item of settling) inFlight.delete(item.file);
 }
 
 function enqueue(sessionId, task) {
@@ -342,7 +374,7 @@ function enqueue(sessionId, task) {
 
 async function releaseAll() {
   await Promise.all(queues.values());
-  await Promise.all([...sessions].map(([sessionId, entry]) => releaseSession(sessionId, entry)));
+  await Promise.all([...sessions.values()].map(releaseSession));
   await closeShippers();
 }
 
@@ -354,12 +386,12 @@ export function obsFlushAll() {
 export function obsReleaseIdle(maxIdleMs) {
   if (releasingAll) return Promise.resolve();
   const idleSince = Date.now() - maxIdleMs;
-  const idle = [...sessions].filter(([, entry]) => entry.lastEventAt <= idleSince);
+  const idle = [...sessions.values()].filter((entry) => entry.lastEventAt <= idleSince);
   return Promise.all(
-    idle.map(([sessionId, entry]) =>
-      enqueue(sessionId, () => {
-        if (sessions.get(sessionId) === entry && entry.lastEventAt <= idleSince) {
-          return releaseSession(sessionId, entry);
+    idle.map((entry) =>
+      enqueue(entry.key, () => {
+        if (sessions.get(entry.key) === entry && entry.lastEventAt <= idleSince) {
+          return releaseSession(entry);
         }
       })
     )
@@ -370,69 +402,102 @@ export function observeHook(event, input, output, config) {
   if (!isObsEnabled(config) || releasingAll) return Promise.resolve();
   const sessionId = typeof input?.session_id === "string" ? input.session_id : "";
   if (!sessionId) return Promise.resolve();
-  const journaled =
-    shipping && config.dataDir
-      ? safeObsAsync(() => journalEvent(config.dataDir, event, input, output))
-      : null;
-  return enqueueEvent(sessionId, { event, input, output }, config, journaled);
+  const record = { event, input, output, at: Date.now() };
+  const key = sessionKey(config, sessionId);
+  if (!shipping || !config.dataDir) return enqueueEvent(key, record, config, null);
+  const shipper = shipperFor(config);
+  const file = journalEntryPath(config.dataDir, shipper.binding, record.at);
+  inFlight.add(file);
+  const journaled = safeObsAsync(() => journalEvent(file, record)).then(
+    (written) => written ?? void inFlight.delete(file)
+  );
+  return shipper.ready.then(() => enqueueEvent(key, record, config, journaled));
 }
 
-function enqueueEvent(sessionId, { event, input, output }, config, journaled) {
-  return enqueue(sessionId, async () => {
-    await recordEvent(sessionId, event, input, output, config);
-    const file = await journaled;
-    if (file) await forgetEvent(file);
+function enqueueEvent(key, record, config, journaled) {
+  return enqueue(key, async () => {
+    const file = (await journaled) ?? null;
+    const entry = await recordEvent(key, record, config);
+    await settleEvent(entry, record, file);
   });
 }
 
-async function replayOrphanedEvents(config) {
-  const adopted = (await safeObsAsync(() => adoptOrphanedEvents(config.dataDir))) ?? [];
-  for (const { file, record } of adopted) {
-    const sessionId = typeof record?.input?.session_id === "string" ? record.input.session_id : "";
-    if (sessionId) enqueueEvent(sessionId, record, config, Promise.resolve(file));
-    else await forgetEvent(file);
-  }
+function replayBacklog(shipper) {
+  shipper.replaying ??= replayJournal(shipper).finally(() => (shipper.replaying = null));
+  return shipper.replaying;
 }
 
-async function recordEvent(sessionId, event, input, output, config) {
-  await safeObsAsync(async () => {
-    switch (event) {
-      case "SessionStart":
-      case "UserPromptSubmit":
-        await getOrInitEntry(sessionId, config);
-        break;
-      case "UserPromptExpansion": {
-        const slash = expandedSlashCommand(input);
-        if (slash) await obsSlashCommand(sessionId, config, slash);
-        break;
-      }
-      case "PreToolUse":
-        await obsCheck(sessionId, config, input, output);
-        break;
-      case "PostToolUse":
-        await obsReport(sessionId, config, input, "success");
-        break;
-      case "PostToolUseFailure":
-        await obsReport(sessionId, config, input, "error");
-        break;
-      case "Stop":
-        await obsEndTurn(sessionId);
-        break;
-      case "SessionEnd":
-        await obsEndSession(sessionId, config);
-        break;
-      default:
-        break;
+async function replayJournal({ config, binding }) {
+  const backlog = await safeObsAsync(() => journalBacklog(config.dataDir, binding, inFlight));
+  const replayed = new Set();
+  for (const { file, record } of backlog ?? []) {
+    const sessionId = record?.input?.session_id;
+    if (typeof sessionId !== "string" || !sessionId) await forgetEvent(file);
+    else {
+      const key = sessionKey(config, sessionId);
+      inFlight.add(file);
+      enqueueEvent(key, record, config, file);
+      replayed.add(key);
     }
-  });
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
-  entry.lastEventAt = Date.now();
-  if (shipping) await safeObsAsync(() => entry.runtime.forceFlush());
+  }
+  for (const key of replayed) enqueue(key, () => settleKey(key));
+}
+
+const settleKey = (key) => sessions.has(key) && settleJournal(sessions.get(key));
+
+async function settleEvent(entry, record, file) {
+  if (!entry) return forgetSettled(file);
+  if (file) entry.pending.push({ file, failures: entry.failuresBefore });
+  if (FLUSHES.has(record.event)) await settleJournal(entry);
+}
+
+async function forgetSettled(file) {
+  if (!file) return;
+  await forgetEvent(file);
+  inFlight.delete(file);
+}
+
+function entryFor(key, record, config) {
+  const entry = sessions.get(key);
+  if (entry) return entry;
+  if (record.event === "Stop") return null;
+  if (record.event === "UserPromptExpansion" && !expandedSlashCommand(record.input)) return null;
+  return safeObsAsync(() => initEntry(key, record, config));
+}
+
+async function recordEvent(key, record, config) {
+  const entry = await entryFor(key, record, config);
+  if (!entry) return null;
+  entry.lastEventAt = Math.max(entry.lastEventAt, record.at);
+  entry.failuresBefore = entry.sinkFailures;
+  await safeObsAsync(() => applyEvent(entry, record, config));
+  return entry;
+}
+
+async function applyEvent(entry, record, config) {
+  switch (record.event) {
+    case "UserPromptExpansion": {
+      const slash = expandedSlashCommand(record.input);
+      if (slash) await obsSlashCommand(entry, slash);
+      break;
+    }
+    case "PreToolUse":
+      return obsCheck(entry, config, record);
+    case "PostToolUse":
+      return obsReport(entry, config, record, "success");
+    case "PostToolUseFailure":
+      return obsReport(entry, config, record, "error");
+    case "Stop":
+      return entry.session.flush("ok");
+    case "SessionEnd":
+      return obsEndSession(entry, config);
+    default:
+      break;
+  }
 }
 
 export async function obsFlush(sessionId, config) {
   if (!isObsEnabled(config)) return;
-  const entry = sessions.get(sessionId);
-  if (entry) await releaseSession(sessionId, entry);
+  const entry = sessions.get(sessionKey(config, sessionId));
+  if (entry) await releaseSession(entry);
 }

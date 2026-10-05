@@ -3,13 +3,15 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createConnection } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import armoriqSdk from "@armoriq/sdk-dev";
 import { obsFlush, observeHook } from "../scripts/lib/observability.mjs";
+import { deadPid, placeFile } from "./helpers/obs-files.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
@@ -123,7 +125,8 @@ async function startBackend({
       }
       if (req.method === "POST" && req.url === "/v1/traces") {
         exportTimes.push(Date.now());
-        const spans = decodeSpans(Buffer.concat(chunks));
+        const apiKey = req.headers["x-api-key"];
+        const spans = decodeSpans(Buffer.concat(chunks)).map((span) => ({ ...span, apiKey }));
         exports.push(...spans);
         const answer = () => {
           if (req.socket.destroyed) return;
@@ -149,6 +152,12 @@ async function startBackend({
     releaseExports() {
       holdExports = false;
       for (const answer of heldExports.splice(0)) answer();
+    },
+    setExportStatus(status) {
+      exportStatus = status;
+    },
+    setLeaseDelay(ms) {
+      leaseDelayMs = ms;
     },
     dropHeldExports() {
       holdExports = false;
@@ -222,7 +231,7 @@ const rootsByEnd = (exports) =>
     .filter((s) => s.name === "armoriq.agent.run")
     .sort((a, b) => (a.endTimeUnixNano < b.endTimeUnixNano ? -1 : 1));
 
-function spoolFiles(dataDir, name = "obs-spool") {
+function dataFiles(dataDir, name = "obs-spool") {
   const dir = path.join(dataDir, name);
   return existsSync(dir) ? readdirSync(dir) : [];
 }
@@ -232,7 +241,7 @@ async function shipSpoolWithDaemon(env, dataDir) {
   const daemon = startDaemon(env, dataDir);
   try {
     const settled = () =>
-      spoolFiles(dataDir).length === 0 && spoolFiles(dataDir, "obs-journal").length === 0;
+      dataFiles(dataDir).length === 0 && dataFiles(dataDir, "obs-journal").length === 0;
     await waitFor(settled, 20_000, "the daemon to replay its journal and ship the spool");
   } finally {
     killIfRunning(daemon.child);
@@ -272,7 +281,9 @@ test("a session run entirely on the fallback is one trace under one root that en
       }
     }
     assert.equal(storedSpans(backend.exports).length, 5, "1 root, 2 policy and 2 tool spans");
-    assert.equal(readdirSync(path.join(dataDir, "obs-roots")).length, 0, "marker removed");
+    const [marker] = readdirSync(path.join(dataDir, "obs-roots"));
+    const { endedAt } = JSON.parse(readFileSync(path.join(dataDir, "obs-roots", marker), "utf8"));
+    assert.equal(BigInt(Date.parse(endedAt)) * 1_000_000n, ends.at(-1), "the marker keeps the end");
   } finally {
     await backend.close();
   }
@@ -309,11 +320,12 @@ function startDaemon(env, dataDir) {
   return { child, exited, socketPath: path.join(dataDir, "daemon.sock") };
 }
 
-function daemonHook(socketPath, sessionId, event, input = {}) {
+function daemonHook(socketPath, sessionId, event, input = {}, configEnv = undefined) {
   return daemonRequest(socketPath, {
     type: "hook",
     reqId: event,
     event,
+    configEnv,
     input: { session_id: sessionId, hook_event_name: event, ...input },
   });
 }
@@ -576,7 +588,7 @@ test("fallback hooks spool their spans without waiting on a 2.5 s export, and a 
       assert.ok(Date.now() - started < 1_000, `${hook_event_name} took ${Date.now() - started} ms`);
     }
     assert.equal(backend.exportTimes.length, 0, "no hook process exported");
-    const files = spoolFiles(dataDir);
+    const files = dataFiles(dataDir);
     assert.ok(files.length > 0, "the hooks spooled their spans");
     for (const file of files) {
       assert.equal(statSync(path.join(dataDir, "obs-spool", file)).mode & 0o777, 0o600);
@@ -655,8 +667,8 @@ test("a daemon SIGKILLed while it waits for the lease loses none of the events i
   }
 });
 
-test("after a failed export the daemon waits for its timer instead of retrying on every span (#194)", async () => {
-  const backend = await startBackend({ exportStatus: 400 });
+test("after a failed export the daemon backs off instead of sending every write (#194)", async () => {
+  const backend = await startBackend({ exportStatus: 500 });
   const home = await tempDir("aq-home-");
   const dataDir = await tempDir("aq-failing-");
   const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
@@ -667,10 +679,226 @@ test("after a failed export the daemon waits for its timer instead of retrying o
     for (let i = 0; i < 4; i++) {
       const tool = { tool_name: "Read", tool_input: { file_path: `f${i}` }, tool_use_id: `t${i}` };
       await daemonHook(daemon.socketPath, sessionId, "PreToolUse", tool);
+      await daemonHook(daemon.socketPath, sessionId, "Stop");
       await new Promise((r) => setTimeout(r, 100));
     }
-    await waitFor(() => spoolFiles(dataDir).length === 4, 5_000, "four spooled policy spans");
-    assert.equal(backend.exportTimes.length, 1, "one export attempt for four spans");
+    await waitFor(() => dataFiles(dataDir).length === 4, 5_000, "four spooled turns");
+    assert.equal(backend.exportTimes.length, 1, "one export attempt for four turns");
+  } finally {
+    killIfRunning(daemon.child);
+    await backend.close();
+  }
+});
+
+const sessionSpans = (exports, sessionId) =>
+  storedSpans(exports).filter((s) => s.attributes["armoriq.session_id"] === sessionId);
+
+test("the daemon writes a session's spans at Stop and SessionEnd, not one request per span (#194)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-batch-");
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    await daemonHook(daemon.socketPath, sessionId, "SessionStart");
+    for (const id of ["t1", "t2", "t3"]) {
+      const tool = { tool_name: "Read", tool_input: { file_path: id }, tool_use_id: id };
+      await daemonHook(daemon.socketPath, sessionId, "PreToolUse", tool);
+      await daemonHook(daemon.socketPath, sessionId, "PostToolUse", { ...tool, tool_response: {} });
+    }
+    await daemonHook(daemon.socketPath, sessionId, "Stop");
+    await daemonHook(daemon.socketPath, sessionId, "SessionEnd", { reason: "other" });
+    const done = () => rootOutcomes(backend.delivered).includes("completed");
+    await waitFor(done, 10_000, "the SessionEnd root");
+    assert.equal(sessionSpans(backend.delivered, sessionId).length, 7);
+    assert.equal(backend.exportTimes.length, 2, "one request at Stop, one at SessionEnd");
+    assert.deepEqual(dataFiles(dataDir, "obs-journal"), []);
+  } finally {
+    killIfRunning(daemon.child);
+    await backend.close();
+  }
+});
+
+test("a respawned daemon ships each journaled event under the API key its session used (#194)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-twokeys-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const keyB = "ak_test_otelshippingkeyb000000000000";
+  const configB = {
+    armoriqEnv: "local",
+    apiKey: keyB,
+    backendEndpoint: backend.url,
+    observabilityEnabled: true,
+    observabilityEndpoint: backend.url,
+    observabilityProduct: "armorclaude",
+  };
+  const killed = startDaemon(env, dataDir);
+  let respawned;
+  try {
+    await waitFor(() => existsSync(killed.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    const tool = { tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "toolu_01KeyB" };
+    const hookB = (socketPath, event, input) =>
+      daemonHook(socketPath, sessionId, event, input, configB);
+    await hookB(killed.socketPath, "SessionStart");
+    await hookB(killed.socketPath, "PreToolUse", tool);
+    await hookB(killed.socketPath, "PostToolUse", { ...tool, tool_response: {} });
+    await new Promise((r) => setTimeout(r, 300));
+    process.kill(killed.child.pid, "SIGKILL");
+    await killed.exited;
+
+    respawned = startDaemon(env, dataDir);
+    await waitFor(() => existsSync(respawned.socketPath), 20_000, "the respawned socket");
+    await new Promise((r) => setTimeout(r, 1_000));
+    assert.equal(backend.exports.length, 0, "key A's daemon leaves key B's events alone");
+    assert.equal(dataFiles(dataDir, "obs-journal").length, 3);
+
+    await hookB(respawned.socketPath, "SessionEnd", { reason: "other" });
+    const done = () => rootOutcomes(backend.delivered).includes("completed");
+    await waitFor(done, 10_000, "the SessionEnd root");
+    const spans = sessionSpans(backend.delivered, sessionId);
+    assert.deepEqual(spans.map((s) => s.name).sort(), [
+      "armoriq.agent.run",
+      "armoriq.policy.evaluate",
+      "armoriq.tool",
+    ]);
+    assert.deepEqual([...new Set(backend.delivered.map((s) => s.apiKey))], [keyB]);
+  } finally {
+    killIfRunning(killed.child);
+    if (respawned) killIfRunning(respawned.child);
+    await backend.close();
+  }
+});
+
+test("a journal replayed after SessionEnd ships the session's spans and no root copy (#194)", async () => {
+  const backend = await startBackend({ leaseDelayMs: 1_500 });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-ended-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const killed = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => existsSync(killed.socketPath), 20_000, "the daemon socket");
+    const session_id = randomUUID();
+    const bash = { tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "toolu_01Bash" };
+    await daemonHook(killed.socketPath, session_id, "SessionStart");
+    await daemonHook(killed.socketPath, session_id, "PreToolUse", bash);
+    await daemonHook(killed.socketPath, session_id, "PostToolUse", { ...bash, tool_response: {} });
+    await new Promise((r) => setTimeout(r, 300));
+    process.kill(killed.child.pid, "SIGKILL");
+    await killed.exited;
+    backend.setLeaseDelay(0);
+    await withoutDaemon(dataDir);
+    const read = { session_id, tool_name: "Read", tool_input: {}, tool_use_id: "toolu_01Read" };
+    for (const hook_event_name of ["PreToolUse", "PostToolUse", "Stop", "SessionEnd"]) {
+      const { code } = await runHook(env, { ...read, hook_event_name, tool_response: {} });
+      assert.equal(code, 0, hook_event_name);
+    }
+    await rm(path.join(dataDir, "profiles"), { force: true, recursive: true });
+    const replaying = startDaemon(env, dataDir);
+    const settled = () =>
+      dataFiles(dataDir).length + dataFiles(dataDir, "obs-journal").length === 0;
+    await waitFor(settled, 20_000, "the replay to ship");
+    process.kill(replaying.child.pid, "SIGTERM");
+    await replaying.exited;
+
+    const calls = sessionSpans(backend.delivered, session_id)
+      .filter((s) => s.name !== "armoriq.agent.run")
+      .map((s) => `${s.name} ${s.attributes["armoriq.tool.call_id"]}`)
+      .sort();
+    assert.deepEqual(calls, [
+      "armoriq.policy.evaluate toolu_01Bash",
+      "armoriq.policy.evaluate toolu_01Read",
+      "armoriq.tool toolu_01Bash",
+      "armoriq.tool toolu_01Read",
+    ]);
+    assert.deepEqual(rootOutcomes(rootsByEnd(backend.delivered)), [
+      "unknown",
+      "unknown",
+      "completed",
+    ]);
+  } finally {
+    killIfRunning(killed.child);
+    await backend.close();
+  }
+});
+
+test("a starting daemon replays its predecessor's journal before it serves a hook (#194)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-order-");
+  const runtime = new armoriqSdk.ArmorIQTelemetryRuntime({
+    backendEndpoint: backend.url,
+    apiKey: API_KEY,
+    sdkVersion: "test",
+  });
+  const binding = runtime.spoolBinding;
+  await runtime.close();
+  const sessionId = randomUUID();
+  const tool = { tool_name: "Bash", tool_use_id: "toolu_01Order" };
+  const at = Date.now() - 1_000;
+  const name = `${at}-0-${deadPid()}-${binding}-00000000-0000-4000-8000-000000000001.json`;
+  const input = { session_id: sessionId, hook_event_name: "PreToolUse", ...tool };
+  placeFile(
+    path.join(dataDir, "obs-journal"),
+    name,
+    JSON.stringify({ event: "PreToolUse", at, input })
+  );
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const post = { ...tool, tool_input: {}, tool_response: {} };
+    await daemonHook(daemon.socketPath, sessionId, "PostToolUse", post);
+    await daemonHook(daemon.socketPath, sessionId, "Stop");
+    await waitFor(() => backend.delivered.length >= 2, 10_000, "the turn's spans");
+    const [policy, toolSpan] = ["armoriq.policy.evaluate", "armoriq.tool"].map((n) =>
+      backend.delivered.find((s) => s.name === n)
+    );
+    assert.ok(policy.endTimeUnixNano <= toolSpan.endTimeUnixNano, "the replayed check comes first");
+  } finally {
+    killIfRunning(daemon.child);
+    await backend.close();
+  }
+});
+
+test("an unwritable spool keeps the journal and says so in daemon.log, and the events ship later (#194)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-nospool-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const spool = path.join(dataDir, "obs-spool");
+  await mkdir(spool, { mode: 0o500 });
+  const daemon = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    const tool = { tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "toolu_01Full" };
+    for (const [event, input] of [
+      ["SessionStart"],
+      ["PreToolUse", tool],
+      ["PostToolUse", { ...tool, tool_response: {} }],
+      ["Stop"],
+      ["SessionEnd", { reason: "other" }],
+    ]) {
+      await daemonHook(daemon.socketPath, sessionId, event, input);
+    }
+    const log = () => readFileSync(path.join(dataDir, "daemon.log"), "utf8");
+    await waitFor(() => /spool write failed/.test(log()), 5_000, "the logged spool failure");
+    process.kill(daemon.child.pid, "SIGTERM");
+    await daemon.exited;
+    assert.equal(dataFiles(dataDir, "obs-journal").length, 5, "every event stays journaled");
+    assert.equal(backend.exportTimes.length, 0);
+
+    await chmod(spool, 0o700);
+    await shipSpoolWithDaemon(env, dataDir);
+    assert.deepEqual(
+      sessionSpans(backend.delivered, sessionId)
+        .map((s) => s.name)
+        .sort(),
+      ["armoriq.agent.run", "armoriq.policy.evaluate", "armoriq.tool"]
+    );
+    assert.equal(rootOutcomes(rootsByEnd(backend.delivered)).at(-1), "completed");
   } finally {
     killIfRunning(daemon.child);
     await backend.close();

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, link, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { link, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ensurePrivateDir, PRIVATE_FILE_MODE } from "./fs-store.mjs";
 
@@ -12,10 +12,10 @@ function markerPath(dataDir, sessionId) {
   return path.join(dataDir, "obs-roots", name);
 }
 
-async function placeMarker(marker, startTime, place) {
+async function placeMarker(marker, record, place) {
   const draft = `${marker}.${randomUUID()}`;
   try {
-    await writeFile(draft, JSON.stringify({ startTime }), { mode: PRIVATE_FILE_MODE, flag: "wx" });
+    await writeFile(draft, JSON.stringify(record), { mode: PRIVATE_FILE_MODE, flag: "wx" });
     await place(draft, marker);
   } finally {
     await rm(draft, { force: true });
@@ -24,7 +24,7 @@ async function placeMarker(marker, startTime, place) {
 
 async function linkMarker(marker, startTime) {
   try {
-    await placeMarker(marker, startTime, link);
+    await placeMarker(marker, { startTime }, link);
     return true;
   } catch (err) {
     if (err?.code === "EEXIST") return false;
@@ -32,13 +32,17 @@ async function linkMarker(marker, startTime) {
   }
 }
 
-function parseStartTime(text) {
+function parseDate(value) {
+  const parsed = new Date(value);
+  return typeof value === "string" && !Number.isNaN(parsed.getTime()) ? parsed : null;
+}
+
+function parseMarker(text) {
   try {
-    const { startTime } = JSON.parse(text) ?? {};
-    const parsed = new Date(startTime);
-    return typeof startTime === "string" && !Number.isNaN(parsed.getTime()) ? parsed : null;
+    const { startTime, endedAt } = JSON.parse(text) ?? {};
+    return { startTime: parseDate(startTime), endedAt: parseDate(endedAt) };
   } catch {
-    return null;
+    return { startTime: null, endedAt: null };
   }
 }
 
@@ -50,7 +54,7 @@ async function readMarker(marker) {
   if (!handle) return null;
   try {
     const [text, stats] = await Promise.all([handle.readFile("utf8"), handle.stat()]);
-    return { startTime: parseStartTime(text), writtenAt: stats.mtime };
+    return { ...parseMarker(text), writtenAt: stats.mtime };
   } finally {
     await handle.close();
   }
@@ -80,7 +84,7 @@ async function claim(dataDir, sessionId) {
   if (!recorded) return now;
   if (recorded.startTime) return recorded.startTime;
   // Readers of one unreadable marker share its mtime, so racing rewrites agree.
-  await placeMarker(marker, recorded.writtenAt, rename);
+  await placeMarker(marker, { startTime: recorded.writtenAt }, rename);
   return recorded.writtenAt;
 }
 
@@ -88,11 +92,13 @@ export function claimRootStart(dataDir, sessionId) {
   return claim(dataDir, sessionId).catch(() => null);
 }
 
-export function rootStartReleased(dataDir, sessionId) {
-  const missing = (err) => err?.code === "ENOENT";
-  return access(markerPath(dataDir, sessionId)).then(() => false, missing);
+export async function rootEndedAt(dataDir, sessionId) {
+  return (await readMarker(markerPath(dataDir, sessionId)))?.endedAt ?? null;
 }
 
-export async function releaseRootStart(dataDir, sessionId) {
-  await rm(markerPath(dataDir, sessionId), { force: true }).catch(() => undefined);
+export async function markRootEnded(dataDir, sessionId, endedAt) {
+  const marker = markerPath(dataDir, sessionId);
+  await ensurePrivateDir(path.dirname(marker));
+  const startTime = (await readMarker(marker))?.startTime ?? endedAt;
+  await placeMarker(marker, { startTime, endedAt }, rename);
 }

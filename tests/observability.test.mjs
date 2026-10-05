@@ -46,7 +46,9 @@ import {
   obsFlush,
   obsFlushAll,
   obsReleaseIdle,
+  obsRetryBacklog,
 } from "../scripts/lib/observability.mjs";
+import { deadPid, placeFile } from "./helpers/obs-files.mjs";
 
 test("installed SDK provides every required observability export", () => {
   for (const name of ["ArmorIQTelemetryRuntime", "OtelSession"]) {
@@ -618,6 +620,11 @@ async function timedHookProcess(sessionId, config) {
   return Date.now() - started;
 }
 
+const rootSessions = () =>
+  spansByName("armoriq.agent.run")
+    .map((span) => span.attributes["session.id"])
+    .sort();
+
 const missFiles = (dataDir) => readdirSync(dataDir).filter((name) => name.endsWith(".miss"));
 
 test("a hook process waits at most 1.5 s for a hung lease, and the next ones skip the wait for 30 s (#191)", async () => {
@@ -647,7 +654,7 @@ test("the daemon still waits out a slow lease, and the lease it stores ends the 
   __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: slowLease(2_000) });
   await observeHook("SessionStart", { session_id: "sess-daemon" }, null, config);
   await obsFlushAll();
-  assert.equal(spansByName("armoriq.agent.run").length, 1, "the daemon waited 2 s for the lease");
+  assert.deepEqual(rootSessions(), ["sess-daemon"], "the daemon waited 2 s for the lease");
   const until = Date.now() + 2_000;
   while (missFiles(dataDir).length > 0 && Date.now() < until) {
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -656,6 +663,28 @@ test("the daemon still waits out a slow lease, and the lease it stores ends the 
   __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: hungLease() });
   const took = await timedHookProcess("sess-after", config);
   assert.ok(took < 500, `the hook read the stored lease in ${took} ms`);
-  assert.equal(spansByName("armoriq.agent.run").length, 2);
+  assert.deepEqual(rootSessions(), ["sess-after", "sess-daemon"]);
+  await provider.shutdown();
+});
+
+const journalFiles = (dataDir) => readdirSync(path.join(dataDir, "obs-journal"));
+
+test("a running daemon adopts the journal of a process that died after it started (#194)", async () => {
+  installHooks();
+  const config = { ...testConfig(), dataDir: mkdtempSync(path.join(tmpdir(), "aq-adopt-")) };
+  await obsServeAsDaemon(config);
+  const { spoolBinding } = new armoriqSdk.ArmorIQTelemetryRuntime({
+    backendEndpoint: config.observabilityEndpoint,
+    apiKey: config.apiKey,
+    sdkVersion: "test",
+  });
+  const at = Date.now();
+  const record = { event: "SessionStart", at, input: { session_id: "sess-orphan" } };
+  const name = `${at}-0-${deadPid()}-${spoolBinding}-00000000-0000-4000-8000-000000000000.json`;
+  placeFile(path.join(config.dataDir, "obs-journal"), name, JSON.stringify(record));
+  await obsRetryBacklog();
+  await obsFlushAll();
+  assert.deepEqual(rootSessions(), ["sess-orphan"]);
+  assert.deepEqual(journalFiles(config.dataDir), []);
   await provider.shutdown();
 });
