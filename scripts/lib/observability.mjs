@@ -1,7 +1,9 @@
 // Every process that records a session ships its own copy of the session's
 // root span; the backend merges copies that share a span id.
 import armoriqSdk from "@armoriq/sdk-dev";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 import { obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
 import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
@@ -10,6 +12,7 @@ const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
 const EXPORT_DRAIN_MARGIN_MS = 1_000;
 const HOOK_LEASE_WAIT_MS = 1_500;
+const LEASE_FETCHER = fileURLToPath(new URL("../obs-lease-fetch.mjs", import.meta.url));
 
 const sessions = new Map();
 const queues = new Map();
@@ -108,12 +111,29 @@ async function awaitHookLease(entry, config) {
     ? obsLeaseMiss(config.dataDir, config.observabilityEndpoint, config.apiKey)
     : null;
   if (await safeObsAsync(() => miss?.recent())) return;
-  await within(
-    safeObsAsync(() => entry.session.refreshPolicy()),
+  const answered = await within(
+    safeObsAsync(() => entry.session.refreshPolicy()).then(() => true),
     HOOK_LEASE_WAIT_MS
   );
-  const leased = entry.runtime.currentCeilingSnapshot().authoritative;
-  if (!leased) await safeObsAsync(() => miss?.record());
+  if (entry.runtime.currentCeilingSnapshot().authoritative || !miss) return;
+  await safeObsAsync(() => miss.record());
+  if (!answered) await safeObsAsync(async () => fetchLeaseInBackground(config));
+}
+
+function fetchLeaseInBackground({ dataDir, observabilityEndpoint, apiKey }) {
+  const child = spawn(process.execPath, [LEASE_FETCHER], {
+    detached: true,
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  child.on("error", () => undefined);
+  child.stdin.on("error", () => undefined);
+  child.stdin.end(JSON.stringify({ dataDir, observabilityEndpoint, apiKey }));
+  child.unref();
+}
+
+export async function obsFetchLease(config) {
+  const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
+  await safeObsAsync(() => runtime.refreshPolicy());
 }
 
 export function obsDrainExportsOnClose() {

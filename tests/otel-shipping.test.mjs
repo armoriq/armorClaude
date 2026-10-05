@@ -568,6 +568,25 @@ test("fallback hooks record a whole session on a 700 ms lease with one lease req
   }
 });
 
+test("a fallback hook that gives up on a 2 s lease leaves the fetch to store it for the next hook (#191)", async () => {
+  const backend = await startBackend({ leaseDelayMs: 2_000 });
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-lease-slow-");
+    await withoutDaemon(dataDir);
+    const env = pluginEnv(home, dataDir, backend.url);
+    const session_id = randomUUID();
+    await runHook(env, { session_id, hook_event_name: "SessionStart", source: "startup" });
+    const stored = () => readdirSync(dataDir).some((name) => /^obs-lease-.*\.json$/.test(name));
+    await waitFor(stored, 6_000, "the background fetch stored the lease");
+    await runSession(env, session_id);
+    assert.equal(backend.leaseRequests.length, 2, "the hook's own request and the background one");
+    assert.equal(rootOutcomes(backend.exports).at(-1), "completed");
+  } finally {
+    await backend.close();
+  }
+});
+
 test("fallback hooks wait once for a lease endpoint that never answers, not on every hook (#191)", async () => {
   const backend = await startBackend({ leaseDelayMs: 6_000 });
   try {
