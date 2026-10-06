@@ -6,8 +6,8 @@ import { OBS_DRAFT_MAX_AGE_MS, OBS_RECORD_MAX_AGE_MS } from "./obs-ages.mjs";
 
 const prunedDirs = new Set();
 
-function markerPath(dataDir, sessionId) {
-  const name = createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+function markerPath(dataDir, binding, sessionId) {
+  const name = createHash("sha256").update(`${binding}\n${sessionId}`).digest("hex").slice(0, 32);
   return path.join(dataDir, "obs-roots", name);
 }
 
@@ -71,8 +71,8 @@ async function pruneOnce(dir) {
   await Promise.allSettled((await readdir(dir)).map(prune));
 }
 
-async function claim(dataDir, sessionId) {
-  const marker = markerPath(dataDir, sessionId);
+async function claim(dataDir, binding, sessionId) {
+  const marker = markerPath(dataDir, binding, sessionId);
   await ensurePrivateDir(path.dirname(marker));
   const now = new Date();
   if (await linkMarker(marker, now)) {
@@ -87,16 +87,16 @@ async function claim(dataDir, sessionId) {
   return recorded.writtenAt;
 }
 
-export function claimRootStart(dataDir, sessionId) {
-  return claim(dataDir, sessionId).catch(() => null);
+export function claimRootStart(dataDir, binding, sessionId) {
+  return claim(dataDir, binding, sessionId).catch(() => null);
 }
 
-export async function rootEndedAt(dataDir, sessionId) {
-  return (await readMarker(markerPath(dataDir, sessionId)))?.endedAt ?? null;
+export async function rootEndedAt(dataDir, binding, sessionId) {
+  return (await readMarker(markerPath(dataDir, binding, sessionId)))?.endedAt ?? null;
 }
 
-export async function markRootEnded(dataDir, sessionId, endedAt) {
-  const marker = markerPath(dataDir, sessionId);
+export async function markRootEnded(dataDir, binding, sessionId, endedAt) {
+  const marker = markerPath(dataDir, binding, sessionId);
   await ensurePrivateDir(path.dirname(marker));
   const startTime = (await readMarker(marker))?.startTime ?? endedAt;
   await placeMarker(marker, { startTime, endedAt }, rename);

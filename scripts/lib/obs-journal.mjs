@@ -45,6 +45,25 @@ export async function journalEvent(file, { event, input, output, at }) {
   return file;
 }
 
+const CALL_KINDS = { PreToolUse: "policy", PostToolUse: "tool", PostToolUseFailure: "tool" };
+
+export function eventCall({ event, input }) {
+  const id = input?.tool_use_id;
+  if (!Object.hasOwn(CALL_KINDS, event) || typeof id !== "string") return null;
+  return `${CALL_KINDS[event]}:${id}`;
+}
+
+function spanCall({ attributes }) {
+  const id = attributes["gen_ai.tool.call.id"];
+  if (typeof id !== "string") return null;
+  return `${attributes["armoriq.operation.category"] === "policy" ? "policy" : "tool"}:${id}`;
+}
+
+export const batchCalls = (batch) => batch.spans.map(spanCall).filter(Boolean);
+
+export const settledEvents = (pending, { sinkFailures, written }) =>
+  pending.filter((item) => item.failures === sinkFailures || written.has(item.call));
+
 export const forgetEvent = (file) => unlink(file).catch(() => undefined);
 
 export async function pruneJournal(dataDir, now = Date.now()) {

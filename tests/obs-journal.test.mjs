@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { denyPreToolWithHint } from "../scripts/lib/hook-output.mjs";
 import { OBS_RECORD_MAX_AGE_MS } from "../scripts/lib/obs-ages.mjs";
-import { journalBacklog, journalEntryPath, journalEvent } from "../scripts/lib/obs-journal.mjs";
+import {
+  journalBacklog,
+  journalEntryPath,
+  journalEvent,
+  settledEvents,
+} from "../scripts/lib/obs-journal.mjs";
 import { deadPid, placeFile } from "./helpers/obs-files.mjs";
 
 const BINDING = "a".repeat(64);
@@ -89,4 +94,19 @@ test("the backlog of one key adopts dead processes' events in order and prunes o
   for (const kept of [busy, live, otherKey, youngDraft]) assert.ok(left.includes(kept), kept);
   for (const gone of [stale, oldDraft]) assert.ok(!left.includes(gone), gone);
   assert.equal(left.length, 8);
+});
+
+test("an event whose span landed in a written batch is settled although a later write failed (#194)", () => {
+  const pending = [
+    { file: "landed", failures: 0, call: "policy:toolu_01A" },
+    { file: "lost", failures: 0, call: "tool:toolu_01A" },
+    { file: "no-call", failures: 0, call: null },
+    { file: "after-failure", failures: 1, call: null },
+  ];
+  const written = new Set(["policy:toolu_01A"]);
+  const settled = settledEvents(pending, { sinkFailures: 1, written });
+  assert.deepEqual(
+    settled.map((item) => item.file),
+    ["landed", "after-failure"]
+  );
 });

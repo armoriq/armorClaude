@@ -8,11 +8,14 @@ import { sanitizeParams, redactSecrets } from "./common.mjs";
 import { appendDaemonLog } from "./daemon-log.mjs";
 import { obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
 import {
+  batchCalls,
+  eventCall,
   forgetEvent,
   journalBacklog,
   journalEntryPath,
   journalEvent,
   pruneJournal,
+  settledEvents,
 } from "./obs-journal.mjs";
 import { SPOOL_MAX_TRIES, shipRetryDelayMs, shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
 import { claimRootStart, markRootEnded, rootEndedAt } from "./obs-root-marker.mjs";
@@ -26,7 +29,6 @@ const sessions = new Map();
 const queues = new Map();
 const shippers = new Map();
 const inFlight = new Set();
-const FLUSHES = new Set(["Stop", "SessionEnd"]);
 let shipping = false;
 let testHooks = null;
 let releasingAll = null;
@@ -68,8 +70,8 @@ function sessionRootIds(sessionId) {
   };
 }
 
-async function rootStartTime(sessionId, config) {
-  return config.dataDir ? claimRootStart(config.dataDir, sessionId) : null;
+async function rootStartTime(entry, config) {
+  return config.dataDir ? claimRootStart(config.dataDir, entry.binding, entry.sessionId) : null;
 }
 
 function spoolSink(config, entry) {
@@ -82,6 +84,7 @@ function spoolSink(config, entry) {
         logObs(config, `spool write failed, events stay in obs-journal: ${err?.message ?? err}`);
         throw err;
       }
+      for (const call of batchCalls(batch)) entry.written.add(call);
       if (shipping) afterSpoolWrite(config, entry);
     },
   };
@@ -114,9 +117,17 @@ function runtimeOptionsFor(config, entry) {
 
 async function initEntry(key, record, config) {
   const sessionId = record.input.session_id;
-  const entry = { key, sessionId, lastEventAt: record.at, sinkFailures: 0, pending: [] };
+  const entry = {
+    key,
+    sessionId,
+    lastEventAt: record.at,
+    sinkFailures: 0,
+    pending: [],
+    written: new Set(),
+  };
   entry.runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config, entry));
-  const startTime = await rootStartTime(sessionId, config);
+  entry.binding = entry.runtime.spoolBinding;
+  const startTime = await rootStartTime(entry, config);
   entry.markerDir = startTime && config.dataDir;
   entry.session = new OtelSession(entry.runtime, {
     sessionId,
@@ -360,12 +371,15 @@ async function obsEndSession(entry, config) {
   const endTime = new Date(entry.lastEventAt);
   await safeObsAsync(() => entry.session.close({ status: "ok", endTime }));
   if (config.dataDir) {
-    await safeObsAsync(() => markRootEnded(config.dataDir, entry.sessionId, endTime));
+    await safeObsAsync(() =>
+      markRootEnded(config.dataDir, entry.binding, entry.sessionId, endTime)
+    );
   }
 }
 
 async function endedSince(entry) {
-  const endedAt = entry.markerDir && (await rootEndedAt(entry.markerDir, entry.sessionId));
+  const endedAt =
+    entry.markerDir && (await rootEndedAt(entry.markerDir, entry.binding, entry.sessionId));
   return Boolean(endedAt) && endedAt.getTime() >= entry.lastEventAt;
 }
 
@@ -390,9 +404,10 @@ async function settleJournal(entry) {
   const settling = entry.pending.splice(0);
   if (settling.length === 0) return;
   await safeObsAsync(() => entry.runtime.forceFlush());
-  const written = settling.filter((item) => item.failures === entry.sinkFailures);
+  const written = settledEvents(settling, entry);
   await Promise.all(written.map((item) => forgetEvent(item.file)));
   for (const item of settling) inFlight.delete(item.file);
+  if (entry.pending.length === 0) entry.written.clear();
 }
 
 function enqueue(sessionId, task) {
@@ -479,8 +494,9 @@ const settleKey = (key) => sessions.has(key) && settleJournal(sessions.get(key))
 
 async function settleEvent(entry, record, file) {
   if (!entry) return forgetSettled(file);
-  if (file) entry.pending.push({ file, failures: entry.failuresBefore });
-  if (FLUSHES.has(record.event)) await settleJournal(entry);
+  if (file) entry.pending.push({ file, failures: entry.failuresBefore, call: eventCall(record) });
+  if (record.event === "Stop") await releaseSession(entry);
+  else if (record.event === "SessionEnd") await settleJournal(entry);
 }
 
 async function forgetSettled(file) {
@@ -519,8 +535,6 @@ async function applyEvent(entry, record, config) {
       return obsReport(entry, config, record, "success");
     case "PostToolUseFailure":
       return obsReport(entry, config, record, "error");
-    case "Stop":
-      return entry.session.flush("ok");
     case "SessionEnd":
       return obsEndSession(entry, config);
     default:

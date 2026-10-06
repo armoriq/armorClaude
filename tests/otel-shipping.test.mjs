@@ -19,6 +19,7 @@ import {
   obsRetryBacklog,
   obsServeAsDaemon,
 } from "../scripts/lib/observability.mjs";
+import { batchCalls, eventCall } from "../scripts/lib/obs-journal.mjs";
 import { shipSpool, writeSpoolBatch } from "../scripts/lib/obs-spool.mjs";
 import { deadPid, placeFile } from "./helpers/obs-files.mjs";
 
@@ -649,6 +650,42 @@ test("a daemon SIGKILLed after a tool call loses none of its ended spans (#194)"
   }
 });
 
+test("a daemon SIGKILLed after Stop with no later hook loses none of the turn, root included (#194)", async () => {
+  const backend = await startBackend({ holdExports: true });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-stopkill-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const killed = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => existsSync(killed.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    const tool = { tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "toolu_01Stop" };
+    await daemonHook(killed.socketPath, sessionId, "SessionStart");
+    await daemonHook(killed.socketPath, sessionId, "PreToolUse", tool);
+    await daemonHook(killed.socketPath, sessionId, "PostToolUse", { ...tool, tool_response: {} });
+    await daemonHook(killed.socketPath, sessionId, "Stop");
+    await waitFor(() => backend.exportTimes.length > 0, 10_000, "the Stop batch");
+    await waitFor(() => dataFiles(dataDir, "obs-journal").length === 0, 5_000, "a settled journal");
+    process.kill(killed.child.pid, "SIGKILL");
+    await killed.exited;
+    backend.dropHeldExports();
+
+    await shipSpoolWithDaemon(env, dataDir);
+    const spans = storedSpans(backend.delivered).filter(
+      (s) => s.attributes["armoriq.session_id"] === sessionId
+    );
+    assert.deepEqual(spans.map((s) => s.name).sort(), [
+      "armoriq.agent.run",
+      "armoriq.policy.evaluate",
+      "armoriq.tool",
+    ]);
+    assert.deepEqual(rootOutcomes(spans), ["unknown"]);
+  } finally {
+    killIfRunning(killed.child);
+    await backend.close();
+  }
+});
+
 test("a daemon SIGKILLed while it waits for the lease loses none of the events it answered (#194)", async () => {
   const backend = await startBackend({ leaseDelayMs: 1_500 });
   const home = await tempDir("aq-home-");
@@ -771,7 +808,9 @@ test("a respawned daemon ships each journaled event under the API key its sessio
     await hookB(respawned.socketPath, "SessionEnd", { reason: "other" });
     const done = () => rootOutcomes(backend.delivered).includes("completed");
     await waitFor(done, 10_000, "the SessionEnd root");
-    const spans = sessionSpans(backend.delivered, sessionId);
+    const spans = storedSpans(backend.delivered).filter(
+      (s) => s.attributes["armoriq.session_id"] === sessionId
+    );
     assert.deepEqual(spans.map((s) => s.name).sort(), [
       "armoriq.agent.run",
       "armoriq.policy.evaluate",
@@ -1289,4 +1328,41 @@ test("a deny-with-hint keeps the prompt and tool input out of the export and the
   } finally {
     await backend.close();
   }
+});
+
+test("a hook event and the span it records share one call key, so a settled journal knows what landed (#194)", async () => {
+  const batches = [];
+  const runtime = new ArmorIQTelemetryRuntime({
+    backendEndpoint: "http://127.0.0.1:9",
+    apiKey: API_KEY,
+    sdkVersion: "test",
+    leaseFetcher: lease,
+    spanSink: { write: async (batch) => void batches.push(batch) },
+  });
+  const session = new OtelSession(runtime, { sessionId: "sess-calls" });
+  await session.refreshPolicy();
+  await session.beginRoot({ input: "calls" });
+  const events = [];
+  for (const [toolName, id] of [
+    ["Bash", "toolu_01Call"],
+    ["mcp__srv__get", "toolu_01Mcp"],
+  ]) {
+    const category = toolName.startsWith("mcp__") ? "mcp" : "tool";
+    await session.recordPolicy({ toolName, toolCallId: id }, { decision: "allow" });
+    await session.recordTool(
+      { toolName, toolCallId: id, operation: { category } },
+      { outcome: "success" }
+    );
+    const input = { tool_use_id: id };
+    events.push({ event: "PreToolUse", input }, { event: "PostToolUse", input });
+  }
+  events.push({ event: "PostToolUseFailure", input: { tool_use_id: "toolu_01None" } });
+  await session.close({ status: "ok" });
+
+  const landed = new Set(batches.flatMap(batchCalls));
+  assert.deepEqual(
+    events.map((record) => landed.has(eventCall(record))),
+    [true, true, true, true, false]
+  );
+  assert.equal(eventCall({ event: "SessionStart", input: { tool_use_id: "toolu_01Call" } }), null);
 });

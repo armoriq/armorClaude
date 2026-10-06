@@ -4,7 +4,10 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync } from "nod
 import { utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { claimRootStart } from "../scripts/lib/obs-root-marker.mjs";
+import { claimRootStart, markRootEnded, rootEndedAt } from "../scripts/lib/obs-root-marker.mjs";
+
+const BINDING = "a".repeat(64);
+const OTHER = "b".repeat(64);
 
 const corrupt = ["2026-10-01T09:00Z", '{"startTime":"2026', "", '{"pid":1}', '{"startTime":0}'];
 
@@ -12,13 +15,15 @@ test("processes that find an unreadable marker converge on one start time, in pr
   const writtenAt = new Date("2026-10-04T08:00:00.000Z");
   for (const content of corrupt) {
     const dataDir = mkdtempSync(path.join(tmpdir(), "obs-corrupt-"));
-    await claimRootStart(dataDir, "sess-corrupt");
+    await claimRootStart(dataDir, BINDING, "sess-corrupt");
     const dir = path.join(dataDir, "obs-roots");
     const marker = path.join(dir, readdirSync(dir)[0]);
     writeFileSync(marker, content);
     utimesSync(marker, writtenAt, writtenAt);
 
-    const starts = await Promise.all([1, 2, 3].map(() => claimRootStart(dataDir, "sess-corrupt")));
+    const starts = await Promise.all(
+      [1, 2, 3].map(() => claimRootStart(dataDir, BINDING, "sess-corrupt"))
+    );
 
     assert.deepEqual(starts, [writtenAt, writtenAt, writtenAt], content);
     assert.deepEqual(JSON.parse(readFileSync(marker, "utf8")), { startTime: writtenAt.toJSON() });
@@ -31,7 +36,7 @@ test("processes that find an unreadable marker converge on one start time, in pr
 test("claiming a root start never throws", async () => {
   const dataDir = path.join(mkdtempSync(path.join(tmpdir(), "obs-nodir-")), "file");
   writeFileSync(dataDir, "not a directory");
-  assert.equal(await claimRootStart(dataDir, "sess-nodir"), null);
+  assert.equal(await claimRootStart(dataDir, BINDING, "sess-nodir"), null);
 });
 
 test("the first new marker in a process prunes week-old markers and minute-old drafts", async () => {
@@ -44,9 +49,20 @@ test("the first new marker in a process prunes week-old markers and minute-old d
     const at = new Date(Date.now() - minutes * 60_000);
     utimesSync(path.join(dir, name), at, at);
   }
-  await claimRootStart(dataDir, "sess-new");
+  await claimRootStart(dataDir, BINDING, "sess-new");
 
   const left = readdirSync(dir);
   assert.equal(left.length, 3, left.join());
   assert.deepEqual(left.filter((name) => name in ages).sort(), ["fresh", "fresh.draft"]);
+});
+
+test("a session's marker belongs to one key, so another key ending it leaves the first one open (#194)", async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), "obs-keys-"));
+  const startedAt = await claimRootStart(dataDir, BINDING, "sess-switch");
+  const endedAt = new Date(startedAt.getTime() + 1_000);
+  await markRootEnded(dataDir, OTHER, "sess-switch", endedAt);
+
+  assert.equal(await rootEndedAt(dataDir, BINDING, "sess-switch"), null);
+  assert.deepEqual(await rootEndedAt(dataDir, OTHER, "sess-switch"), endedAt);
+  assert.equal(readdirSync(path.join(dataDir, "obs-roots")).length, 2);
 });
