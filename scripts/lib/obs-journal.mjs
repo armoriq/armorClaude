@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
 import { ensurePrivateDir, writePrivateFile } from "./fs-store.mjs";
+import { DECISION_CODE } from "./hook-output.mjs";
 import {
   claimable,
   claimRecord,
@@ -31,7 +32,14 @@ function journalFields(ready) {
 
 function decisionOnly(output) {
   const permissionDecision = output?.hookSpecificOutput?.permissionDecision;
-  return permissionDecision ? { hookSpecificOutput: { permissionDecision } } : null;
+  if (!permissionDecision) return null;
+  const decisionCode = output[DECISION_CODE];
+  return { hookSpecificOutput: { permissionDecision }, ...(decisionCode ? { decisionCode } : {}) };
+}
+
+function withDecisionCode(record) {
+  const code = record.output?.decisionCode;
+  return code ? { ...record, output: { ...record.output, [DECISION_CODE]: code } } : record;
 }
 
 export function journalEntryPath(dataDir, binding, at) {
@@ -93,12 +101,14 @@ async function adopt(dir, entry) {
   if (!claimed) return null;
   const file = path.join(dir, claimed.claimed);
   const record = await readClaimed(dir, claimed);
-  if (record) return { file, record };
+  if (record) return { file, record: withDecisionCode(record) };
   await forgetEvent(file);
   return null;
 }
 
-export async function journalBacklog(dataDir, binding, busy, now = Date.now()) {
+export const journalName = (file) => path.basename(file).replace(/\.claim-\d+$/, "");
+
+export async function journalBacklog(dataDir, binding, busy, now = Date.now(), spooled = null) {
   const dir = journalDir(dataDir);
   const { live, dropped } = await pruneJournal(dataDir, now, busy);
   const due = live
@@ -106,12 +116,16 @@ export async function journalBacklog(dataDir, binding, busy, now = Date.now()) {
       (entry) => entry.binding === binding && claimable(entry, busy.has(path.join(dir, entry.name)))
     )
     .sort((a, b) => a.at - b.at || a.seq - b.seq);
-  const adopted = new Array(due.length);
+  const landed = due.length > 0 && spooled ? await spooled() : new Set();
+  const spooledAlready = due.filter((entry) => landed.has(entry.ready));
+  await Promise.all(spooledAlready.map((entry) => forgetEvent(path.join(dir, entry.name))));
+  const fresh = due.filter((entry) => !landed.has(entry.ready));
+  const adopted = new Array(fresh.length);
   let next = 0;
   const adoptNext = async () => {
-    while (next < due.length) {
+    while (next < fresh.length) {
       const at = next++;
-      adopted[at] = await adopt(dir, due[at]);
+      adopted[at] = await adopt(dir, fresh[at]);
     }
   };
   await Promise.all(Array.from({ length: ADOPT_CONCURRENCY }, adoptNext));

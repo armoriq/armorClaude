@@ -37,8 +37,8 @@ function fakeRuntime(statusOf) {
     exportSpooled: async (batches) => {
       seen.push(...batches);
       return batches.map((batch) => {
-        const [status, reason] = statusOf(batch).split("/");
-        return { status, reason };
+        const [status, reason, httpStatus] = statusOf(batch).split("/");
+        return { status, reason, ...(httpStatus ? { httpStatus: Number(httpStatus) } : {}) };
       });
     },
   };
@@ -91,7 +91,10 @@ test("shipping deletes acknowledged, discarded and rejected batches, keeps faile
     place(dataDir, entryName(now + i, 20, BINDING, i), JSON.stringify({ status }))
   );
   const garbled = place(dataDir, entryName(now + 5, 3, BINDING, 5), "{no");
-  const runtime = fakeRuntime((batch) => (batch === null ? "rejected" : batch.status));
+  const outcomes = { rejected: "rejected/backend_rejected/401" };
+  const runtime = fakeRuntime((batch) =>
+    batch === null ? "rejected/malformed" : (outcomes[batch.status] ?? batch.status)
+  );
   const skip = new Set();
   const round = await shipSpool(dataDir, BINDING, runtime, { skip });
   assert.deepEqual(runtime.seen, [...statuses.map((status) => ({ status })), null]);
@@ -99,6 +102,7 @@ test("shipping deletes acknowledged, discarded and rejected batches, keeps faile
     shipped: 6,
     settled: 4,
     dropped: 0,
+    rejected: ["backend_rejected 401", "malformed"],
     outage: true,
     more: false,
     nextDueAt: Infinity,
@@ -148,6 +152,7 @@ test("shipping an empty spool sends nothing (#193)", async () => {
     shipped: 0,
     settled: 0,
     dropped: 0,
+    rejected: [],
     outage: false,
     more: false,
     nextDueAt: Infinity,
@@ -179,7 +184,7 @@ test("a batch that fails while the backend answers others waits out its own back
   assert.ok(!listed(dataDir).includes(poison));
 });
 
-test("an outage that answers no batch counts no failed export against any of them (#193)", async () => {
+test("an outage that answers no batch drops none of them, however often they failed (#193)", async () => {
   const dataDir = tempDataDir();
   const now = Date.now();
   const tries = SPOOL_MAX_TRIES - 1;
@@ -189,5 +194,16 @@ test("an outage that answers no batch counts no failed export against any of the
   const outcome = await shipSpool(dataDir, BINDING, runtime);
   assert.deepEqual([outcome.dropped, outcome.outage], [0, true]);
   const left = listed(dataDir).map((name) => name.split("-").at(-2));
-  assert.deepEqual(left.sort(), ["0", String(tries)]);
+  assert.deepEqual(left.sort(), ["1", String(tries + 1)]);
+});
+
+test("a batch that keeps failing on its own backs off by doubling (#193)", async () => {
+  const dataDir = tempDataDir();
+  const now = Date.now();
+  place(dataDir, entryName(now - 1, 2, BINDING, 1, 2, now - 1), '"alone"');
+  const runtime = fakeRuntime(() => "failed/export_failed");
+  const outcome = await shipSpool(dataDir, BINDING, runtime);
+  const [name] = listed(dataDir);
+  assert.equal(name.split("-").at(-2), "3");
+  assert.ok(outcome.nextDueAt - Date.now() > 19_000, "the third failure waits 20 s");
 });

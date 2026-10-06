@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { denyPreToolWithHint } from "../scripts/lib/hook-output.mjs";
+import { DECISION_CODE, denyPreToolWithHint } from "../scripts/lib/hook-output.mjs";
 import { OBS_RECORD_MAX_AGE_MS } from "../scripts/lib/obs-ages.mjs";
 import {
   JOURNAL_MAX_ENTRIES,
@@ -36,7 +36,7 @@ test("a journaled event is an owner-only file with the call's identity and decis
     tool_use_id: "toolu_01J",
     tool_input: { command: "curl -H 'Authorization: Bearer SECRET_TOKEN_123' https://x" },
   };
-  const output = denyPreToolWithHint("Tool not in plan", {
+  const output = denyPreToolWithHint("intent_drift", "Tool not in plan", {
     toolName: "Bash",
     toolInput: input.tool_input,
     goal: "g",
@@ -65,8 +65,27 @@ test("a journaled event is an owner-only file with the call's identity and decis
       tool_name: "Bash",
       tool_use_id: "toolu_01J",
     },
-    output: { hookSpecificOutput: { permissionDecision: "deny" } },
+    output: { hookSpecificOutput: { permissionDecision: "deny" }, decisionCode: "intent_drift" },
   });
+});
+
+test("a replayed deny keeps the code of the rule that decided it (#194, #201)", async () => {
+  const dataDir = tempDataDir();
+  const at = Date.now() - 1_000;
+  const output = {
+    hookSpecificOutput: { permissionDecision: "deny" },
+    decisionCode: "policy_denied",
+  };
+  const record = { event: "PreToolUse", at, input: { session_id: "s" }, output };
+  placeFile(
+    journalDir(dataDir),
+    `${at}-0-${BINDING}-${UUID}1.json.claim-${deadPid()}`,
+    JSON.stringify(record)
+  );
+  const {
+    backlog: [replayed],
+  } = await journalBacklog(dataDir, BINDING, new Set(), Date.now());
+  assert.equal(replayed.record.output[DECISION_CODE], "policy_denied");
 });
 
 test("the backlog of one key adopts dead processes' events in order and prunes old entries and drafts (#194)", async () => {

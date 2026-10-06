@@ -16,10 +16,17 @@ import {
   journalEntryPath,
   journalEvent,
   JOURNAL_MAX_ENTRIES,
+  journalName,
   pruneJournal,
   settledEvents,
 } from "./obs-journal.mjs";
-import { SPOOL_MAX_TRIES, shipRetryDelayMs, shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
+import {
+  SPOOL_MAX_TRIES,
+  shipRetryDelayMs,
+  shipSpool,
+  spooledJournal,
+  writeSpoolBatch,
+} from "./obs-spool.mjs";
 import { claimRootStart, markRootEnded, rootEndedAt } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
@@ -79,19 +86,24 @@ async function rootStartTime(entry, config, at) {
   return config.dataDir ? claimRootStart(config.dataDir, entry.binding, entry.sessionId, at) : null;
 }
 
+const coveredEntries = (entry, calls) =>
+  entry.pending.filter((item) => calls.has(item.call)).map((item) => journalName(item.file));
+
 function spoolSink(config, entry) {
   return {
     async write(batch) {
+      const calls = new Set(batchCalls(batch));
+      const journal = coveredEntries(entry, calls);
       let dropped;
       try {
-        dropped = await writeSpoolBatch(config.dataDir, batch);
+        dropped = await writeSpoolBatch(config.dataDir, { ...batch, journal });
       } catch (err) {
         entry.sinkFailures += 1;
         logObs(config, `spool write failed, events stay in obs-journal: ${err?.message ?? err}`);
         throw err;
       }
       if (dropped) logObs(config, `spool over 8 MiB: dropped its ${dropped} oldest batch(es)`);
-      for (const call of batchCalls(batch)) entry.written.add(call);
+      for (const call of calls) entry.written.add(call);
       await forgetLanded(entry);
       if (shipping) afterSpoolWrite(config, entry);
     },
@@ -185,8 +197,8 @@ function shipperFor(config) {
     timer: null,
   });
   shippers.set(key, shipper);
-  shipNow(shipper);
   shipper.ready = replayBacklog(shipper);
+  shipper.ready.then(() => shipNow(shipper));
   return shipper;
 }
 
@@ -195,13 +207,24 @@ async function shipRound(shipper) {
   const round = await safeObsAsync(() =>
     shipSpool(shipper.dataDir, shipper.binding, shipper.runtime, options)
   );
+  logRound(shipper.config, round);
+  return round;
+}
+
+function logRound(config, round) {
   if (round?.dropped) {
     logObs(
-      shipper.config,
+      config,
       `dropped ${round.dropped} spooled batch(es) after ${SPOOL_MAX_TRIES} failed exports`
     );
   }
-  return round;
+  if (round?.rejected.length) {
+    const reasons = [...new Set(round.rejected)].join(", ");
+    logObs(
+      config,
+      `the backend rejected ${round.rejected.length} spooled batch(es), deleted: ${reasons}`
+    );
+  }
 }
 
 function wakeAt(shipper, at) {
@@ -315,6 +338,8 @@ export async function obsFetchLease(config) {
   const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
   await safeObsAsync(() => runtime.refreshPolicy());
 }
+
+export const __openSessionsForTests = () => sessions.size;
 
 export function __resetObsForTests() {
   sessions.clear();
@@ -568,7 +593,10 @@ async function capJournal({ config }) {
 }
 
 async function adoptJournal({ config, binding }) {
-  const journal = await safeObsAsync(() => journalBacklog(config.dataDir, binding, inFlight));
+  const spooled = () => spooledJournal(config.dataDir, binding);
+  const journal = await safeObsAsync(() =>
+    journalBacklog(config.dataDir, binding, inFlight, Date.now(), spooled)
+  );
   logJournalDrops(config, journal);
   return journal?.backlog ?? [];
 }

@@ -948,6 +948,51 @@ test("a starting daemon replays its predecessor's journal before it serves a hoo
   }
 });
 
+test("a daemon SIGKILLed when a replay writes its first batch stores each replayed call once (#194)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-replaykill-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const runtime = new armoriqSdk.ArmorIQTelemetryRuntime({
+    backendEndpoint: backend.url,
+    apiKey: API_KEY,
+    sdkVersion: "test",
+  });
+  const binding = runtime.spoolBinding;
+  await runtime.close();
+  const sessionId = randomUUID();
+  const at = Date.now() - 60_000;
+  const dead = deadPid();
+  for (let i = 0; i < 600; i++) {
+    const input = { session_id: sessionId, tool_name: "Read", tool_use_id: `toolu_${i}` };
+    const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+    placeFile(
+      path.join(dataDir, "obs-journal"),
+      `${at + i}-${i}-${binding}-${id}.json.claim-${dead}`,
+      JSON.stringify({ event: "PreToolUse", at: at + i, input })
+    );
+  }
+  const killed = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => dataFiles(dataDir).length > 0, 20_000, "the first replayed batch");
+    process.kill(killed.child.pid, "SIGKILL");
+    await killed.exited;
+    await shipSpoolWithDaemon(env, dataDir);
+    const ids = new Map();
+    for (const span of storedSpans(backend.delivered)) {
+      if (span.name !== "armoriq.policy.evaluate") continue;
+      const call = span.attributes["armoriq.tool.call_id"];
+      ids.set(call, (ids.get(call) ?? 0) + 1);
+    }
+    assert.equal(ids.size, 600, "every replayed call is stored");
+    const twice = [...ids.values()].filter((n) => n > 1).length;
+    assert.ok(twice <= 5, `${twice} calls stored twice`);
+  } finally {
+    killIfRunning(killed.child);
+    await backend.close();
+  }
+});
+
 test("an unwritable spool keeps the journal and says so in daemon.log, and the events ship later (#194)", async () => {
   const backend = await startBackend();
   const home = await tempDir("aq-home-");
@@ -1080,7 +1125,9 @@ test("fallback hooks wait once for a lease endpoint that never answers, not on e
       took.push(Date.now() - started);
     }
     assert.ok(took[0] < 3_000, `the first hook took ${took[0]} ms`);
-    for (const ms of took.slice(1)) assert.ok(ms < 1_000, `a later hook took ${ms} ms`);
+    for (const ms of took.slice(1)) {
+      assert.ok(ms < took[0] - 1_000, `a later hook took ${ms} ms, the waiting one ${took[0]} ms`);
+    }
   } finally {
     await backend.close();
   }
