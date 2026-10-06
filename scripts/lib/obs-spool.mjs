@@ -17,7 +17,7 @@ const SHIP_LIMIT = 64;
 const RETRY_FIRST_MS = 5_000;
 const RETRY_MAX_MS = 10 * 60_000;
 const KEPT = new Set(["failed", "unsupported"]);
-const BATCH_FAULTS = new Set(["export_failed", "deadline"]);
+const BATCH_FAULTS = new Set(["export_failed"]);
 
 const FIELDS = /^\d+-(\d+)-([0-9a-f]{64})-([0-9a-f-]{36})-(\d+)-(\d+)\.json$/;
 const BINDING = /^[0-9a-f]{64}$/;
@@ -63,23 +63,24 @@ export function shipRetryDelayMs(failures) {
   return Math.min(RETRY_FIRST_MS * 2 ** (failures - 1), RETRY_MAX_MS);
 }
 
-async function settle(dir, entry, result, skip) {
-  const tries = entry.tries + (BATCH_FAULTS.has(result.reason) ? 1 : 0);
+async function settle(dir, entry, result, { skip, answered }) {
+  const fault = BATCH_FAULTS.has(result.reason);
+  const tries = entry.tries + (answered && fault ? 1 : 0);
   if (!KEPT.has(result.status) || tries >= SPOOL_MAX_TRIES) {
     await removeRecord(dir, entry.claimed);
     return { settled: !KEPT.has(result.status), dropped: KEPT.has(result.status), dueAt: Infinity };
   }
   if (result.status === "unsupported") skip.add(entry.ready);
-  const retry = tries > entry.tries;
-  const dueAt = retry ? Date.now() + shipRetryDelayMs(tries) : entry.dueAt;
+  const dueAt = fault ? Date.now() + shipRetryDelayMs(Math.max(tries, 1)) : entry.dueAt;
   const next = path.join(dir, batchName({ ...entry, tries, dueAt }));
   await rename(path.join(dir, entry.claimed), next).catch(() => undefined);
-  return { settled: false, dropped: false, dueAt: retry ? dueAt : Infinity };
+  return { settled: false, dropped: false, dueAt: fault ? dueAt : Infinity };
 }
 
-const freshFirst = (a, b) => a.tries - b.tries || a.at - b.at;
+const failedBefore = (entry) => entry.dueAt > 0;
+const freshFirst = (a, b) => failedBefore(a) - failedBefore(b) || a.tries - b.tries || a.at - b.at;
 const notTheBatch = (entry, result) =>
-  result.status === "failed" && (entry.tries === 0 || !BATCH_FAULTS.has(result.reason));
+  result.status === "failed" && (!failedBefore(entry) || !BATCH_FAULTS.has(result.reason));
 const earliest = (times) => times.reduce((a, b) => Math.min(a, b), Infinity);
 
 async function dueBatches(dir, binding, skip, now) {
@@ -106,8 +107,9 @@ export async function shipSpool(dataDir, binding, runtime, { limit = SHIP_LIMIT,
   }
   const batches = await Promise.all(claimed.map((entry) => readClaimed(dir, entry)));
   const results = await runtime.exportSpooled(batches);
+  const round = { skip: skipped, answered: results.some((result) => !KEPT.has(result.status)) };
   const settled = await Promise.all(
-    claimed.map((entry, i) => settle(dir, entry, results[i], skipped))
+    claimed.map((entry, i) => settle(dir, entry, results[i], round))
   );
   return {
     shipped: claimed.length,

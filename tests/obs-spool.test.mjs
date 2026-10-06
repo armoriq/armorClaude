@@ -154,10 +154,11 @@ test("shipping an empty spool sends nothing (#193)", async () => {
   assert.deepEqual(runtime.seen, []);
 });
 
-test("a batch the backend keeps failing waits out its own backoff behind fresh batches, and its 8th failure drops it (#193)", async () => {
+test("a batch that fails while the backend answers others waits out its own backoff, and its 8th such failure drops it (#193)", async () => {
   const dataDir = tempDataDir();
   const now = Date.now();
   const poison = place(dataDir, entryName(now - 5_000, 2, BINDING, 1), '"poison"');
+  place(dataDir, entryName(now - 4_000, 2, BINDING, 2), '"live-1"');
   const runtime = fakeRuntime((batch) =>
     batch === "poison" ? "failed/export_failed" : "acknowledged"
   );
@@ -165,13 +166,27 @@ test("a batch the backend keeps failing waits out its own backoff behind fresh b
   const [retried] = listed(dataDir);
   assert.match(retried, new RegExp(`-1-${first.nextDueAt}\\.json$`));
   assert.ok(first.nextDueAt - Date.now() > 4_000, "the failed batch is due again in 5 s");
-  place(dataDir, entryName(now - 1_000, 2, BINDING, 2), '"live"');
+  place(dataDir, entryName(now - 1_000, 2, BINDING, 3), '"live-2"');
   await shipSpool(dataDir, BINDING, runtime, { limit: 1 });
-  assert.deepEqual(runtime.seen, ["poison", "live"]);
+  assert.deepEqual(runtime.seen, ["poison", "live-1", "live-2"]);
   assert.deepEqual(listed(dataDir), [retried]);
   const tries = SPOOL_MAX_TRIES - 1;
-  const doomed = place(dataDir, entryName(now - 4_000, 2, BINDING, 3, tries, now), '"poison"');
+  const doomed = place(dataDir, entryName(now - 3_000, 2, BINDING, 4, tries, now), '"poison"');
+  place(dataDir, entryName(now - 2_000, 2, BINDING, 5), '"live-3"');
   const last = await shipSpool(dataDir, BINDING, runtime);
   assert.deepEqual([last.dropped, listed(dataDir).includes(doomed)], [1, false]);
   assert.ok(!listed(dataDir).includes(poison));
+});
+
+test("an outage that answers no batch counts no failed export against any of them (#193)", async () => {
+  const dataDir = tempDataDir();
+  const now = Date.now();
+  const tries = SPOOL_MAX_TRIES - 1;
+  place(dataDir, entryName(now - 2, 2, BINDING, 1, tries), '"old"');
+  place(dataDir, entryName(now - 1, 2, BINDING, 2), '"new"');
+  const runtime = fakeRuntime(() => "failed/export_failed");
+  const outcome = await shipSpool(dataDir, BINDING, runtime);
+  assert.deepEqual([outcome.dropped, outcome.outage], [0, true]);
+  const left = listed(dataDir).map((name) => name.split("-").at(-2));
+  assert.deepEqual(left.sort(), ["0", String(tries)]);
 });

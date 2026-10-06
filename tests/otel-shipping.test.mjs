@@ -893,7 +893,7 @@ test("a retried batch that fails again does not hold back the shipper's next rou
     const spool = path.join(dataDir, "obs-spool");
     renameSync(
       path.join(spool, fresh),
-      path.join(spool, fresh.replace(/-0-0\.json$/, "-1-0.json"))
+      path.join(spool, fresh.replace(/-0-0\.json$/, `-1-${Date.now() - 1}.json`))
     );
     const stop = shipInProcess(backend, dataDir);
     try {
