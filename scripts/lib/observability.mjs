@@ -153,13 +153,24 @@ async function shipRound(shipper) {
   const round = await safeObsAsync(() =>
     shipSpool(shipper.dataDir, shipper.binding, shipper.runtime, options)
   );
+  logRound(shipper.config, round);
+  return round;
+}
+
+function logRound(config, round) {
   if (round?.dropped) {
     logObs(
-      shipper.config,
+      config,
       `dropped ${round.dropped} spooled batch(es) after ${SPOOL_MAX_TRIES} failed exports`
     );
   }
-  return round;
+  if (round?.rejected.length) {
+    const reasons = [...new Set(round.rejected)].join(", ");
+    logObs(
+      config,
+      `the backend rejected ${round.rejected.length} spooled batch(es), deleted: ${reasons}`
+    );
+  }
 }
 
 function wakeAt(shipper, at) {

@@ -66,13 +66,13 @@ export function shipRetryDelayMs(failures) {
 
 async function settle(dir, entry, result, { skip, answered }) {
   const fault = BATCH_FAULTS.has(result.reason);
-  const tries = entry.tries + (answered && fault ? 1 : 0);
-  if (!KEPT.has(result.status) || tries >= SPOOL_MAX_TRIES) {
+  const tries = entry.tries + (fault ? 1 : 0);
+  if (!KEPT.has(result.status) || (answered && tries >= SPOOL_MAX_TRIES)) {
     await removeRecord(dir, entry.claimed);
     return { settled: !KEPT.has(result.status), dropped: KEPT.has(result.status), dueAt: Infinity };
   }
   if (result.status === "unsupported") skip.add(entry.ready);
-  const dueAt = fault ? Date.now() + shipRetryDelayMs(Math.max(tries, 1)) : entry.dueAt;
+  const dueAt = fault ? Date.now() + shipRetryDelayMs(tries) : entry.dueAt;
   const next = path.join(dir, batchName({ ...entry, tries, dueAt }));
   await rename(path.join(dir, entry.claimed), next).catch(() => undefined);
   return { settled: false, dropped: false, dueAt: fault ? dueAt : Infinity };
@@ -82,6 +82,7 @@ const failedBefore = (entry) => entry.dueAt > 0;
 const freshFirst = (a, b) => failedBefore(a) - failedBefore(b) || a.tries - b.tries || a.at - b.at;
 const notTheBatch = (entry, result) =>
   result.status === "failed" && (!failedBefore(entry) || !BATCH_FAULTS.has(result.reason));
+const rejection = ({ reason, httpStatus }) => (httpStatus ? `${reason} ${httpStatus}` : reason);
 const earliest = (times) => times.reduce((a, b) => Math.min(a, b), Infinity);
 
 async function dueBatches(dir, binding, skip, now) {
@@ -104,7 +105,15 @@ export async function shipSpool(dataDir, binding, runtime, { limit = SHIP_LIMIT,
   );
   const more = due.length > picked.length;
   if (claimed.length === 0) {
-    return { shipped: 0, settled: 0, dropped: 0, outage: false, more: false, nextDueAt };
+    return {
+      shipped: 0,
+      settled: 0,
+      dropped: 0,
+      rejected: [],
+      outage: false,
+      more: false,
+      nextDueAt,
+    };
   }
   const batches = await Promise.all(claimed.map((entry) => readClaimed(dir, entry)));
   const results = await runtime.exportSpooled(batches);
@@ -116,6 +125,7 @@ export async function shipSpool(dataDir, binding, runtime, { limit = SHIP_LIMIT,
     shipped: claimed.length,
     settled: settled.filter((outcome) => outcome.settled).length,
     dropped: settled.filter((outcome) => outcome.dropped).length,
+    rejected: results.filter((result) => result.status === "rejected").map(rejection),
     outage: claimed.some((entry, i) => notTheBatch(entry, results[i])),
     more,
     nextDueAt: earliest([nextDueAt, ...settled.map((outcome) => outcome.dueAt)]),
