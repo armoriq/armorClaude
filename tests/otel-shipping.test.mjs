@@ -258,8 +258,8 @@ async function shipSpoolWithDaemon(env, dataDir) {
   await rm(path.join(dataDir, "profiles"), { force: true, recursive: true });
   const daemon = startDaemon(env, dataDir);
   try {
-    const settled = () =>
-      dataFiles(dataDir).length === 0 && dataFiles(dataDir, "obs-journal").length === 0;
+    const placed = (name) => dataFiles(dataDir, name).filter((file) => !file.includes(".tmp."));
+    const settled = () => placed("obs-spool").length === 0 && placed("obs-journal").length === 0;
     await waitFor(settled, 20_000, "the daemon to replay its journal and ship the spool");
   } finally {
     killIfRunning(daemon.child);
@@ -974,7 +974,8 @@ test("a daemon SIGKILLed when a replay writes its first batch stores each replay
   }
   const killed = startDaemon(env, dataDir);
   try {
-    await waitFor(() => dataFiles(dataDir).length > 0, 20_000, "the first replayed batch");
+    const batches = () => dataFiles(dataDir).filter((file) => !file.includes(".tmp."));
+    await waitFor(() => batches().length > 0, 20_000, "the first replayed batch");
     process.kill(killed.child.pid, "SIGKILL");
     await killed.exited;
     await shipSpoolWithDaemon(env, dataDir);
