@@ -146,7 +146,7 @@ test("observeHook builds one turn root per session", async () => {
   await provider.shutdown();
 });
 
-test("PreToolUse deny records a blocked policy evaluation", async () => {
+test("PreToolUse deny records a blocked policy evaluation without the reason text (#201)", async () => {
   installHooks();
   const config = testConfig();
   await observeHook(
@@ -164,7 +164,7 @@ test("PreToolUse deny records a blocked policy evaluation", async () => {
   const policy = spansByName("armoriq.policy.evaluate");
   assert.equal(policy.length, 1);
   assert.equal(policy[0].attributes["armoriq.policy.decision"], "deny");
-  assert.equal(policy[0].attributes["armoriq.policy.reason_code"], "no registered plan");
+  assert.equal(policy[0].attributes["armoriq.policy.reason_code"], undefined);
   await provider.shutdown();
 });
 
@@ -643,6 +643,23 @@ test("a hook process waits at most 1.5 s for a hung lease, and the next ones ski
   await provider.shutdown();
 });
 
+test("a current stored lease wins over a lease miss recorded after it (#191)", async () => {
+  installHooks();
+  const counter = { fetches: 0 };
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: slowLease(0, counter) });
+  const dataDir = mkdtempSync(path.join(tmpdir(), "aq-lease-won-"));
+  const config = { ...testConfig(), dataDir };
+  await timedHookProcess("sess-won-1", config);
+  const [file] = await storedLeases(dataDir, 1);
+  writeFileSync(path.join(dataDir, file.replace(/\.json$/, ".miss")), String(Date.now()));
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: hungLease() });
+  const took = await timedHookProcess("sess-won-2", config);
+  assert.ok(took < 500, `the hook adopted the stored lease in ${took} ms`);
+  assert.equal(counter.fetches, 1);
+  assert.equal(spansByName("armoriq.agent.run").length, 2);
+  await provider.shutdown();
+});
+
 test("the daemon still waits out a slow lease, and the lease it stores ends the hooks' miss window (#191)", async () => {
   installHooks();
   __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: hungLease() });
@@ -727,7 +744,7 @@ test("a running daemon adopts the journal of a process that died after it starte
   });
   const at = Date.now();
   const record = { event: "SessionStart", at, input: { session_id: "sess-orphan" } };
-  const name = `${at}-0-${deadPid()}-${spoolBinding}-00000000-0000-4000-8000-000000000000.json`;
+  const name = `${at}-0-${spoolBinding}-00000000-0000-4000-8000-000000000000.json.claim-${deadPid()}`;
   placeFile(path.join(config.dataDir, "obs-journal"), name, JSON.stringify(record));
   await obsRetryBacklog();
   await obsFlushAll();
