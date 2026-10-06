@@ -523,8 +523,9 @@ test("the next processes ship the root of a session whose daemon was SIGKILLed, 
     const session_id = randomUUID();
     await daemonHook(daemon.socketPath, session_id, "SessionStart");
     const dir = path.join(dataDir, "obs-roots");
-    await waitFor(() => existsSync(dir) && readdirSync(dir).length > 0, 10_000, "the marker");
-    const marker = JSON.parse(readFileSync(path.join(dir, readdirSync(dir)[0]), "utf8"));
+    const markers = () => (existsSync(dir) ? readdirSync(dir).filter((n) => !n.includes(".")) : []);
+    await waitFor(() => markers().length > 0, 10_000, "the marker");
+    const marker = JSON.parse(readFileSync(path.join(dir, markers()[0]), "utf8"));
     process.kill(daemon.child.pid, "SIGKILL");
     await daemon.exited;
     await withoutDaemon(dataDir);
@@ -550,22 +551,21 @@ test("the next processes ship the root of a session whose daemon was SIGKILLed, 
   }
 });
 
-test("a second shutdown signal waits for the first shutdown's export", async () => {
-  const backend = await startBackend({ holdExports: true });
+test("a second shutdown signal does not cut the first shutdown's spool write (#194)", async () => {
+  const backend = await startBackend();
   const home = await tempDir("aq-home-");
   const dataDir = await tempDir("aq-twice-");
-  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  const env = pluginEnv(home, dataDir, backend.url);
+  const daemon = startDaemon(env, dataDir);
   try {
     await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
     await daemonHook(daemon.socketPath, randomUUID(), "SessionStart");
     await daemonRequest(daemon.socketPath, { type: "shutdown", reqId: "first" });
-    await waitFor(() => backend.exportTimes.length > 0, 10_000, "the shutdown export");
     process.kill(daemon.child.pid, "SIGTERM");
-    await new Promise((r) => setTimeout(r, 300));
-    assert.equal(daemon.child.exitCode, null, "the daemon exited with its export in flight");
-    backend.releaseExports();
     await daemon.exited;
-    assert.deepEqual(rootOutcomes(backend.exports), ["unknown"]);
+    assert.equal(backend.exportTimes.length, 0, "shutdown shipped nothing");
+    await shipSpoolWithDaemon(env, dataDir);
+    assert.deepEqual(rootOutcomes(backend.delivered), ["unknown"]);
   } finally {
     killIfRunning(daemon.child);
     await backend.close();
@@ -684,6 +684,28 @@ test("a daemon SIGKILLed after Stop with no later hook loses none of the turn, r
       "armoriq.tool",
     ]);
     assert.deepEqual(rootOutcomes(spans), ["unknown"]);
+  } finally {
+    killIfRunning(killed.child);
+    await backend.close();
+  }
+});
+
+test("a daemon SIGKILLed right after it answers SessionEnd still ships the session as completed (#194)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-endkill-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const killed = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => existsSync(killed.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    await daemonHook(killed.socketPath, sessionId, "SessionStart");
+    await daemonHook(killed.socketPath, sessionId, "SessionEnd", { reason: "other" });
+    process.kill(killed.child.pid, "SIGKILL");
+    await killed.exited;
+
+    await shipSpoolWithDaemon(env, dataDir);
+    assert.equal(rootOutcomes(rootsByEnd(backend.delivered)).at(-1), "completed");
   } finally {
     killIfRunning(killed.child);
     await backend.close();
@@ -913,10 +935,12 @@ test("a starting daemon replays its predecessor's journal before it serves a hoo
     const post = { ...tool, tool_input: {}, tool_response: {} };
     await daemonHook(daemon.socketPath, sessionId, "PostToolUse", post);
     await daemonHook(daemon.socketPath, sessionId, "Stop");
-    await waitFor(() => backend.delivered.length >= 2, 10_000, "the turn's spans");
-    const [policy, toolSpan] = ["armoriq.policy.evaluate", "armoriq.tool"].map((n) =>
-      backend.delivered.find((s) => s.name === n)
-    );
+    const turn = () =>
+      ["armoriq.policy.evaluate", "armoriq.tool"].map((n) =>
+        backend.delivered.find((s) => s.name === n)
+      );
+    await waitFor(() => turn().every(Boolean), 10_000, "the turn's spans");
+    const [policy, toolSpan] = turn();
     assert.ok(policy.endTimeUnixNano <= toolSpan.endTimeUnixNano, "the replayed check comes first");
   } finally {
     killIfRunning(daemon.child);
@@ -968,8 +992,8 @@ test("an unwritable spool keeps the journal and says so in daemon.log, and the e
   }
 });
 
-test("a replacement daemon serves hooks while the old one drains its exports (#190)", async () => {
-  const backend = await startBackend({ holdExports: true });
+test("a replacement daemon serves hooks and ships what the old daemon spooled at shutdown (#190, #194)", async () => {
+  const backend = await startBackend({ exportDelayMs: 9_000 });
   const home = await tempDir("aq-home-");
   const dataDir = await tempDir("aq-swap-");
   const env = pluginEnv(home, dataDir, backend.url);
@@ -977,18 +1001,20 @@ test("a replacement daemon serves hooks while the old one drains its exports (#1
   let next;
   try {
     await waitFor(() => existsSync(old.socketPath), 20_000, "the first daemon socket");
-    await daemonHook(old.socketPath, randomUUID(), "SessionStart");
+    const sessionId = randomUUID();
+    await daemonHook(old.socketPath, sessionId, "SessionStart");
+    const stopping = Date.now();
     await daemonRequest(old.socketPath, { type: "shutdown", reqId: "upgrade" });
-    await waitFor(() => backend.exportTimes.length > 0, 10_000, "the draining export");
+    await old.exited;
+    assert.ok(Date.now() - stopping < 3_000, "the old daemon did not wait on an export");
+    assert.ok(dataFiles(dataDir).length > 0, "the old daemon spooled the session's root");
     next = startDaemon(env, dataDir);
     await waitFor(() => existsSync(next.socketPath), 20_000, "the replacement socket");
     const ping = await daemonRequest(next.socketPath, { type: "ping", reqId: "next" });
     assert.equal(ping.ok, true);
-    assert.equal(old.child.exitCode, null, "the old daemon is still draining");
     assert.equal(Number(readFileSync(path.join(dataDir, "daemon.pid"), "utf8")), next.child.pid);
-    backend.releaseExports();
-    await old.exited;
-    assert.ok(existsSync(next.socketPath), "the old daemon left the new socket in place");
+    await waitFor(() => rootOutcomes(backend.delivered).length > 0, 20_000, "the shipped root");
+    assert.deepEqual(rootOutcomes(backend.delivered), ["unknown"]);
   } finally {
     killIfRunning(old.child);
     if (next) killIfRunning(next.child);
@@ -1301,7 +1327,7 @@ test("a retried batch that fails again does not hold back the shipper's next rou
     const spool = path.join(dataDir, "obs-spool");
     renameSync(
       path.join(spool, fresh),
-      path.join(spool, fresh.replace(/-0-0\.json$/, "-1-0.json"))
+      path.join(spool, fresh.replace(/-0-0\.json$/, `-1-${Date.now() - 1}.json`))
     );
     const stop = shipInProcess(backend, dataDir);
     try {
@@ -1347,7 +1373,7 @@ const filesUnder = (dir) =>
     .filter((entry) => entry.isFile())
     .map((entry) => path.join(entry.parentPath, entry.name));
 
-test("a deny-with-hint keeps the prompt and tool input out of the export and the data dir (#201)", async () => {
+test("a deny-with-hint exports the rule's code and keeps the prompt and tool input out of the export and the data dir (#201)", async () => {
   const backend = await startBackend();
   try {
     const home = await tempDir("aq-home-");
@@ -1361,6 +1387,7 @@ test("a deny-with-hint keeps the prompt and tool input out of the export and the
     await hook({ hook_event_name: "UserPromptSubmit", prompt: "deploy with PROMPT_SECRET_77" });
     const { stdout } = await hook({ hook_event_name: "PreToolUse", ...tool });
     assert.match(stdout, /"permissionDecision":"deny".*PROMPT_SECRET_77/);
+    assert.doesNotMatch(stdout, /intent_plan_missing/);
     const secret = /PROMPT_SECRET_77|TOOL_SECRET_41/;
     const holders = filesUnder(dataDir).filter((file) => secret.test(readFileSync(file, "utf8")));
     assert.deepEqual(
@@ -1371,7 +1398,7 @@ test("a deny-with-hint keeps the prompt and tool input out of the export and the
     await shipSpoolWithDaemon(env, dataDir);
     const [policy] = backend.exports.filter((s) => s.name === "armoriq.policy.evaluate");
     assert.equal(policy.attributes["armoriq.policy.decision"], "deny");
-    assert.equal(policy.attributes["armoriq.policy.reason_code"], undefined);
+    assert.equal(policy.attributes["armoriq.policy.reason_code"], "intent_plan_missing");
     assert.ok(!secret.test(JSON.stringify(backend.exports.map((span) => span.attributes))));
   } finally {
     await backend.close();
@@ -1413,4 +1440,26 @@ test("a hook event and the span it records share one call key, so a settled jour
     [true, true, true, true, false]
   );
   assert.equal(eventCall({ event: "SessionStart", input: { tool_use_id: "toolu_01Call" } }), null);
+});
+
+test("a daemon shutting down mid-round leaves its spooled batches for the next daemon instead of waiting on the export (#193)", async () => {
+  const backend = await startBackend({ exportDelayMs: 9_000 });
+  try {
+    const dataDir = await spooledCopies(backend, 20);
+    const home = await tempDir("aq-home-");
+    const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+    try {
+      await waitFor(() => backend.exportTimes.length > 0, 20_000, "the first export");
+      const stopping = Date.now();
+      process.kill(daemon.child.pid, "SIGTERM");
+      await daemon.exited;
+      const took = Date.now() - stopping;
+      assert.ok(took < 3_000, `the daemon took ${took} ms to exit`);
+      assert.equal(spoolLeft(dataDir), 20, "every batch stays spooled for the next daemon");
+    } finally {
+      killIfRunning(daemon.child);
+    }
+  } finally {
+    await backend.close();
+  }
 });

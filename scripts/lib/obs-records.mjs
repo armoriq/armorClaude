@@ -1,10 +1,10 @@
-import { readdir, readFile, rename, unlink } from "node:fs/promises";
+import { readdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { OBS_DRAFT_MAX_AGE_MS, OBS_RECORD_MAX_AGE_MS } from "./obs-ages.mjs";
 
 const NAME = /^((\d+)-.+?\.json)(?:\.claim-(\d+))?(\.tmp\..+)?$/;
 
-export function processGone(pid) {
+function processGone(pid) {
   try {
     process.kill(pid, 0);
     return false;
@@ -22,15 +22,23 @@ function parseRecord(name, fields) {
   return { ...parsed, name, ready, at: Number(at), kind, owner: Number(owner) };
 }
 
+export const removeRecord = (dir, name) => unlink(path.join(dir, name)).catch(() => undefined);
+
+async function dropStray(dir, name, now) {
+  const written = await stat(path.join(dir, name)).catch(() => null);
+  if (written && now - written.mtimeMs > OBS_DRAFT_MAX_AGE_MS) await removeRecord(dir, name);
+}
+
 export async function listRecords(dir, fields) {
   const names = await readdir(dir).catch((error) => {
     if (error.code === "ENOENT") return [];
     throw error;
   });
-  return names.map((name) => parseRecord(name, fields)).filter(Boolean);
+  const records = names.map((name) => parseRecord(name, fields));
+  const now = Date.now();
+  await Promise.all(names.filter((_, i) => !records[i]).map((name) => dropStray(dir, name, now)));
+  return records.filter(Boolean);
 }
-
-export const removeRecord = (dir, name) => unlink(path.join(dir, name)).catch(() => undefined);
 
 const expired = (entry, now) =>
   now - entry.at > (entry.kind === "draft" ? OBS_DRAFT_MAX_AGE_MS : OBS_RECORD_MAX_AGE_MS);

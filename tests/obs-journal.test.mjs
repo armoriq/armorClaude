@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { denyPreToolWithHint } from "../scripts/lib/hook-output.mjs";
@@ -140,4 +140,18 @@ test("the journal keeps its newest entries up to the limit and never drops one i
     []
   );
   assert.equal(left.size, JOURNAL_MAX_ENTRIES + 1);
+});
+
+test("files from an older journal name format are deleted once they are a minute old (#194)", async () => {
+  const dataDir = tempDataDir();
+  const dir = journalDir(dataDir);
+  const now = Date.now();
+  const old = placeFile(dir, `${now - 120_000}-0-${deadPid()}-${BINDING}-${UUID}1.json`, "{}");
+  const young = placeFile(dir, `${now}-0-${deadPid()}-${BINDING}-${UUID}2.json`, "{}");
+  const writtenAt = new Date(now - 120_000);
+  utimesSync(path.join(dir, old), writtenAt, writtenAt);
+
+  await journalBacklog(dataDir, BINDING, new Set(), now);
+
+  assert.deepEqual(readdirSync(dir), [young]);
 });
