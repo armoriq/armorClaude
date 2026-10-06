@@ -2,9 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { link, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ensurePrivateDir, PRIVATE_FILE_MODE } from "./fs-store.mjs";
+import { OBS_DRAFT_MAX_AGE_MS, OBS_RECORD_MAX_AGE_MS } from "./obs-ages.mjs";
 
-const MARKER_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-const DRAFT_MAX_AGE_MS = 60 * 60 * 1000;
 const prunedDirs = new Set();
 
 function markerPath(dataDir, sessionId) {
@@ -66,7 +65,7 @@ async function pruneOnce(dir) {
   const now = Date.now();
   const prune = async (name) => {
     const file = path.join(dir, name);
-    const maxAge = name.includes(".") ? DRAFT_MAX_AGE_MS : MARKER_MAX_AGE_MS;
+    const maxAge = name.includes(".") ? OBS_DRAFT_MAX_AGE_MS : OBS_RECORD_MAX_AGE_MS;
     if (now - (await stat(file)).mtimeMs > maxAge) await rm(file, { force: true });
   };
   await Promise.allSettled((await readdir(dir)).map(prune));

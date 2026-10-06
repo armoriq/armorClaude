@@ -2,7 +2,7 @@ import { readdir, readFile, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { OBS_DRAFT_MAX_AGE_MS, OBS_RECORD_MAX_AGE_MS } from "./obs-ages.mjs";
 
-const NAME = /^((\d+)-.+\.json)(?:\.claim-(\d+)|(\.tmp\..+))?$/;
+const NAME = /^((\d+)-.+?\.json)(?:\.claim-(\d+))?(\.tmp\..+)?$/;
 
 export function processGone(pid) {
   try {
@@ -18,7 +18,7 @@ function parseRecord(name, fields) {
   const parsed = match && fields(match[1]);
   if (!parsed) return null;
   const [, ready, at, owner, draft] = match;
-  const kind = owner ? "claim" : draft ? "draft" : "ready";
+  const kind = draft ? "draft" : owner ? "claim" : "ready";
   return { ...parsed, name, ready, at: Number(at), kind, owner: Number(owner) };
 }
 

@@ -34,11 +34,11 @@ test("claiming a root start never throws", async () => {
   assert.equal(await claimRootStart(dataDir, "sess-nodir"), null);
 });
 
-test("the first new marker in a process prunes week-old markers and hour-old drafts", async () => {
+test("the first new marker in a process prunes week-old markers and minute-old drafts", async () => {
   const dataDir = mkdtempSync(path.join(tmpdir(), "obs-prune-"));
   const dir = path.join(dataDir, "obs-roots");
   mkdirSync(dir, { mode: 0o700 });
-  const ages = { stale: 8 * 1440, fresh: 6 * 1440, "stale.draft": 61, "fresh.draft": 59 };
+  const ages = { stale: 8 * 1440, fresh: 6 * 1440, "stale.draft": 2, "fresh.draft": 0.5 };
   for (const [name, minutes] of Object.entries(ages)) {
     writeFileSync(path.join(dir, name), "{}");
     const at = new Date(Date.now() - minutes * 60_000);

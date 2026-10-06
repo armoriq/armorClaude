@@ -857,7 +857,7 @@ test("a starting daemon replays its predecessor's journal before it serves a hoo
   const sessionId = randomUUID();
   const tool = { tool_name: "Bash", tool_use_id: "toolu_01Order" };
   const at = Date.now() - 1_000;
-  const name = `${at}-0-${deadPid()}-${binding}-00000000-0000-4000-8000-000000000001.json`;
+  const name = `${at}-0-${binding}-00000000-0000-4000-8000-000000000001.json.claim-${deadPid()}`;
   const input = { session_id: sessionId, hook_event_name: "PreToolUse", ...tool };
   placeFile(
     path.join(dataDir, "obs-journal"),
