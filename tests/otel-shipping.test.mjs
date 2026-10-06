@@ -597,7 +597,6 @@ test("fallback hooks wait once for a lease endpoint that never answers, not on e
     const session_id = randomUUID();
     const tool = { tool_name: "Read", tool_input: { file_path: "package.json" } };
     const took = [];
-    let laterHooksFrom = Infinity;
     for (const payload of [
       { hook_event_name: "SessionStart", source: "startup" },
       { hook_event_name: "UserPromptSubmit", prompt: "read package.json" },
@@ -605,13 +604,13 @@ test("fallback hooks wait once for a lease endpoint that never answers, not on e
       { hook_event_name: "PostToolUse", ...tool, tool_response: { ok: true } },
     ]) {
       const started = Date.now();
-      if (took.length === 1) laterHooksFrom = started;
       assert.equal((await runHook(env, { session_id, ...payload })).code, 0);
       took.push(Date.now() - started);
     }
     assert.ok(took[0] < 3_000, `the first hook took ${took[0]} ms`);
-    const later = backend.leaseRequests.filter((at) => at >= laterHooksFrom).length;
-    assert.ok(later <= 1, `${later} lease requests while the later hooks ran`);
+    for (const ms of took.slice(1)) {
+      assert.ok(ms < took[0] - 1_000, `a later hook took ${ms} ms, the waiting one ${took[0]} ms`);
+    }
   } finally {
     await backend.close();
   }
