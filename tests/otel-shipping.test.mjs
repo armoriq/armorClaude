@@ -1189,10 +1189,13 @@ test("a batch the backend keeps failing does not hold back the batches spooled a
       }
       const sessions = () =>
         new Set(backend.delivered.map((s) => s.attributes["armoriq.session_id"]));
-      await waitFor(() => sessions().size === 3, 12_000, "the live batches");
+      await waitFor(
+        () => sessions().size === 3 && spoolLeft(dataDir) === 1,
+        12_000,
+        "the live batches to leave the spool while the poison batch waits for its own retry"
+      );
       const took = Date.now() - written;
       assert.ok(took < 7_000, `the live batches were acknowledged after ${took} ms`);
-      assert.equal(spoolLeft(dataDir), 1, "the poison batch waits for its own retry");
     } finally {
       await stop();
     }
