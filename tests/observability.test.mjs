@@ -25,6 +25,7 @@ test("observabilityEnabled true when daemon on + api key present", () => {
 
 import {
   isObsEnabled,
+  __openSessionsForTests,
   __resetObsForTests,
   __setOtelTestHooksForTests,
 } from "../scripts/lib/observability.mjs";
@@ -702,5 +703,38 @@ test("a running daemon adopts the journal of a process that died after it starte
   await obsFlushAll();
   assert.deepEqual(rootSessions(), ["sess-orphan"]);
   assert.deepEqual(journalFiles(config.dataDir), []);
+  await provider.shutdown();
+});
+
+test("a replay pass holds at most 16 sessions open and releases each one it replayed (#194)", async () => {
+  installHooks();
+  const config = { ...testConfig(), dataDir: mkdtempSync(path.join(tmpdir(), "aq-slots-")) };
+  const { spoolBinding } = new armoriqSdk.ArmorIQTelemetryRuntime({
+    backendEndpoint: config.observabilityEndpoint,
+    apiKey: config.apiKey,
+    sdkVersion: "test",
+  });
+  const at = Date.now() - 10_000;
+  const dead = deadPid();
+  for (let i = 0; i < 40; i++) {
+    for (const [n, event] of ["SessionStart", "UserPromptSubmit"].entries()) {
+      const record = { event, at: at + i, input: { session_id: `sess-slot-${i}` } };
+      const id = `00000000-0000-4000-8000-${String(i * 2 + n).padStart(12, "0")}`;
+      const name = `${at + i}-${n}-${spoolBinding}-${id}.json.claim-${dead}`;
+      placeFile(path.join(config.dataDir, "obs-journal"), name, JSON.stringify(record));
+    }
+  }
+  let most = 0;
+  const sample = setInterval(() => (most = Math.max(most, __openSessionsForTests())), 1);
+  await obsServeAsDaemon(config);
+  const until = Date.now() + 10_000;
+  while (journalFiles(config.dataDir).length > 0 && Date.now() < until) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  clearInterval(sample);
+  assert.ok(most <= 16, `${most} sessions open at once`);
+  assert.equal(rootSessions().length, 40);
+  assert.equal(__openSessionsForTests(), 0, "every replayed session was released");
+  await obsFlushAll();
   await provider.shutdown();
 });

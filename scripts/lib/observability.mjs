@@ -15,10 +15,17 @@ import {
   journalBacklog,
   journalEntryPath,
   journalEvent,
+  journalName,
   pruneJournal,
   settledEvents,
 } from "./obs-journal.mjs";
-import { SPOOL_MAX_TRIES, shipRetryDelayMs, shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
+import {
+  SPOOL_MAX_TRIES,
+  shipRetryDelayMs,
+  shipSpool,
+  spooledJournal,
+  writeSpoolBatch,
+} from "./obs-spool.mjs";
 import { claimRootStart, markRootEnded, rootEndedAt } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
@@ -76,19 +83,24 @@ async function rootStartTime(entry, config) {
   return config.dataDir ? claimRootStart(config.dataDir, entry.binding, entry.sessionId) : null;
 }
 
+const coveredEntries = (entry, calls) =>
+  entry.pending.filter((item) => calls.has(item.call)).map((item) => journalName(item.file));
+
 function spoolSink(config, entry) {
   return {
     async write(batch) {
+      const calls = new Set(batchCalls(batch));
+      const journal = coveredEntries(entry, calls);
       let dropped;
       try {
-        dropped = await writeSpoolBatch(config.dataDir, batch);
+        dropped = await writeSpoolBatch(config.dataDir, { ...batch, journal });
       } catch (err) {
         entry.sinkFailures += 1;
         logObs(config, `spool write failed, events stay in obs-journal: ${err?.message ?? err}`);
         throw err;
       }
       if (dropped) logObs(config, `spool over 8 MiB: dropped its ${dropped} oldest batch(es)`);
-      for (const call of batchCalls(batch)) entry.written.add(call);
+      for (const call of calls) entry.written.add(call);
       await forgetLanded(entry);
       if (shipping) afterSpoolWrite(config, entry);
     },
@@ -166,8 +178,8 @@ function shipperFor(config) {
     timer: null,
   };
   shippers.set(key, shipper);
-  shipNow(shipper);
   shipper.ready = replayBacklog(shipper);
+  shipper.ready.then(() => shipNow(shipper));
   return shipper;
 }
 
@@ -293,6 +305,8 @@ export async function obsFetchLease(config) {
   const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
   await safeObsAsync(() => runtime.refreshPolicy());
 }
+
+export const __openSessionsForTests = () => sessions.size;
 
 export function __resetObsForTests() {
   sessions.clear();
@@ -524,7 +538,10 @@ function backlogBySession(config, backlog) {
 }
 
 async function replayJournal({ config, binding }) {
-  const backlog = await safeObsAsync(() => journalBacklog(config.dataDir, binding, inFlight));
+  const spooled = () => spooledJournal(config.dataDir, binding);
+  const backlog = await safeObsAsync(() =>
+    journalBacklog(config.dataDir, binding, inFlight, Date.now(), spooled)
+  );
   const slots = replaySlots(REPLAY_SESSIONS);
   for (const [key, events] of backlogBySession(config, backlog ?? [])) {
     for (const { file } of events) inFlight.add(file);

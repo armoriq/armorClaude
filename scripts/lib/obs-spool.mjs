@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rename } from "node:fs/promises";
+import { readFile, rename } from "node:fs/promises";
 import path from "node:path";
 import { ensurePrivateDir, writePrivateFile } from "./fs-store.mjs";
 import {
@@ -46,6 +46,14 @@ async function pruneSpool(dir) {
     });
   await Promise.all(over.map((entry) => removeRecord(dir, entry.name)));
   return over.length;
+}
+
+export async function spooledJournal(dataDir, binding) {
+  const dir = spoolDir(dataDir);
+  const mine = (await listRecords(dir, spoolFields)).filter((entry) => entry.binding === binding);
+  const read = (entry) => readFile(path.join(dir, entry.name), "utf8").then(JSON.parse, () => ({}));
+  const batches = await Promise.all(mine.map(read));
+  return new Set(batches.flatMap((batch) => (Array.isArray(batch.journal) ? batch.journal : [])));
 }
 
 export async function writeSpoolBatch(dataDir, batch) {
