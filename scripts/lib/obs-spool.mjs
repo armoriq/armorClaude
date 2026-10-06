@@ -45,6 +45,7 @@ async function pruneSpool(dir) {
       return kept > SPOOL_MAX_BYTES;
     });
   await Promise.all(over.map((entry) => removeRecord(dir, entry.name)));
+  return over.length;
 }
 
 export async function writeSpoolBatch(dataDir, batch) {
@@ -56,7 +57,7 @@ export async function writeSpoolBatch(dataDir, batch) {
   const name = batchName({ at: Date.now(), bytes, binding: batch.binding, id, tries: 0, dueAt: 0 });
   await ensurePrivateDir(dir);
   await writePrivateFile(path.join(dir, name), text);
-  await pruneSpool(dir);
+  return pruneSpool(dir);
 }
 
 export function shipRetryDelayMs(failures) {

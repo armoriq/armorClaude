@@ -69,8 +69,13 @@ async function rootStartTime(sessionId, config) {
   return config.dataDir ? claimRootStart(config.dataDir, sessionId) : null;
 }
 
+async function spoolBatch(config, batch) {
+  const dropped = await writeSpoolBatch(config.dataDir, batch);
+  if (dropped) logObs(config, `spool over 8 MiB: dropped its ${dropped} oldest batch(es)`);
+}
+
 function spoolSink(config) {
-  return { write: (batch) => safeObsAsync(() => writeSpoolBatch(config.dataDir, batch)) };
+  return { write: (batch) => safeObsAsync(() => spoolBatch(config, batch)) };
 }
 
 function dataDirOptions(config) {
@@ -169,7 +174,7 @@ function retryLater(shipper) {
 const backOff = (shipper, round) =>
   !round || (round.settled === 0 && (round.outage || (shipper.failures > 0 && round.shipped > 0)));
 const moreDue = (shipper, round) =>
-  shipper.again || (!releasingAll && round.more && round.settled > 0);
+  !releasingAll && (shipper.again || (round.more && round.settled > 0));
 
 async function shipRounds(shipper) {
   for (;;) {
@@ -184,6 +189,7 @@ async function shipRounds(shipper) {
 }
 
 function shipNow(shipper) {
+  if (releasingAll) return shipper.running;
   if (shipper.running) {
     shipper.again = true;
     return shipper.running;
@@ -208,9 +214,9 @@ async function closeShippers() {
   shippers.clear();
   await Promise.all(
     all.map(async (shipper) => {
-      clearTimeout(shipper.timer);
-      await shipper.running;
       await safeObsAsync(() => shipper.runtime.close());
+      await shipper.running;
+      clearTimeout(shipper.timer);
     })
   );
 }

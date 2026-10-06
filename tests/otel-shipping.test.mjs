@@ -934,6 +934,11 @@ const ENFORCING_POLICY = {
   },
 };
 
+const filesUnder = (dir) =>
+  readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(entry.parentPath, entry.name));
+
 test("a deny-with-hint exports the rule's code and keeps the prompt and tool input out of the export and the data dir (#201)", async () => {
   const backend = await startBackend();
   try {
@@ -961,6 +966,28 @@ test("a deny-with-hint exports the rule's code and keeps the prompt and tool inp
     assert.equal(policy.attributes["armoriq.policy.decision"], "deny");
     assert.equal(policy.attributes["armoriq.policy.reason_code"], "intent_plan_missing");
     assert.ok(!secret.test(JSON.stringify(backend.exports.map((span) => span.attributes))));
+  } finally {
+    await backend.close();
+  }
+});
+
+test("a daemon shutting down mid-round leaves its spooled batches for the next daemon instead of waiting on the export (#193)", async () => {
+  const backend = await startBackend({ exportDelayMs: 9_000 });
+  try {
+    const dataDir = await spooledCopies(backend, 20);
+    const home = await tempDir("aq-home-");
+    const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+    try {
+      await waitFor(() => backend.exportTimes.length > 0, 20_000, "the first export");
+      const stopping = Date.now();
+      process.kill(daemon.child.pid, "SIGTERM");
+      await daemon.exited;
+      const took = Date.now() - stopping;
+      assert.ok(took < 3_000, `the daemon took ${took} ms to exit`);
+      assert.equal(spoolLeft(dataDir), 20, "every batch stays spooled for the next daemon");
+    } finally {
+      killIfRunning(daemon.child);
+    }
   } finally {
     await backend.close();
   }

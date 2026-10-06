@@ -75,7 +75,8 @@ test("the spool drops its oldest batches past 8 MiB, any past 7 days, and drafts
   );
   const oldDraft = place(dataDir, `${entryName(now - 61_000, 10, BINDING, 6)}.tmp.1.x`);
   const youngDraft = place(dataDir, `${entryName(now - 1_000, 10, BINDING, 7)}.tmp.1.y`);
-  await writeSpoolBatch(dataDir, { version: 1, binding: BINDING, spans: [] });
+  const dropped = await writeSpoolBatch(dataDir, { version: 1, binding: BINDING, spans: [] });
+  assert.equal(dropped, 1, "the cap dropped the oldest batch and said so");
   const left = listed(dataDir);
   const written = left.find((name) => ![middle, newest, youngDraft].includes(name));
   assert.deepEqual(left, [middle, newest, youngDraft, written].sort());
