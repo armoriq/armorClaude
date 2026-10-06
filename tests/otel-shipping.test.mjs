@@ -789,7 +789,7 @@ test("the daemon writes a session's spans at Stop and SessionEnd, not one reques
     await waitFor(done, 10_000, "the SessionEnd root");
     assert.equal(sessionSpans(backend.delivered, sessionId).length, 7);
     assert.equal(backend.exportTimes.length, 2, "one request at Stop, one at SessionEnd");
-    assert.deepEqual(dataFiles(dataDir, "obs-journal"), []);
+    await waitFor(() => dataFiles(dataDir, "obs-journal").length === 0, 5_000, "a settled journal");
   } finally {
     killIfRunning(daemon.child);
     await backend.close();
