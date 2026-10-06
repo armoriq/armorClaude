@@ -1,14 +1,19 @@
 // Every process that records a session ships its own copy of the session's
 // root span; the backend merges copies that share a span id.
 import armoriqSdk from "@armoriq/sdk-dev";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 import { DECISION_CODE } from "./hook-output.mjs";
+import { obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
 import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
 const EXPORT_DRAIN_MARGIN_MS = 1_000;
+const HOOK_LEASE_WAIT_MS = 1_500;
+const LEASE_FETCHER = fileURLToPath(new URL("../obs-lease-fetch.mjs", import.meta.url));
 
 const sessions = new Map();
 const queues = new Map();
@@ -37,18 +42,6 @@ function getOrInitEntry(sessionId, config) {
   return initEntry(sessionId, config);
 }
 
-async function settledWithin(ms, promise) {
-  let timer;
-  const expired = new Promise((resolve) => {
-    timer = setTimeout(resolve, ms).unref();
-  });
-  try {
-    return await Promise.race([promise.catch(() => undefined), expired]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
 }
@@ -64,7 +57,7 @@ async function rootStartTime(sessionId, config) {
   return config.dataDir ? claimRootStart(config.dataDir, sessionId) : null;
 }
 
-async function initEntry(sessionId, config) {
+function runtimeOptionsFor(config) {
   const sdkVersion = typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown";
   const runtimeOptions = {
     backendEndpoint: config.observabilityEndpoint,
@@ -72,6 +65,13 @@ async function initEntry(sessionId, config) {
     sdkVersion,
     options: { serviceName: config.observabilityProduct || "armorclaude" },
   };
+  if (config.dataDir) {
+    runtimeOptions.leaseStore = obsLeaseStore(
+      config.dataDir,
+      config.observabilityEndpoint,
+      config.apiKey
+    );
+  }
   if (testHooks?.leaseFetcher) runtimeOptions.leaseFetcher = testHooks.leaseFetcher;
   if (testHooks?.tracerProvider) {
     runtimeOptions.options = {
@@ -80,7 +80,11 @@ async function initEntry(sessionId, config) {
       tracerProvider: testHooks.tracerProvider,
     };
   }
-  const runtime = new ArmorIQTelemetryRuntime(runtimeOptions);
+  return runtimeOptions;
+}
+
+async function initEntry(sessionId, config) {
+  const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
   const startTime = await rootStartTime(sessionId, config);
   const session = new OtelSession(runtime, {
     sessionId,
@@ -90,9 +94,47 @@ async function initEntry(sessionId, config) {
   });
   const entry = { runtime, session, dataDir: startTime && config.dataDir, lastEventAt: Date.now() };
   sessions.set(sessionId, entry);
-  await settledWithin(500, session.refreshPolicy());
+  await (drainOnClose
+    ? safeObsAsync(() => session.refreshPolicy())
+    : awaitHookLease(entry, config));
   await safeObsAsync(() => session.beginRoot({ input: connectedInput(config) }));
   return entry;
+}
+
+function within(promise, ms) {
+  let timer;
+  const expired = new Promise((resolve) => (timer = setTimeout(resolve, ms)));
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
+async function awaitHookLease(entry, config) {
+  const miss = config.dataDir
+    ? obsLeaseMiss(config.dataDir, config.observabilityEndpoint, config.apiKey)
+    : null;
+  if (await safeObsAsync(() => miss?.recent())) return;
+  const answered = await within(
+    safeObsAsync(() => entry.session.refreshPolicy()).then(() => true),
+    HOOK_LEASE_WAIT_MS
+  );
+  if (entry.runtime.currentCeilingSnapshot().authoritative || !miss) return;
+  await safeObsAsync(() => miss.record());
+  if (!answered) await safeObsAsync(async () => fetchLeaseInBackground(config));
+}
+
+function fetchLeaseInBackground({ dataDir, observabilityEndpoint, apiKey }) {
+  const child = spawn(process.execPath, [LEASE_FETCHER], {
+    detached: true,
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  child.on("error", () => undefined);
+  child.stdin.on("error", () => undefined);
+  child.stdin.end(JSON.stringify({ dataDir, observabilityEndpoint, apiKey }));
+  child.unref();
+}
+
+export async function obsFetchLease(config) {
+  const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
+  await safeObsAsync(() => runtime.refreshPolicy());
 }
 
 export function obsDrainExportsOnClose() {

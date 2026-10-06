@@ -90,8 +90,14 @@ function decodeSpans(body) {
   return spans;
 }
 
-async function startBackend({ holdExports = false, content = false, exportDelayMs = 0 } = {}) {
+async function startBackend({
+  holdExports = false,
+  content = false,
+  exportDelayMs = 0,
+  leaseDelayMs = 0,
+} = {}) {
   const exports = [];
+  const leaseRequests = [];
   const delivered = [];
   const exportTimes = [];
   const heldExports = [];
@@ -107,8 +113,11 @@ async function startBackend({ holdExports = false, content = false, exportDelayM
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       if (req.url === "/observability/policy/lease") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(lease());
+        leaseRequests.push(Date.now());
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(lease());
+        }, leaseDelayMs);
         return;
       }
       if (req.method === "POST" && req.url === "/v1/traces") {
@@ -135,6 +144,7 @@ async function startBackend({ holdExports = false, content = false, exportDelayM
     exports,
     delivered,
     exportTimes,
+    leaseRequests,
     releaseExports() {
       holdExports = false;
       for (const answer of heldExports.splice(0)) answer();
@@ -567,6 +577,67 @@ test("a replacement daemon serves hooks while the old one drains its exports (#1
   } finally {
     killIfRunning(old.child);
     if (next) killIfRunning(next.child);
+    await backend.close();
+  }
+});
+
+test("fallback hooks record a whole session on a 700 ms lease with one lease request (#191)", async () => {
+  const backend = await startBackend({ leaseDelayMs: 700 });
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-lease-");
+    await withoutDaemon(dataDir);
+    await runSession(pluginEnv(home, dataDir, backend.url), randomUUID());
+    assert.equal(backend.leaseRequests.length, 1, "later hook processes read the stored lease");
+    assert.equal(storedSpans(backend.exports).length, 5, "1 root, 2 policy and 2 tool spans");
+    assert.equal(rootOutcomes(backend.exports).at(-1), "completed");
+  } finally {
+    await backend.close();
+  }
+});
+
+test("a fallback hook that gives up on a 2 s lease leaves the fetch to store it for the next hook (#191)", async () => {
+  const backend = await startBackend({ leaseDelayMs: 2_000 });
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-lease-slow-");
+    await withoutDaemon(dataDir);
+    const env = pluginEnv(home, dataDir, backend.url);
+    const session_id = randomUUID();
+    await runHook(env, { session_id, hook_event_name: "SessionStart", source: "startup" });
+    const stored = () => readdirSync(dataDir).some((name) => /^obs-lease-.*\.json$/.test(name));
+    await waitFor(stored, 6_000, "the background fetch stored the lease");
+    await runSession(env, session_id);
+    assert.equal(backend.leaseRequests.length, 2, "the hook's own request and the background one");
+    assert.equal(rootOutcomes(backend.exports).at(-1), "completed");
+  } finally {
+    await backend.close();
+  }
+});
+
+test("fallback hooks wait once for a lease endpoint that never answers, not on every hook (#191)", async () => {
+  const backend = await startBackend({ leaseDelayMs: 6_000 });
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-lease-hung-");
+    await withoutDaemon(dataDir);
+    const env = pluginEnv(home, dataDir, backend.url);
+    const session_id = randomUUID();
+    const tool = { tool_name: "Read", tool_input: { file_path: "package.json" } };
+    const took = [];
+    for (const payload of [
+      { hook_event_name: "SessionStart", source: "startup" },
+      { hook_event_name: "UserPromptSubmit", prompt: "read package.json" },
+      { hook_event_name: "PreToolUse", ...tool },
+      { hook_event_name: "PostToolUse", ...tool, tool_response: { ok: true } },
+    ]) {
+      const started = Date.now();
+      assert.equal((await runHook(env, { session_id, ...payload })).code, 0);
+      took.push(Date.now() - started);
+    }
+    assert.ok(took[0] < 3_000, `the first hook took ${took[0]} ms`);
+    for (const ms of took.slice(1)) assert.ok(ms < 1_000, `a later hook took ${ms} ms`);
+  } finally {
     await backend.close();
   }
 });
