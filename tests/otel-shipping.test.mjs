@@ -941,7 +941,8 @@ test("an unwritable spool keeps the journal and says so in daemon.log, and the e
     ]) {
       await daemonHook(daemon.socketPath, sessionId, event, input);
     }
-    const log = () => readFileSync(path.join(dataDir, "daemon.log"), "utf8");
+    const logFile = path.join(dataDir, "daemon.log");
+    const log = () => (existsSync(logFile) ? readFileSync(logFile, "utf8") : "");
     await waitFor(() => /spool write failed/.test(log()), 5_000, "the logged spool failure");
     process.kill(daemon.child.pid, "SIGTERM");
     await daemon.exited;
