@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { denyPreToolWithHint } from "../scripts/lib/hook-output.mjs";
 import { OBS_RECORD_MAX_AGE_MS } from "../scripts/lib/obs-ages.mjs";
 import {
+  JOURNAL_MAX_ENTRIES,
   journalBacklog,
   journalEntryPath,
   journalEvent,
@@ -83,7 +85,8 @@ test("the backlog of one key adopts dead processes' events in order and prunes o
   const youngDraft = place(dataDir, { at: now - 1_000, owner: dead, n: 9, draft: ".tmp.1.y" });
   const busyFiles = new Set([path.join(journalDir(dataDir), busy)]);
 
-  const backlog = await journalBacklog(dataDir, BINDING, busyFiles, now);
+  const { backlog, dropped } = await journalBacklog(dataDir, BINDING, busyFiles, now);
+  assert.equal(dropped, 0);
 
   assert.deepEqual(
     backlog.map((b) => b.record.event),
@@ -109,4 +112,32 @@ test("an event whose span landed in a written batch is settled although a later 
     settled.map((item) => item.file),
     ["landed", "after-failure"]
   );
+});
+
+test("the journal keeps its newest entries up to the limit and never drops one in flight (#200)", async () => {
+  const dataDir = tempDataDir();
+  const dir = journalDir(dataDir);
+  const now = Date.now();
+  const dead = deadPid();
+  const entry = (at, owner) =>
+    placeFile(dir, `${at}-0-${OTHER}-${randomUUID()}.json.claim-${owner}`, "{}");
+  const inFlight = entry(now - 50_000, process.pid);
+  const names = [];
+  for (let i = 0; i < JOURNAL_MAX_ENTRIES + 4; i++) names.push(entry(now - 40_000 + i, dead));
+
+  const { dropped } = await journalBacklog(
+    dataDir,
+    BINDING,
+    new Set([path.join(dir, inFlight)]),
+    now
+  );
+
+  const left = new Set(readdirSync(dir));
+  assert.equal(dropped, 4);
+  assert.ok(left.has(inFlight));
+  assert.deepEqual(
+    names.slice(0, 4).filter((name) => left.has(name)),
+    []
+  );
+  assert.equal(left.size, JOURNAL_MAX_ENTRIES + 1);
 });

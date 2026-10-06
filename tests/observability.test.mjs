@@ -685,8 +685,9 @@ test("the daemon still waits out a slow lease, and the lease it stores ends the 
 });
 
 function switchableLease() {
-  const lease = { up: false };
+  const lease = { up: false, fetches: 0 };
   lease.fetch = async () => {
+    lease.fetches += 1;
     if (!lease.up) throw new Error("lease endpoint down");
     return stubLease();
   };
@@ -712,6 +713,36 @@ test("a daemon keeps the events it cannot record without a lease and records the
   assert.equal(spansByName("armoriq.policy.evaluate").length, 1);
   assert.deepEqual(journalFiles(config.dataDir), []);
   await obsFlushAll();
+  await provider.shutdown();
+});
+
+test("a daemon asks for one lease per key per pass, however many sessions wait on it (#200)", async () => {
+  installHooks();
+  const lease = switchableLease();
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: lease.fetch });
+  const config = { ...testConfig(), dataDir: mkdtempSync(path.join(tmpdir(), "aq-parkmany-")) };
+  await obsServeAsDaemon(config);
+  const park = async (session_id) => {
+    await observeHook("SessionStart", { session_id }, null, config);
+    const tool = { session_id, tool_name: "Bash", tool_input: {}, tool_use_id: `t-${session_id}` };
+    await observeHook("PreToolUse", tool, null, config);
+  };
+  const ids = Array.from({ length: 50 }, (_, i) => `sess-many-${i}`);
+  await park(ids[0]);
+  const first = lease.fetches;
+  await Promise.all(ids.slice(1).map(park));
+  assert.equal(lease.fetches, first, "49 more sessions asked for no lease of their own");
+  await obsRetryBacklog();
+  assert.equal(lease.fetches, first + 1, "a pass without a lease asks once and replays nothing");
+  assert.equal(journalFiles(config.dataDir).length, 100);
+  assert.equal(spans().length, 0);
+
+  lease.up = true;
+  await obsRetryBacklog();
+  await obsFlushAll();
+  assert.equal(lease.fetches, first + 2, "the sessions adopted the key's stored lease");
+  assert.equal(spansByName("armoriq.policy.evaluate").length, 50);
+  assert.deepEqual(journalFiles(config.dataDir), []);
   await provider.shutdown();
 });
 

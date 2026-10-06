@@ -14,6 +14,7 @@ import {
   journalBacklog,
   journalEntryPath,
   journalEvent,
+  JOURNAL_MAX_ENTRIES,
   pruneJournal,
   settledEvents,
 } from "./obs-journal.mjs";
@@ -91,12 +92,14 @@ function spoolSink(config, entry) {
   };
 }
 
-function dataDirOptions(config, entry) {
-  const leaseStore = obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey);
+const leaseStoreFor = (config) =>
+  obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey);
+
+function dataDirOptions(config, entry, leaseStore) {
   return entry ? { leaseStore, spanSink: spoolSink(config, entry) } : { leaseStore };
 }
 
-function runtimeOptionsFor(config, entry) {
+function runtimeOptionsFor(config, entry, leaseStore = config.dataDir && leaseStoreFor(config)) {
   const sdkVersion = typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown";
   const runtimeOptions = {
     backendEndpoint: config.observabilityEndpoint,
@@ -104,7 +107,7 @@ function runtimeOptionsFor(config, entry) {
     sdkVersion,
     options: { serviceName: config.observabilityProduct || "armorclaude" },
   };
-  if (config.dataDir) Object.assign(runtimeOptions, dataDirOptions(config, entry));
+  if (config.dataDir) Object.assign(runtimeOptions, dataDirOptions(config, entry, leaseStore));
   if (testHooks?.leaseFetcher) runtimeOptions.leaseFetcher = testHooks.leaseFetcher;
   if (testHooks?.tracerProvider) {
     runtimeOptions.options = {
@@ -142,7 +145,6 @@ async function initEntry(key, record, config) {
   await (shipping
     ? safeObsAsync(() => entry.session.refreshPolicy())
     : awaitHookLease(entry, config));
-  entry.leaseTriedAt = Date.now();
   await safeObsAsync(() => entry.session.beginRoot({ input: connectedInput(config) }));
   return entry;
 }
@@ -151,10 +153,14 @@ function shipperFor(config) {
   const key = `${config.dataDir}\n${config.observabilityEndpoint}\n${config.apiKey}`;
   let shipper = shippers.get(key);
   if (shipper) return shipper;
-  const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
-  shipper = {
-    config,
-    dataDir: config.dataDir,
+  shipper = { config, dataDir: config.dataDir, leaseTriedAt: 0, leaseAttempt: null };
+  const store = leaseStoreFor(config);
+  const leaseStore = {
+    read: store.read,
+    write: (lease) => (shipper.leaseStored = store.write(lease)),
+  };
+  const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config, null, leaseStore));
+  Object.assign(shipper, {
     binding: runtime.spoolBinding,
     runtime,
     skip: new Set(),
@@ -163,7 +169,7 @@ function shipperFor(config) {
     failures: 0,
     retryAt: 0,
     timer: null,
-  };
+  });
   shippers.set(key, shipper);
   shipNow(shipper);
   shipper.ready = replayBacklog(shipper);
@@ -241,7 +247,10 @@ function afterSpoolWrite(config, entry) {
 
 export function obsRetryBacklog() {
   const all = [...shippers.values()];
-  return Promise.all([...all.map(shipDue), ...all.map(replayBacklog)]);
+  const passAt = Date.now();
+  const replayLeased = async (shipper) =>
+    (await keyHoldsLease(shipper, passAt)) && replayBacklog(shipper);
+  return Promise.all([...all.map(shipDue), ...all.map(replayLeased)]);
 }
 
 async function closeShippers() {
@@ -466,9 +475,17 @@ export function observeHook(event, input, output, config) {
   return shipper.ready.then(() => enqueueEvent(key, record, config, journaled));
 }
 
+async function parkedWithoutLease(key, record, config, file) {
+  const shipper = !sessions.has(key) && leasedShipper(config);
+  if (!shipper || (await keyHoldsLease(shipper, record.replayedAt))) return false;
+  await keepForReplay(shipper.binding, record, file, config);
+  return true;
+}
+
 function enqueueEvent(key, record, config, journaled) {
   return enqueue(key, async () => {
     const file = (await journaled) ?? null;
+    if (await parkedWithoutLease(key, record, config, file)) return;
     const entry = await recordEvent(key, record, config);
     await settleEvent(entry, record, file, config);
   });
@@ -481,9 +498,11 @@ function replayBacklog(shipper) {
 
 async function replayJournal({ config, binding }) {
   const replayedAt = Date.now();
-  const backlog = await safeObsAsync(() => journalBacklog(config.dataDir, binding, inFlight));
+  const { backlog = [], dropped = 0 } =
+    (await safeObsAsync(() => journalBacklog(config.dataDir, binding, inFlight))) ?? {};
+  if (dropped) logObs(config, `dropped ${dropped} journaled event(s) past ${JOURNAL_MAX_ENTRIES}`);
   const replayed = new Set();
-  for (const { file, record } of backlog ?? []) {
+  for (const { file, record } of backlog) {
     const sessionId = record?.input?.session_id;
     if (typeof sessionId !== "string" || !sessionId) await forgetEvent(file);
     else {
@@ -500,7 +519,7 @@ const settleKey = (key) => sessions.has(key) && settleJournal(sessions.get(key))
 
 async function settleEvent(entry, record, file, config) {
   if (!entry) return forgetSettled(file);
-  if (entry.parked) return keepForReplay(entry, record, file, config);
+  if (entry.parked) return keepForReplay(entry.binding, record, file, config);
   if (file) entry.pending.push({ file, failures: entry.failuresBefore, call: eventCall(record) });
   if (!shipping) entry.records.push(record);
   if (record.event === "Stop") await releaseSession(entry);
@@ -513,24 +532,36 @@ async function forgetSettled(file) {
   inFlight.delete(file);
 }
 
-async function keepForReplay(entry, record, file, config) {
+async function keepForReplay(binding, record, file, config) {
   if (file) return void inFlight.delete(file);
   if (!config.dataDir) return;
-  const target = journalEntryPath(config.dataDir, entry.runtime.spoolBinding, record.at);
+  const target = journalEntryPath(config.dataDir, binding, record.at);
   await safeObsAsync(() => journalEvent(target, record));
 }
 
-const holdsLease = (entry) => entry.runtime.currentCeilingSnapshot().authoritative === true;
+const holdsLease = ({ runtime }) => runtime.currentCeilingSnapshot().authoritative === true;
 
-const leaseRetryDue = (entry, { replayedAt }) =>
+const leaseRetryDue = (shipper, replayedAt) =>
   replayedAt
-    ? entry.leaseTriedAt <= replayedAt
-    : Date.now() - entry.leaseTriedAt > LEASE_MISS_TTL_MS;
+    ? shipper.leaseTriedAt <= replayedAt
+    : Date.now() - shipper.leaseTriedAt > LEASE_MISS_TTL_MS;
 
-async function mayRecord(entry, record) {
+async function keyHoldsLease(shipper, replayedAt) {
+  if (!holdsLease(shipper) && leaseRetryDue(shipper, replayedAt)) {
+    shipper.leaseTriedAt = Date.now();
+    shipper.leaseAttempt = safeObsAsync(() => shipper.runtime.refreshPolicy());
+  }
+  await shipper.leaseAttempt;
+  await safeObsAsync(() => shipper.leaseStored);
+  return holdsLease(shipper);
+}
+
+const leasedShipper = (config) => shipping && config.dataDir && shipperFor(config);
+
+async function mayRecord(entry, record, config) {
   if (entry.parked && !record.replayedAt) return false;
-  if (shipping && !holdsLease(entry) && leaseRetryDue(entry, record)) {
-    entry.leaseTriedAt = Date.now();
+  const shipper = leasedShipper(config);
+  if (shipper && !holdsLease(entry) && (await keyHoldsLease(shipper, record.replayedAt))) {
     await safeObsAsync(() => entry.session.refreshPolicy());
   }
   entry.parked = !holdsLease(entry);
@@ -550,7 +581,9 @@ async function recordEvent(key, record, config) {
   if (!entry) return null;
   entry.lastEventAt = Math.max(entry.lastEventAt, record.at);
   entry.failuresBefore = entry.sinkFailures;
-  if (await mayRecord(entry, record)) await safeObsAsync(() => applyEvent(entry, record, config));
+  if (await mayRecord(entry, record, config)) {
+    await safeObsAsync(() => applyEvent(entry, record, config));
+  }
   return entry;
 }
 
@@ -577,7 +610,7 @@ async function applyEvent(entry, record, config) {
 async function journalLostRecords(config) {
   for (const entry of hookEntries) {
     if (entry.sinkFailures > 0) {
-      for (const record of entry.records) await keepForReplay(entry, record, null, config);
+      for (const record of entry.records) await keepForReplay(entry.binding, record, null, config);
     }
   }
   hookEntries.clear();

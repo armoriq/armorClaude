@@ -2,7 +2,14 @@ import { randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
 import { ensurePrivateDir, writePrivateFile } from "./fs-store.mjs";
-import { claimable, claimRecord, dropExpired, listRecords, readClaimed } from "./obs-records.mjs";
+import {
+  claimable,
+  claimRecord,
+  dropExpired,
+  listRecords,
+  readClaimed,
+  removeRecord,
+} from "./obs-records.mjs";
 
 const FIELDS = /^\d+-(\d+)-([0-9a-f]{64})-[0-9a-f-]{36}\.json$/;
 const INPUT_FIELDS = [
@@ -66,10 +73,19 @@ export const settledEvents = (pending, { sinkFailures, written }) =>
 
 export const forgetEvent = (file) => unlink(file).catch(() => undefined);
 
-export async function pruneJournal(dataDir, now = Date.now()) {
+export const JOURNAL_MAX_ENTRIES = 10_000;
+const ADOPT_CONCURRENCY = 64;
+
+export async function pruneJournal(dataDir, now = Date.now(), busy = new Set()) {
   const dir = journalDir(dataDir);
-  const live = await dropExpired(dir, await listRecords(dir, journalFields), now);
-  return live.filter((entry) => entry.kind !== "draft");
+  const live = (await dropExpired(dir, await listRecords(dir, journalFields), now))
+    .filter((entry) => entry.kind !== "draft")
+    .sort((a, b) => b.at - a.at || b.seq - a.seq);
+  const over = new Set(
+    live.slice(JOURNAL_MAX_ENTRIES).filter((entry) => !busy.has(path.join(dir, entry.name)))
+  );
+  await Promise.all([...over].map((entry) => removeRecord(dir, entry.name)));
+  return { live: live.filter((entry) => !over.has(entry)), dropped: over.size };
 }
 
 async function adopt(dir, entry) {
@@ -84,12 +100,20 @@ async function adopt(dir, entry) {
 
 export async function journalBacklog(dataDir, binding, busy, now = Date.now()) {
   const dir = journalDir(dataDir);
-  const due = (await pruneJournal(dataDir, now))
+  const { live, dropped } = await pruneJournal(dataDir, now, busy);
+  const due = live
     .filter(
       (entry) => entry.binding === binding && claimable(entry, busy.has(path.join(dir, entry.name)))
     )
     .sort((a, b) => a.at - b.at || a.seq - b.seq);
-  const adopted = [];
-  for (const entry of due) adopted.push(await adopt(dir, entry));
-  return adopted.filter(Boolean);
+  const adopted = new Array(due.length);
+  let next = 0;
+  const adoptNext = async () => {
+    while (next < due.length) {
+      const at = next++;
+      adopted[at] = await adopt(dir, due[at]);
+    }
+  };
+  await Promise.all(Array.from({ length: ADOPT_CONCURRENCY }, adoptNext));
+  return { backlog: adopted.filter(Boolean), dropped };
 }
