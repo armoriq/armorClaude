@@ -697,7 +697,7 @@ test("a running daemon adopts the journal of a process that died after it starte
   });
   const at = Date.now();
   const record = { event: "SessionStart", at, input: { session_id: "sess-orphan" } };
-  const name = `${at}-0-${deadPid()}-${spoolBinding}-00000000-0000-4000-8000-000000000000.json`;
+  const name = `${at}-0-${spoolBinding}-00000000-0000-4000-8000-000000000000.json.claim-${deadPid()}`;
   placeFile(path.join(config.dataDir, "obs-journal"), name, JSON.stringify(record));
   await obsRetryBacklog();
   await obsFlushAll();
