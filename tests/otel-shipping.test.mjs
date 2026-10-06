@@ -1353,6 +1353,31 @@ test("a retried batch that fails again does not hold back the shipper's next rou
   }
 });
 
+test("fallback hooks inside a lease miss window send no lease request of their own (#200)", async () => {
+  const backend = await startBackend({ leaseDelayMs: 6_000 });
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-lease-quiet-");
+    await withoutDaemon(dataDir);
+    const env = pluginEnv(home, dataDir, backend.url);
+    const session_id = randomUUID();
+    const tool = { tool_name: "Read", tool_input: { file_path: "package.json" } };
+    await runHook(env, { session_id, hook_event_name: "SessionStart", source: "startup" });
+    const laterFrom = Date.now();
+    for (const payload of [
+      { hook_event_name: "UserPromptSubmit", prompt: "read package.json" },
+      { hook_event_name: "PreToolUse", ...tool },
+      { hook_event_name: "PostToolUse", ...tool, tool_response: { ok: true } },
+    ]) {
+      assert.equal((await runHook(env, { session_id, ...payload })).code, 0);
+    }
+    const later = backend.leaseRequests.filter((at) => at >= laterFrom).length;
+    assert.ok(later <= 1, `${later} lease requests from the hooks inside the miss window`);
+  } finally {
+    await backend.close();
+  }
+});
+
 const ENFORCING_POLICY = {
   version: 1,
   updatedAt: new Date().toISOString(),

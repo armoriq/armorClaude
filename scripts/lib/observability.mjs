@@ -36,6 +36,7 @@ const hookEntries = new Set();
 let shipping = false;
 let testHooks = null;
 let releasingAll = null;
+let journaledHere = false;
 
 async function safeObsAsync(fn) {
   try {
@@ -150,7 +151,9 @@ async function initEntry(key, record, config) {
   await (shipping
     ? safeObsAsync(() => entry.session.refreshPolicy())
     : awaitHookLease(entry, config));
-  await safeObsAsync(() => entry.session.beginRoot({ input: connectedInput(config) }));
+  if (shipping || hasLease(entry)) {
+    await safeObsAsync(() => entry.session.beginRoot({ input: connectedInput(config) }));
+  }
   return entry;
 }
 
@@ -287,7 +290,7 @@ async function awaitHookLease(entry, config) {
   const miss = config.dataDir
     ? obsLeaseMiss(config.dataDir, config.observabilityEndpoint, config.apiKey)
     : null;
-  if (await safeObsAsync(() => miss?.recent())) return;
+  if (await safeObsAsync(() => miss?.recent())) return void (entry.leaseMissed = true);
   const answered = await within(
     safeObsAsync(() => entry.session.refreshPolicy()).then(() => true),
     HOOK_LEASE_WAIT_MS
@@ -321,6 +324,7 @@ export function __resetObsForTests() {
   hookEntries.clear();
   shipping = false;
   releasingAll = null;
+  journaledHere = false;
 }
 
 export function __setOtelTestHooksForTests(hooks) {
@@ -613,10 +617,13 @@ async function journalOrLog(config, file, record) {
 async function keepForReplay(binding, record, file, config) {
   if (file) return void inFlight.delete(file);
   if (!config.dataDir) return;
+  journaledHere = true;
   await journalOrLog(config, journalEntryPath(config.dataDir, binding, record.at), record);
 }
 
 const PARKING = "no policy lease for this key: new events wait in obs-journal";
+
+const hasLease = (entry) => !entry.leaseMissed && holdsLease(entry);
 
 const holdsLease = ({ runtime }) => runtime.currentCeilingSnapshot().authoritative === true;
 
@@ -652,7 +659,7 @@ async function mayRecord(entry, record, config) {
   if (shipper && !holdsLease(entry) && (await keyHoldsLease(shipper, record.replayedAt))) {
     await safeObsAsync(() => entry.session.refreshPolicy());
   }
-  entry.parked = !holdsLease(entry);
+  entry.parked = !hasLease(entry);
   return !entry.parked;
 }
 
@@ -708,4 +715,6 @@ export async function obsFlush(sessionId, config) {
   const entry = sessions.get(sessionKey(config, sessionId));
   if (entry) await releaseSession(entry);
   await journalLostRecords(config);
+  if (journaledHere && !shipping) await capJournal({ config });
+  journaledHere = false;
 }

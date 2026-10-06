@@ -771,6 +771,23 @@ test("a pass without a lease still caps the journal, and daemon.log says events 
   await provider.shutdown();
 });
 
+test("a hook process that parks an event keeps the journal within its cap (#200)", async () => {
+  installHooks();
+  const lease = switchableLease();
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: lease.fetch });
+  const config = { ...testConfig(), dataDir: mkdtempSync(path.join(tmpdir(), "aq-hookcap-")) };
+  const now = Date.now();
+  const dead = deadPid();
+  for (let i = 0; i < JOURNAL_MAX_ENTRIES; i++) {
+    const name = `${now - 60_000 + i}-0-${"c".repeat(64)}-${randomUUID()}.json.claim-${dead}`;
+    placeFile(path.join(config.dataDir, "obs-journal"), name, "{}");
+  }
+  await observeHook("SessionStart", { session_id: "sess-hookcap" }, null, config);
+  await obsFlush("sess-hookcap", config);
+  assert.equal(journalFiles(config.dataDir).length, JOURNAL_MAX_ENTRIES);
+  await provider.shutdown();
+});
+
 test("a hook process journals an event it could not record, and a daemon records it (#200)", async () => {
   installHooks();
   const lease = switchableLease();
