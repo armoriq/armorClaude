@@ -3,7 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { writePrivateFile } from "./fs-store.mjs";
 
-export const LEASE_MISS_TTL_MS = 30_000;
+const LEASE_MISS_TTL_MS = 30_000;
 
 function leaseFile(dataDir, endpoint, apiKey, extension) {
   const key = createHash("sha256").update(`${endpoint}\n${apiKey}`).digest("hex").slice(0, 32);
