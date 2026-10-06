@@ -1086,7 +1086,7 @@ test("fallback hooks wait once for a lease endpoint that never answers, not on e
   }
 });
 
-test("events a daemon answered while the lease endpoint failed ship once it answers again (#200)", async () => {
+test("events a daemon answered while the lease endpoint failed ship once it answers again, under a root that starts at the first event (#200)", async () => {
   const backend = await startBackend({ leaseStatus: 503 });
   const home = await tempDir("aq-home-");
   const dataDir = await tempDir("aq-nolease-");
@@ -1095,6 +1095,7 @@ test("events a daemon answered while the lease endpoint failed ship once it answ
   try {
     await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
     const sessionId = randomUUID();
+    const startedAt = Date.now();
     const tool = {
       tool_name: "Bash",
       tool_input: { command: "ls" },
@@ -1114,6 +1115,7 @@ test("events a daemon answered while the lease endpoint failed ship once it answ
     assert.equal(backend.exportTimes.length, 0);
     assert.equal(dataFiles(dataDir, "obs-journal").length, 5, "every event stays journaled");
 
+    const restoredAt = Date.now();
     backend.setLeaseStatus(200);
     await shipSpoolWithDaemon(env, dataDir);
     assert.deepEqual(
@@ -1122,7 +1124,12 @@ test("events a daemon answered while the lease endpoint failed ship once it answ
         .sort(),
       ["armoriq.agent.run", "armoriq.policy.evaluate", "armoriq.tool"]
     );
-    assert.equal(rootOutcomes(rootsByEnd(backend.delivered)).at(-1), "completed");
+    const roots = rootsByEnd(backend.delivered);
+    assert.equal(rootOutcomes(roots).at(-1), "completed");
+    for (const root of roots) {
+      const start = Number(root.startTimeUnixNano / 1_000_000n);
+      assert.ok(start >= startedAt && start < restoredAt, "the root starts at the first event");
+    }
   } finally {
     killIfRunning(daemon.child);
     await backend.close();

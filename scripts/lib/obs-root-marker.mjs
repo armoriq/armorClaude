@@ -71,24 +71,24 @@ async function pruneOnce(dir) {
   await Promise.allSettled((await readdir(dir)).map(prune));
 }
 
-async function claim(dataDir, binding, sessionId) {
+async function claim(dataDir, binding, sessionId, at) {
   const marker = markerPath(dataDir, binding, sessionId);
   await ensurePrivateDir(path.dirname(marker));
-  const now = new Date();
-  if (await linkMarker(marker, now)) {
+  const startedAt = new Date(at);
+  if (await linkMarker(marker, startedAt)) {
     await pruneOnce(path.dirname(marker)).catch(() => undefined);
-    return now;
+    return startedAt;
   }
   const recorded = await readMarker(marker);
-  if (!recorded) return now;
+  if (!recorded) return startedAt;
   if (recorded.startTime) return recorded.startTime;
   // Readers of one unreadable marker share its mtime, so racing rewrites agree.
   await placeMarker(marker, { startTime: recorded.writtenAt }, rename);
   return recorded.writtenAt;
 }
 
-export function claimRootStart(dataDir, binding, sessionId) {
-  return claim(dataDir, binding, sessionId).catch(() => null);
+export function claimRootStart(dataDir, binding, sessionId, at = Date.now()) {
+  return claim(dataDir, binding, sessionId, at).catch(() => null);
 }
 
 export async function rootEndedAt(dataDir, binding, sessionId) {

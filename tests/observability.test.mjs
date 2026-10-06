@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig } from "../scripts/lib/config.mjs";
 import { denyPreToolWithHint } from "../scripts/lib/hook-output.mjs";
+import { JOURNAL_MAX_ENTRIES } from "../scripts/lib/obs-journal.mjs";
 import {
   NodeTracerProvider,
   SimpleSpanProcessor,
@@ -742,6 +744,30 @@ test("a daemon asks for one lease per key per pass, however many sessions wait o
   assert.equal(lease.fetches, first + 2, "the sessions adopted the key's stored lease");
   assert.equal(spansByName("armoriq.policy.evaluate").length, 50);
   assert.deepEqual(journalFiles(config.dataDir), []);
+  await provider.shutdown();
+});
+
+test("a pass without a lease still caps the journal, and daemon.log says events are parked (#200)", async () => {
+  installHooks();
+  const lease = switchableLease();
+  __setOtelTestHooksForTests({ tracerProvider: provider, leaseFetcher: lease.fetch });
+  const config = { ...testConfig(), dataDir: mkdtempSync(path.join(tmpdir(), "aq-parkcap-")) };
+  await obsServeAsDaemon(config);
+  await observeHook("SessionStart", { session_id: "sess-cap" }, null, config);
+  const [own] = journalFiles(config.dataDir);
+  const binding = own.split("-")[2];
+  const now = Date.now();
+  const dead = deadPid();
+  for (let i = 0; i < JOURNAL_MAX_ENTRIES; i++) {
+    const name = `${now - 60_000 + i}-0-${binding}-${randomUUID()}.json.claim-${dead}`;
+    placeFile(path.join(config.dataDir, "obs-journal"), name, "{}");
+  }
+  await obsRetryBacklog();
+  assert.equal(journalFiles(config.dataDir).length, JOURNAL_MAX_ENTRIES);
+  const log = readFileSync(path.join(config.dataDir, "daemon.log"), "utf8");
+  assert.match(log, /no policy lease for this key/);
+  assert.match(log, /dropped 1 journaled event/);
+  await obsFlushAll();
   await provider.shutdown();
 });
 

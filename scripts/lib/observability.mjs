@@ -74,8 +74,8 @@ function sessionRootIds(sessionId) {
   };
 }
 
-async function rootStartTime(entry, config) {
-  return config.dataDir ? claimRootStart(config.dataDir, entry.binding, entry.sessionId) : null;
+async function rootStartTime(entry, config, at) {
+  return config.dataDir ? claimRootStart(config.dataDir, entry.binding, entry.sessionId, at) : null;
 }
 
 function spoolSink(config, entry) {
@@ -137,7 +137,7 @@ async function initEntry(key, record, config) {
   };
   entry.runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config, entry));
   entry.binding = entry.runtime.spoolBinding;
-  const startTime = await rootStartTime(entry, config);
+  const startTime = await rootStartTime(entry, config, record.at);
   entry.markerDir = startTime && config.dataDir;
   entry.session = new OtelSession(entry.runtime, {
     sessionId,
@@ -158,7 +158,13 @@ function shipperFor(config) {
   const key = `${config.dataDir}\n${config.observabilityEndpoint}\n${config.apiKey}`;
   let shipper = shippers.get(key);
   if (shipper) return shipper;
-  shipper = { config, dataDir: config.dataDir, leaseTriedAt: 0, leaseAttempt: null };
+  shipper = {
+    config,
+    dataDir: config.dataDir,
+    leaseTriedAt: 0,
+    leaseAttempt: null,
+    leaseHeld: true,
+  };
   const store = leaseStoreFor(config);
   const leaseStore = {
     read: store.read,
@@ -255,7 +261,7 @@ export function obsRetryBacklog() {
   const all = [...shippers.values()];
   const passAt = Date.now();
   const replayLeased = async (shipper) =>
-    (await keyHoldsLease(shipper, passAt)) && replayBacklog(shipper);
+    (await keyHoldsLease(shipper, passAt)) ? replayBacklog(shipper) : capJournal(shipper);
   return Promise.all([...all.map(shipDue), ...all.map(replayLeased)]);
 }
 
@@ -490,9 +496,7 @@ function observe(event, input, output, config) {
   const shipper = shipperFor(config);
   const file = journalEntryPath(config.dataDir, shipper.binding, record.at);
   inFlight.add(file);
-  const journaled = safeObsAsync(() => journalEvent(file, record)).then(
-    (written) => written ?? void inFlight.delete(file)
-  );
+  const journaled = journalOrLog(config, file, record);
   const recorded = shipper.ready.then(() => enqueueEvent(key, record, config, journaled));
   return { journaled, recorded };
 }
@@ -500,6 +504,8 @@ function observe(event, input, output, config) {
 async function parkedWithoutLease(key, record, config, file) {
   const shipper = !sessions.has(key) && leasedShipper(config);
   if (!shipper || (await keyHoldsLease(shipper, record.replayedAt))) return false;
+  const { session_id: sessionId } = record.input;
+  await claimRootStart(config.dataDir, shipper.binding, sessionId, record.at);
   await keepForReplay(shipper.binding, record, file, config);
   return true;
 }
@@ -545,10 +551,21 @@ function backlogBySession(config, backlog) {
   return bySession;
 }
 
-async function adoptJournal({ config, binding }) {
-  const journal = await safeObsAsync(() => journalBacklog(config.dataDir, binding, inFlight));
+function logJournalDrops(config, journal) {
   const dropped = journal?.dropped;
   if (dropped) logObs(config, `dropped ${dropped} journaled event(s) past ${JOURNAL_MAX_ENTRIES}`);
+}
+
+async function capJournal({ config }) {
+  logJournalDrops(
+    config,
+    await safeObsAsync(() => pruneJournal(config.dataDir, Date.now(), inFlight))
+  );
+}
+
+async function adoptJournal({ config, binding }) {
+  const journal = await safeObsAsync(() => journalBacklog(config.dataDir, binding, inFlight));
+  logJournalDrops(config, journal);
   return journal?.backlog ?? [];
 }
 
@@ -583,12 +600,23 @@ async function forgetSettled(file) {
   inFlight.delete(file);
 }
 
+async function journalOrLog(config, file, record) {
+  try {
+    return await journalEvent(file, record);
+  } catch (err) {
+    inFlight.delete(file);
+    logObs(config, `journal write failed, the event is lost on a crash: ${err?.message ?? err}`);
+    return null;
+  }
+}
+
 async function keepForReplay(binding, record, file, config) {
   if (file) return void inFlight.delete(file);
   if (!config.dataDir) return;
-  const target = journalEntryPath(config.dataDir, binding, record.at);
-  await safeObsAsync(() => journalEvent(target, record));
+  await journalOrLog(config, journalEntryPath(config.dataDir, binding, record.at), record);
 }
+
+const PARKING = "no policy lease for this key: new events wait in obs-journal";
 
 const holdsLease = ({ runtime }) => runtime.currentCeilingSnapshot().authoritative === true;
 
@@ -604,7 +632,16 @@ async function keyHoldsLease(shipper, replayedAt) {
   }
   await shipper.leaseAttempt;
   await safeObsAsync(() => shipper.leaseStored);
-  return holdsLease(shipper);
+  const held = holdsLease(shipper);
+  if (held !== shipper.leaseHeld) logLease(shipper, held);
+  return held;
+}
+
+function logLease(shipper, held) {
+  if (held || shipper.leaseHeld) {
+    logObs(shipper.config, held ? "policy lease back, parked events replay" : PARKING);
+  }
+  shipper.leaseHeld = held;
 }
 
 const leasedShipper = (config) => shipping && config.dataDir && shipperFor(config);
@@ -630,11 +667,10 @@ function entryFor(key, record, config) {
 async function recordEvent(key, record, config) {
   const entry = await entryFor(key, record, config);
   if (!entry) return null;
-  entry.lastEventAt = Math.max(entry.lastEventAt, record.at);
   entry.failuresBefore = entry.sinkFailures;
-  if (await mayRecord(entry, record, config)) {
-    await safeObsAsync(() => applyEvent(entry, record, config));
-  }
+  if (!(await mayRecord(entry, record, config))) return entry;
+  entry.lastEventAt = Math.max(entry.lastEventAt, record.at);
+  await safeObsAsync(() => applyEvent(entry, record, config));
   return entry;
 }
 
