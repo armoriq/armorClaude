@@ -133,7 +133,7 @@ test("an event whose span landed in a written batch is settled although a later 
   );
 });
 
-test("the journal keeps its newest entries up to the limit and never drops one in flight (#200)", async () => {
+test("the journal keeps its newest entries up to the limit and never drops one a live process holds (#200)", async () => {
   const dataDir = tempDataDir();
   const dir = journalDir(dataDir);
   const now = Date.now();
@@ -141,6 +141,7 @@ test("the journal keeps its newest entries up to the limit and never drops one i
   const entry = (at, owner) =>
     placeFile(dir, `${at}-0-${OTHER}-${randomUUID()}.json.claim-${owner}`, "{}");
   const inFlight = entry(now - 50_000, process.pid);
+  const anotherProcess = entry(now - 49_000, process.ppid);
   const names = [];
   for (let i = 0; i < JOURNAL_MAX_ENTRIES + 4; i++) names.push(entry(now - 40_000 + i, dead));
 
@@ -154,11 +155,12 @@ test("the journal keeps its newest entries up to the limit and never drops one i
   const left = new Set(readdirSync(dir));
   assert.equal(dropped, 4);
   assert.ok(left.has(inFlight));
+  assert.ok(left.has(anotherProcess), "an entry a live process holds is never dropped");
   assert.deepEqual(
     names.slice(0, 4).filter((name) => left.has(name)),
     []
   );
-  assert.equal(left.size, JOURNAL_MAX_ENTRIES + 1);
+  assert.equal(left.size, JOURNAL_MAX_ENTRIES + 2);
 });
 
 test("files from an older journal name format are deleted once they are a minute old (#194)", async () => {

@@ -90,7 +90,9 @@ export async function pruneJournal(dataDir, now = Date.now(), busy = new Set()) 
     .filter((entry) => entry.kind !== "draft")
     .sort((a, b) => b.at - a.at || b.seq - a.seq);
   const over = new Set(
-    live.slice(JOURNAL_MAX_ENTRIES).filter((entry) => !busy.has(path.join(dir, entry.name)))
+    live
+      .slice(JOURNAL_MAX_ENTRIES)
+      .filter((entry) => claimable(entry, busy.has(path.join(dir, entry.name))))
   );
   await Promise.all([...over].map((entry) => removeRecord(dir, entry.name)));
   return { live: live.filter((entry) => !over.has(entry)), dropped: over.size };
