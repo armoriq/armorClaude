@@ -48,7 +48,13 @@ import {
   handleStop,
   handleSessionEnd,
 } from "./lib/engine.mjs";
-import { observeHook, obsFlushAll, obsReleaseIdle } from "./lib/observability.mjs";
+import {
+  journalHook,
+  obsFlushAll,
+  obsReleaseIdle,
+  obsRetryBacklog,
+  obsServeAsDaemon,
+} from "./lib/observability.mjs";
 import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
@@ -375,6 +381,7 @@ const idleTimer = setInterval(() => {
     process.stderr.write(`[armorclaude-daemon] daemon.log cap failed: ${err?.message ?? err}\n`);
   }
   obsReleaseIdle(IDLE_TIMEOUT_MS);
+  obsRetryBacklog();
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
     process.stderr.write(
       `[armorclaude-daemon] idle for ${IDLE_TIMEOUT_MS / 60_000} min, exiting pid=${process.pid} at=${new Date().toISOString()}\n`
@@ -473,9 +480,7 @@ async function handleLine(rawLine, socket) {
       const output = await withSessionLock(sessionId, () =>
         dispatchHook(event, input, effectiveConfig)
       );
-      // Additive, fail-open observability. Never awaited into the decision path
-      // above; runs after the handler with the decision output in hand.
-      observeHook(event, input, output, effectiveConfig);
+      await journalHook(event, input, output, effectiveConfig);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
       return;
     }
@@ -490,6 +495,7 @@ server.on("error", (err) => {
   if (!server.listening) shutdown(1);
 });
 
+await obsServeAsDaemon(config);
 server.listen(socketPath, () => {
   // 0600 so only this user can connect (defense in depth — Unix sockets
   // already inherit dir perms, but we set explicitly).
@@ -512,9 +518,10 @@ function shutdown(code) {
 
 async function stopAndExit(code) {
   server.close();
-  await Promise.allSettled([flushAudit("shutdown"), obsFlushAll()]);
+  await flushAudit("shutdown").catch(() => undefined);
   cleanupSocket();
   cleanupPid();
+  await obsFlushAll();
   process.exit(code);
 }
 
