@@ -100,11 +100,11 @@ function spoolSink(config, entry) {
 const leaseStoreFor = (config) =>
   obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey);
 
-function dataDirOptions(config, entry, leaseStore) {
+function dataDirOptions(config, entry, leaseStore = leaseStoreFor(config)) {
   return entry ? { leaseStore, spanSink: spoolSink(config, entry) } : { leaseStore };
 }
 
-function runtimeOptionsFor(config, entry, leaseStore = config.dataDir && leaseStoreFor(config)) {
+function runtimeOptionsFor(config, entry, leaseStore) {
   const sdkVersion = typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown";
   const runtimeOptions = {
     backendEndpoint: config.observabilityEndpoint,
