@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 import { appendDaemonLog } from "./daemon-log.mjs";
+import { DECISION_CODE } from "./hook-output.mjs";
 import { obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
 import {
   batchCalls,
@@ -77,13 +78,15 @@ async function rootStartTime(entry, config) {
 function spoolSink(config, entry) {
   return {
     async write(batch) {
+      let dropped;
       try {
-        await writeSpoolBatch(config.dataDir, batch);
+        dropped = await writeSpoolBatch(config.dataDir, batch);
       } catch (err) {
         entry.sinkFailures += 1;
         logObs(config, `spool write failed, events stay in obs-journal: ${err?.message ?? err}`);
         throw err;
       }
+      if (dropped) logObs(config, `spool over 8 MiB: dropped its ${dropped} oldest batch(es)`);
       for (const call of batchCalls(batch)) entry.written.add(call);
       if (shipping) afterSpoolWrite(config, entry);
     },
@@ -196,7 +199,7 @@ function retryLater(shipper) {
 const backOff = (shipper, round) =>
   !round || (round.settled === 0 && (round.outage || (shipper.failures > 0 && round.shipped > 0)));
 const moreDue = (shipper, round) =>
-  shipper.again || (!releasingAll && round.more && round.settled > 0);
+  !releasingAll && (shipper.again || (round.more && round.settled > 0));
 
 async function shipRounds(shipper) {
   for (;;) {
@@ -211,6 +214,7 @@ async function shipRounds(shipper) {
 }
 
 function shipNow(shipper) {
+  if (releasingAll) return shipper.running;
   if (shipper.running) {
     shipper.again = true;
     return shipper.running;
@@ -245,9 +249,9 @@ async function closeShippers() {
   shippers.clear();
   await Promise.all(
     all.map(async (shipper) => {
-      clearTimeout(shipper.timer);
-      await shipper.running;
       await safeObsAsync(() => shipper.runtime.close());
+      await shipper.running;
+      clearTimeout(shipper.timer);
     })
   );
 }
@@ -319,7 +323,11 @@ function toolCall(input, config) {
 }
 
 async function obsCheck(entry, config, { input, output }) {
-  await entry.session.recordPolicy(toolCall(input, config), { decision: classifyDecision(output) });
+  const code = output?.[DECISION_CODE];
+  await entry.session.recordPolicy(toolCall(input, config), {
+    decision: classifyDecision(output),
+    ...(code ? { policyReasonCode: code } : {}),
+  });
 }
 
 async function obsReport(entry, config, { input }, outcome) {
