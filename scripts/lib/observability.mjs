@@ -9,11 +9,10 @@ import { appendDaemonLog } from "./daemon-log.mjs";
 import { DECISION_CODE } from "./hook-output.mjs";
 import { obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
 import { SPOOL_MAX_TRIES, shipRetryDelayMs, shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
-import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
+import { claimRootStart, markRootEnded, rootEndedAt } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
-const EXPORT_DRAIN_MARGIN_MS = 1_000;
 const HOOK_LEASE_WAIT_MS = 1_500;
 const LEASE_FETCHER = fileURLToPath(new URL("../obs-lease-fetch.mjs", import.meta.url));
 
@@ -23,7 +22,6 @@ const shippers = new Map();
 let shipping = false;
 let testHooks = null;
 let releasingAll = null;
-let drainOnClose = false;
 
 async function safeObsAsync(fn) {
   try {
@@ -40,18 +38,15 @@ export function isObsEnabled(config) {
   return Boolean(config && config.observabilityEnabled);
 }
 
+const sessionKey = (config, sessionId) =>
+  `${config.observabilityEndpoint}\n${config.apiKey}\n${sessionId}`;
+
 function logObs(config, message) {
   try {
     appendDaemonLog(config.dataDir, `[armorclaude-obs] ${message} pid=${process.pid}`);
   } catch {
     /* the log is best-effort */
   }
-}
-
-function getOrInitEntry(sessionId, config) {
-  let entry = sessions.get(sessionId);
-  if (entry) return Promise.resolve(entry);
-  return initEntry(sessionId, config);
 }
 
 function sha256(text) {
@@ -65,25 +60,32 @@ function sessionRootIds(sessionId) {
   };
 }
 
-async function rootStartTime(sessionId, config) {
-  return config.dataDir ? claimRootStart(config.dataDir, sessionId) : null;
-}
-
-async function spoolBatch(config, batch) {
-  const dropped = await writeSpoolBatch(config.dataDir, batch);
-  if (dropped) logObs(config, `spool over 8 MiB: dropped its ${dropped} oldest batch(es)`);
+async function rootStartTime(entry, config) {
+  return config.dataDir ? claimRootStart(config.dataDir, entry.binding, entry.sessionId) : null;
 }
 
 function spoolSink(config) {
-  return { write: (batch) => safeObsAsync(() => spoolBatch(config, batch)) };
+  return {
+    async write(batch) {
+      let dropped;
+      try {
+        dropped = await writeSpoolBatch(config.dataDir, batch);
+      } catch (err) {
+        logObs(config, `spool write failed: ${err?.message ?? err}`);
+        throw err;
+      }
+      if (dropped) logObs(config, `spool over 8 MiB: dropped its ${dropped} oldest batch(es)`);
+      if (shipping) shipDue(shipperFor(config));
+    },
+  };
 }
 
-function dataDirOptions(config) {
+function dataDirOptions(config, entry) {
   const leaseStore = obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey);
-  return drainOnClose ? { leaseStore } : { leaseStore, spanSink: spoolSink(config) };
+  return entry ? { leaseStore, spanSink: spoolSink(config) } : { leaseStore };
 }
 
-function runtimeOptionsFor(config) {
+function runtimeOptionsFor(config, entry) {
   const sdkVersion = typeof armoriqSdk.VERSION === "string" ? armoriqSdk.VERSION : "unknown";
   const runtimeOptions = {
     backendEndpoint: config.observabilityEndpoint,
@@ -91,7 +93,7 @@ function runtimeOptionsFor(config) {
     sdkVersion,
     options: { serviceName: config.observabilityProduct || "armorclaude" },
   };
-  if (config.dataDir) Object.assign(runtimeOptions, dataDirOptions(config));
+  if (config.dataDir) Object.assign(runtimeOptions, dataDirOptions(config, entry));
   if (testHooks?.leaseFetcher) runtimeOptions.leaseFetcher = testHooks.leaseFetcher;
   if (testHooks?.tracerProvider) {
     runtimeOptions.options = {
@@ -103,22 +105,24 @@ function runtimeOptionsFor(config) {
   return runtimeOptions;
 }
 
-async function initEntry(sessionId, config) {
-  const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
-  const startTime = await rootStartTime(sessionId, config);
-  const session = new OtelSession(runtime, {
+async function initEntry(key, record, config) {
+  const sessionId = record.input.session_id;
+  const entry = { key, sessionId, lastEventAt: record.at };
+  entry.runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config, entry));
+  entry.binding = entry.runtime.spoolBinding;
+  const startTime = await rootStartTime(entry, config);
+  entry.markerDir = startTime && config.dataDir;
+  entry.session = new OtelSession(entry.runtime, {
     sessionId,
     agentId: config.agentId || null,
     userId: config.userId || null,
     root: { ...sessionRootIds(sessionId), startTime },
   });
-  const entry = { runtime, session, dataDir: startTime && config.dataDir, lastEventAt: Date.now() };
-  sessions.set(sessionId, entry);
-  if (shipping && config.dataDir) shipperFor(config);
-  await (drainOnClose
-    ? safeObsAsync(() => session.refreshPolicy())
+  sessions.set(key, entry);
+  await (shipping
+    ? safeObsAsync(() => entry.session.refreshPolicy())
     : awaitHookLease(entry, config));
-  await safeObsAsync(() => session.beginRoot({ input: connectedInput(config) }));
+  await safeObsAsync(() => entry.session.beginRoot({ input: connectedInput(config) }));
   return entry;
 }
 
@@ -198,14 +202,14 @@ function shipNow(shipper) {
   return shipper.running;
 }
 
-export function obsShipSpools(config) {
+export function obsServeAsDaemon(config) {
   shipping = true;
-  if (isObsEnabled(config) && config.dataDir) shipperFor(config);
+  if (config.dataDir && isObsEnabled(config)) shipperFor(config);
 }
 
 const shipDue = (shipper) => (Date.now() >= shipper.retryAt ? shipNow(shipper) : shipper.running);
 
-export function obsRetrySpools() {
+export function obsRetryBacklog() {
   return Promise.all([...shippers.values()].map(shipDue));
 }
 
@@ -257,21 +261,12 @@ export async function obsFetchLease(config) {
   await safeObsAsync(() => runtime.refreshPolicy());
 }
 
-export function obsDrainExportsOnClose() {
-  drainOnClose = true;
-}
-
-function closeDeadlineMs(entry) {
-  return drainOnClose ? entry.runtime.config.timeoutMillis + EXPORT_DRAIN_MARGIN_MS : undefined;
-}
-
 export function __resetObsForTests() {
   sessions.clear();
   queues.clear();
   shippers.clear();
   shipping = false;
   releasingAll = null;
-  drainOnClose = false;
 }
 
 export function __setOtelTestHooksForTests(hooks) {
@@ -295,29 +290,23 @@ function toolCall(input, config) {
   return { toolName, toolCallId, arguments: sanitizeParams(input.tool_input, config.sanitize) };
 }
 
-async function obsCheck(sessionId, config, input, output) {
-  const entry = await getOrInitEntry(sessionId, config);
+async function obsCheck(entry, config, { input, output }) {
   const code = output?.[DECISION_CODE];
-  return safeObsAsync(() =>
-    entry.session.recordPolicy(toolCall(input, config), {
-      decision: classifyDecision(output),
-      ...(code ? { policyReasonCode: code } : {}),
-    })
-  );
+  await entry.session.recordPolicy(toolCall(input, config), {
+    decision: classifyDecision(output),
+    ...(code ? { policyReasonCode: code } : {}),
+  });
 }
 
-async function obsReport(sessionId, config, input, outcome) {
-  const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    const call = toolCall(input, config);
-    await entry.session.recordTool(
-      { ...call, operation: { category: operationCategory(call.toolName) } },
-      {
-        outcome,
-        result: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
-      }
-    );
-  });
+async function obsReport(entry, config, { input }, outcome) {
+  const call = toolCall(input, config);
+  await entry.session.recordTool(
+    { ...call, operation: { category: operationCategory(call.toolName) } },
+    {
+      outcome,
+      result: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
+    }
+  );
 }
 
 // Only structured expansion events confirm command activity. Keep the label
@@ -341,14 +330,11 @@ function expandedSlashCommand(input) {
 }
 
 // The SDK accepts only tool names that start alphanumeric.
-async function obsSlashCommand(sessionId, config, command) {
-  const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    await entry.session.recordOperation({
-      category: "command",
-      name: "command.execute",
-      toolName: command.replace(/^\//, ""),
-    });
+async function obsSlashCommand(entry, command) {
+  await entry.session.recordOperation({
+    category: "command",
+    name: "command.execute",
+    toolName: command.replace(/^\//, ""),
   });
 }
 
@@ -356,27 +342,27 @@ function connectedInput(config) {
   return `ArmorClaude connected (${config.observabilityProduct || "armorclaude"})`;
 }
 
-async function obsEndTurn(sessionId) {
-  const entry = sessions.get(sessionId);
-  if (!entry) return;
-  await safeObsAsync(() => entry.session.flush("ok"));
+async function obsEndSession(entry, config) {
+  sessions.delete(entry.key);
+  const endTime = new Date(entry.lastEventAt);
+  await safeObsAsync(() => entry.session.close({ status: "ok", endTime }));
+  if (config.dataDir) {
+    await safeObsAsync(() =>
+      markRootEnded(config.dataDir, entry.binding, entry.sessionId, endTime)
+    );
+  }
 }
 
-async function obsEndSession(sessionId, config) {
-  const entry = await getOrInitEntry(sessionId, config);
-  sessions.delete(sessionId);
-  await safeObsAsync(() =>
-    entry.session.close({ status: "ok", deadlineMs: closeDeadlineMs(entry) })
-  );
-  if (config.dataDir) await safeObsAsync(() => releaseRootStart(config.dataDir, sessionId));
+async function endedSince(entry) {
+  const endedAt =
+    entry.markerDir && (await rootEndedAt(entry.markerDir, entry.binding, entry.sessionId));
+  return Boolean(endedAt) && endedAt.getTime() >= entry.lastEventAt;
 }
 
-async function releaseSession(sessionId, entry) {
-  sessions.delete(sessionId);
+async function releaseSession(entry) {
+  if (sessions.get(entry.key) === entry) sessions.delete(entry.key);
   await safeObsAsync(async () => {
-    const ended = entry.dataDir && (await rootStartReleased(entry.dataDir, sessionId));
-    const deadlineMs = closeDeadlineMs(entry);
-    if (ended) return entry.runtime.close(deadlineMs);
+    if (await endedSince(entry)) return entry.runtime.close();
     // unknown, not process_exit: the session may go on in another process, and
     // only SessionEnd knows how it ended.
     await entry.session.close({
@@ -384,7 +370,6 @@ async function releaseSession(sessionId, entry) {
       taskOutcome: "unknown",
       output: {},
       endTime: new Date(entry.lastEventAt),
-      deadlineMs,
     });
   });
 }
@@ -400,7 +385,7 @@ function enqueue(sessionId, task) {
 
 async function releaseAll() {
   await Promise.all(queues.values());
-  await Promise.all([...sessions].map(([sessionId, entry]) => releaseSession(sessionId, entry)));
+  await Promise.all([...sessions.values()].map(releaseSession));
   await closeShippers();
 }
 
@@ -412,12 +397,12 @@ export function obsFlushAll() {
 export function obsReleaseIdle(maxIdleMs) {
   if (releasingAll) return Promise.resolve();
   const idleSince = Date.now() - maxIdleMs;
-  const idle = [...sessions].filter(([, entry]) => entry.lastEventAt <= idleSince);
+  const idle = [...sessions.values()].filter((entry) => entry.lastEventAt <= idleSince);
   return Promise.all(
-    idle.map(([sessionId, entry]) =>
-      enqueue(sessionId, () => {
-        if (sessions.get(sessionId) === entry && entry.lastEventAt <= idleSince) {
-          return releaseSession(sessionId, entry);
+    idle.map((entry) =>
+      enqueue(entry.key, () => {
+        if (sessions.get(entry.key) === entry && entry.lastEventAt <= idleSince) {
+          return releaseSession(entry);
         }
       })
     )
@@ -428,46 +413,52 @@ export function observeHook(event, input, output, config) {
   if (!isObsEnabled(config) || releasingAll) return Promise.resolve();
   const sessionId = typeof input?.session_id === "string" ? input.session_id : "";
   if (!sessionId) return Promise.resolve();
-  return enqueue(sessionId, () => recordEvent(sessionId, event, input, output, config));
+  const record = { event, input, output, at: Date.now() };
+  const key = sessionKey(config, sessionId);
+  return enqueue(key, async () => {
+    const entry = await recordEvent(key, record, config);
+    if (entry && record.event === "Stop") await releaseSession(entry);
+  });
 }
 
-async function recordEvent(sessionId, event, input, output, config) {
-  await safeObsAsync(async () => {
-    switch (event) {
-      case "SessionStart":
-      case "UserPromptSubmit":
-        await getOrInitEntry(sessionId, config);
-        break;
-      case "UserPromptExpansion": {
-        const slash = expandedSlashCommand(input);
-        if (slash) await obsSlashCommand(sessionId, config, slash);
-        break;
-      }
-      case "PreToolUse":
-        await obsCheck(sessionId, config, input, output);
-        break;
-      case "PostToolUse":
-        await obsReport(sessionId, config, input, "success");
-        break;
-      case "PostToolUseFailure":
-        await obsReport(sessionId, config, input, "error");
-        break;
-      case "Stop":
-        await obsEndTurn(sessionId);
-        break;
-      case "SessionEnd":
-        await obsEndSession(sessionId, config);
-        break;
-      default:
-        break;
+function entryFor(key, record, config) {
+  const entry = sessions.get(key);
+  if (entry) return entry;
+  if (record.event === "Stop") return null;
+  if (record.event === "UserPromptExpansion" && !expandedSlashCommand(record.input)) return null;
+  return safeObsAsync(() => initEntry(key, record, config));
+}
+
+async function recordEvent(key, record, config) {
+  const entry = await entryFor(key, record, config);
+  if (!entry) return null;
+  entry.lastEventAt = Math.max(entry.lastEventAt, record.at);
+  await safeObsAsync(() => applyEvent(entry, record, config));
+  return entry;
+}
+
+async function applyEvent(entry, record, config) {
+  switch (record.event) {
+    case "UserPromptExpansion": {
+      const slash = expandedSlashCommand(record.input);
+      if (slash) await obsSlashCommand(entry, slash);
+      break;
     }
-  });
-  const entry = sessions.get(sessionId);
-  if (entry) entry.lastEventAt = Date.now();
+    case "PreToolUse":
+      return obsCheck(entry, config, record);
+    case "PostToolUse":
+      return obsReport(entry, config, record, "success");
+    case "PostToolUseFailure":
+      return obsReport(entry, config, record, "error");
+    case "SessionEnd":
+      return obsEndSession(entry, config);
+    default:
+      break;
+  }
 }
 
 export async function obsFlush(sessionId, config) {
   if (!isObsEnabled(config)) return;
-  const entry = sessions.get(sessionId);
-  if (entry) await releaseSession(sessionId, entry);
+  const entry = sessions.get(sessionKey(config, sessionId));
+  if (entry) await releaseSession(entry);
 }

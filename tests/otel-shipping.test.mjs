@@ -16,8 +16,8 @@ import {
   obsFlush,
   obsFlushAll,
   observeHook,
-  obsRetrySpools,
-  obsShipSpools,
+  obsRetryBacklog,
+  obsServeAsDaemon,
 } from "../scripts/lib/observability.mjs";
 import { shipSpool, writeSpoolBatch } from "../scripts/lib/obs-spool.mjs";
 import { placeFile } from "./helpers/obs-files.mjs";
@@ -134,7 +134,8 @@ async function startBackend({
       }
       if (req.method === "POST" && req.url === "/v1/traces") {
         exportTimes.push(Date.now());
-        const spans = decodeSpans(Buffer.concat(chunks));
+        const apiKey = req.headers["x-api-key"];
+        const spans = decodeSpans(Buffer.concat(chunks)).map((span) => ({ ...span, apiKey }));
         exports.push(...spans);
         const status =
           typeof exportStatus === "function"
@@ -164,6 +165,16 @@ async function startBackend({
     releaseExports() {
       holdExports = false;
       for (const answer of heldExports.splice(0)) answer();
+    },
+    setExportStatus(status) {
+      exportStatus = status;
+    },
+    setLeaseDelay(ms) {
+      leaseDelayMs = ms;
+    },
+    dropHeldExports() {
+      holdExports = false;
+      heldExports.length = 0;
     },
     close: () =>
       new Promise((resolve) => {
@@ -233,16 +244,17 @@ const rootsByEnd = (exports) =>
     .filter((s) => s.name === "armoriq.agent.run")
     .sort((a, b) => (a.endTimeUnixNano < b.endTimeUnixNano ? -1 : 1));
 
-function spoolFiles(dataDir) {
-  const dir = path.join(dataDir, "obs-spool");
+function dataFiles(dataDir, name = "obs-spool") {
+  const dir = path.join(dataDir, name);
   return existsSync(dir) ? readdirSync(dir) : [];
 }
 
 async function shipSpoolWithDaemon(env, dataDir) {
-  await rm(path.join(dataDir, "profiles"), { force: true });
+  await rm(path.join(dataDir, "profiles"), { force: true, recursive: true });
   const daemon = startDaemon(env, dataDir);
   try {
-    await waitFor(() => spoolFiles(dataDir).length === 0, 20_000, "the daemon to ship the spool");
+    const settled = () => dataFiles(dataDir).length === 0;
+    await waitFor(settled, 20_000, "the daemon to ship the spool");
   } finally {
     killIfRunning(daemon.child);
     await daemon.exited;
@@ -281,7 +293,9 @@ test("a session run entirely on the fallback is one trace under one root that en
       }
     }
     assert.equal(storedSpans(backend.exports).length, 5, "1 root, 2 policy and 2 tool spans");
-    assert.equal(readdirSync(path.join(dataDir, "obs-roots")).length, 0, "marker removed");
+    const [marker] = readdirSync(path.join(dataDir, "obs-roots"));
+    const { endedAt } = JSON.parse(readFileSync(path.join(dataDir, "obs-roots", marker), "utf8"));
+    assert.equal(BigInt(Date.parse(endedAt)) * 1_000_000n, ends.at(-1), "the marker keeps the end");
   } finally {
     await backend.close();
   }
@@ -318,11 +332,12 @@ function startDaemon(env, dataDir) {
   return { child, exited, socketPath: path.join(dataDir, "daemon.sock") };
 }
 
-function daemonHook(socketPath, sessionId, event, input = {}) {
+function daemonHook(socketPath, sessionId, event, input = {}, configEnv = undefined) {
   return daemonRequest(socketPath, {
     type: "hook",
     reqId: event,
     event,
+    configEnv,
     input: { session_id: sessionId, hook_event_name: event, ...input },
   });
 }
@@ -529,22 +544,21 @@ test("the next processes ship the root of a session whose daemon was SIGKILLed, 
   }
 });
 
-test("a second shutdown signal waits for the first shutdown's export", async () => {
-  const backend = await startBackend({ holdExports: true });
+test("a second shutdown signal does not cut the first shutdown's spool write (#194)", async () => {
+  const backend = await startBackend();
   const home = await tempDir("aq-home-");
   const dataDir = await tempDir("aq-twice-");
-  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  const env = pluginEnv(home, dataDir, backend.url);
+  const daemon = startDaemon(env, dataDir);
   try {
     await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
     await daemonHook(daemon.socketPath, randomUUID(), "SessionStart");
     await daemonRequest(daemon.socketPath, { type: "shutdown", reqId: "first" });
-    await waitFor(() => backend.exportTimes.length > 0, 10_000, "the shutdown export");
     process.kill(daemon.child.pid, "SIGTERM");
-    await new Promise((r) => setTimeout(r, 300));
-    assert.equal(daemon.child.exitCode, null, "the daemon exited with its export in flight");
-    backend.releaseExports();
     await daemon.exited;
-    assert.deepEqual(rootOutcomes(backend.exports), ["unknown"]);
+    assert.equal(backend.exportTimes.length, 0, "shutdown shipped nothing");
+    await shipSpoolWithDaemon(env, dataDir);
+    assert.deepEqual(rootOutcomes(backend.delivered), ["unknown"]);
   } finally {
     killIfRunning(daemon.child);
     await backend.close();
@@ -585,7 +599,7 @@ test("fallback hooks spool their spans without waiting on a 2.5 s export, and a 
       assert.ok(Date.now() - started < 1_000, `${hook_event_name} took ${Date.now() - started} ms`);
     }
     assert.equal(backend.exportTimes.length, 0, "no hook process exported");
-    const files = spoolFiles(dataDir);
+    const files = dataFiles(dataDir);
     assert.ok(files.length > 0, "the hooks spooled their spans");
     for (const file of files) {
       assert.equal(statSync(path.join(dataDir, "obs-spool", file)).mode & 0o777, 0o600);
@@ -603,8 +617,95 @@ test("fallback hooks spool their spans without waiting on a 2.5 s export, and a 
   }
 });
 
-test("a replacement daemon serves hooks while the old one drains its exports (#190)", async () => {
+test("a daemon SIGKILLed after Stop with no later hook loses none of the turn, root included (#194)", async () => {
   const backend = await startBackend({ holdExports: true });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-stopkill-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const killed = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => existsSync(killed.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    const tool = { tool_name: "Bash", tool_input: { command: "ls" }, tool_use_id: "toolu_01Stop" };
+    await daemonHook(killed.socketPath, sessionId, "SessionStart");
+    await daemonHook(killed.socketPath, sessionId, "PreToolUse", tool);
+    await daemonHook(killed.socketPath, sessionId, "PostToolUse", { ...tool, tool_response: {} });
+    await daemonHook(killed.socketPath, sessionId, "Stop");
+    await waitFor(() => backend.exportTimes.length > 0, 10_000, "the Stop batch");
+    process.kill(killed.child.pid, "SIGKILL");
+    await killed.exited;
+    backend.dropHeldExports();
+
+    await shipSpoolWithDaemon(env, dataDir);
+    const spans = storedSpans(backend.delivered).filter(
+      (s) => s.attributes["armoriq.session_id"] === sessionId
+    );
+    assert.deepEqual(spans.map((s) => s.name).sort(), [
+      "armoriq.agent.run",
+      "armoriq.policy.evaluate",
+      "armoriq.tool",
+    ]);
+    assert.deepEqual(rootOutcomes(spans), ["unknown"]);
+  } finally {
+    killIfRunning(killed.child);
+    await backend.close();
+  }
+});
+
+test("after a failed export the daemon backs off instead of sending every write (#194)", async () => {
+  const backend = await startBackend({ exportStatus: 500 });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-failing-");
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    await daemonHook(daemon.socketPath, sessionId, "SessionStart");
+    for (let i = 0; i < 4; i++) {
+      const tool = { tool_name: "Read", tool_input: { file_path: `f${i}` }, tool_use_id: `t${i}` };
+      await daemonHook(daemon.socketPath, sessionId, "PreToolUse", tool);
+      await daemonHook(daemon.socketPath, sessionId, "Stop");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await waitFor(() => dataFiles(dataDir).length === 4, 5_000, "four spooled turns");
+    assert.equal(backend.exportTimes.length, 1, "one export attempt for four turns");
+  } finally {
+    killIfRunning(daemon.child);
+    await backend.close();
+  }
+});
+
+const sessionSpans = (exports, sessionId) =>
+  storedSpans(exports).filter((s) => s.attributes["armoriq.session_id"] === sessionId);
+
+test("the daemon writes a session's spans at Stop and SessionEnd, not one request per span (#194)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-batch-");
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    await daemonHook(daemon.socketPath, sessionId, "SessionStart");
+    for (const id of ["t1", "t2", "t3"]) {
+      const tool = { tool_name: "Read", tool_input: { file_path: id }, tool_use_id: id };
+      await daemonHook(daemon.socketPath, sessionId, "PreToolUse", tool);
+      await daemonHook(daemon.socketPath, sessionId, "PostToolUse", { ...tool, tool_response: {} });
+    }
+    await daemonHook(daemon.socketPath, sessionId, "Stop");
+    await daemonHook(daemon.socketPath, sessionId, "SessionEnd", { reason: "other" });
+    const done = () => rootOutcomes(backend.delivered).includes("completed");
+    await waitFor(done, 10_000, "the SessionEnd root");
+    assert.equal(sessionSpans(backend.delivered, sessionId).length, 7);
+    assert.equal(backend.exportTimes.length, 2, "one request at Stop, one at SessionEnd");
+  } finally {
+    killIfRunning(daemon.child);
+    await backend.close();
+  }
+});
+
+test("a replacement daemon serves hooks and ships what the old daemon spooled at shutdown (#190, #194)", async () => {
+  const backend = await startBackend({ exportDelayMs: 9_000 });
   const home = await tempDir("aq-home-");
   const dataDir = await tempDir("aq-swap-");
   const env = pluginEnv(home, dataDir, backend.url);
@@ -612,18 +713,20 @@ test("a replacement daemon serves hooks while the old one drains its exports (#1
   let next;
   try {
     await waitFor(() => existsSync(old.socketPath), 20_000, "the first daemon socket");
-    await daemonHook(old.socketPath, randomUUID(), "SessionStart");
+    const sessionId = randomUUID();
+    await daemonHook(old.socketPath, sessionId, "SessionStart");
+    const stopping = Date.now();
     await daemonRequest(old.socketPath, { type: "shutdown", reqId: "upgrade" });
-    await waitFor(() => backend.exportTimes.length > 0, 10_000, "the draining export");
+    await old.exited;
+    assert.ok(Date.now() - stopping < 3_000, "the old daemon did not wait on an export");
+    assert.ok(dataFiles(dataDir).length > 0, "the old daemon spooled the session's root");
     next = startDaemon(env, dataDir);
     await waitFor(() => existsSync(next.socketPath), 20_000, "the replacement socket");
     const ping = await daemonRequest(next.socketPath, { type: "ping", reqId: "next" });
     assert.equal(ping.ok, true);
-    assert.equal(old.child.exitCode, null, "the old daemon is still draining");
     assert.equal(Number(readFileSync(path.join(dataDir, "daemon.pid"), "utf8")), next.child.pid);
-    backend.releaseExports();
-    await old.exited;
-    assert.ok(existsSync(next.socketPath), "the old daemon left the new socket in place");
+    await waitFor(() => rootOutcomes(backend.delivered).length > 0, 20_000, "the shipped root");
+    assert.deepEqual(rootOutcomes(backend.delivered), ["unknown"]);
   } finally {
     killIfRunning(old.child);
     if (next) killIfRunning(next.child);
@@ -725,7 +828,7 @@ async function recordedBatches(backendEndpoint, apiKey, sessionId = `sess-${apiK
   return batches;
 }
 
-const spoolLeft = (dataDir) => spoolFiles(dataDir).length;
+const spoolLeft = (dataDir) => dataFiles(dataDir).length;
 
 test("a batch another key recorded is deleted unsent, its own key's batch ships (#193)", async () => {
   const backend = await startBackend();
@@ -768,7 +871,7 @@ async function spooledCopies(backend, count) {
 function shipInProcess(backend, dataDir) {
   __resetObsForTests();
   __setOtelTestHooksForTests({ leaseFetcher: lease });
-  obsShipSpools({
+  obsServeAsDaemon({
     observabilityEnabled: true,
     observabilityEndpoint: backend.url,
     apiKey: API_KEY,
@@ -889,7 +992,7 @@ test("a retried batch that fails again does not hold back the shipper's next rou
   const dataDir = await tempDir("obs-spool-");
   try {
     await writeSpoolBatch(dataDir, (await recordedBatches(backend.url, API_KEY, "poison"))[0]);
-    const [fresh] = spoolFiles(dataDir);
+    const [fresh] = dataFiles(dataDir);
     const spool = path.join(dataDir, "obs-spool");
     renameSync(
       path.join(spool, fresh),
@@ -900,7 +1003,7 @@ test("a retried batch that fails again does not hold back the shipper's next rou
       await waitFor(() => backend.exportTimes.length === 1, 10_000, "the retried batch to fail");
       await writeSpoolBatch(dataDir, (await recordedBatches(backend.url, API_KEY, "live"))[0]);
       const written = Date.now();
-      obsRetrySpools();
+      obsRetryBacklog();
       await waitFor(() => backend.delivered.length > 0, 10_000, "the live batch");
       const took = Date.now() - written;
       assert.ok(took < 2_000, `the live batch was acknowledged after ${took} ms`);
