@@ -49,7 +49,7 @@ import {
   handleSessionEnd,
 } from "./lib/engine.mjs";
 import {
-  observeHook,
+  journalHook,
   obsFlushAll,
   obsReleaseIdle,
   obsRetryBacklog,
@@ -480,9 +480,7 @@ async function handleLine(rawLine, socket) {
       const output = await withSessionLock(sessionId, () =>
         dispatchHook(event, input, effectiveConfig)
       );
-      // Additive, fail-open observability. Never awaited into the decision path
-      // above; runs after the handler with the decision output in hand.
-      observeHook(event, input, output, effectiveConfig);
+      await journalHook(event, input, output, effectiveConfig);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
       return;
     }

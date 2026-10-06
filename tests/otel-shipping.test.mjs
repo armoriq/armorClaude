@@ -519,8 +519,9 @@ test("the next processes ship the root of a session whose daemon was SIGKILLed, 
     const session_id = randomUUID();
     await daemonHook(daemon.socketPath, session_id, "SessionStart");
     const dir = path.join(dataDir, "obs-roots");
-    await waitFor(() => existsSync(dir) && readdirSync(dir).length > 0, 10_000, "the marker");
-    const marker = JSON.parse(readFileSync(path.join(dir, readdirSync(dir)[0]), "utf8"));
+    const markers = () => (existsSync(dir) ? readdirSync(dir).filter((n) => !n.includes(".")) : []);
+    await waitFor(() => markers().length > 0, 10_000, "the marker");
+    const marker = JSON.parse(readFileSync(path.join(dir, markers()[0]), "utf8"));
     process.kill(daemon.child.pid, "SIGKILL");
     await daemon.exited;
     await withoutDaemon(dataDir);
@@ -679,6 +680,28 @@ test("a daemon SIGKILLed after Stop with no later hook loses none of the turn, r
       "armoriq.tool",
     ]);
     assert.deepEqual(rootOutcomes(spans), ["unknown"]);
+  } finally {
+    killIfRunning(killed.child);
+    await backend.close();
+  }
+});
+
+test("a daemon SIGKILLed right after it answers SessionEnd still ships the session as completed (#194)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-endkill-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const killed = startDaemon(env, dataDir);
+  try {
+    await waitFor(() => existsSync(killed.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    await daemonHook(killed.socketPath, sessionId, "SessionStart");
+    await daemonHook(killed.socketPath, sessionId, "SessionEnd", { reason: "other" });
+    process.kill(killed.child.pid, "SIGKILL");
+    await killed.exited;
+
+    await shipSpoolWithDaemon(env, dataDir);
+    assert.equal(rootOutcomes(rootsByEnd(backend.delivered)).at(-1), "completed");
   } finally {
     killIfRunning(killed.child);
     await backend.close();
@@ -908,10 +931,12 @@ test("a starting daemon replays its predecessor's journal before it serves a hoo
     const post = { ...tool, tool_input: {}, tool_response: {} };
     await daemonHook(daemon.socketPath, sessionId, "PostToolUse", post);
     await daemonHook(daemon.socketPath, sessionId, "Stop");
-    await waitFor(() => backend.delivered.length >= 2, 10_000, "the turn's spans");
-    const [policy, toolSpan] = ["armoriq.policy.evaluate", "armoriq.tool"].map((n) =>
-      backend.delivered.find((s) => s.name === n)
-    );
+    const turn = () =>
+      ["armoriq.policy.evaluate", "armoriq.tool"].map((n) =>
+        backend.delivered.find((s) => s.name === n)
+      );
+    await waitFor(() => turn().every(Boolean), 10_000, "the turn's spans");
+    const [policy, toolSpan] = turn();
     assert.ok(policy.endTimeUnixNano <= toolSpan.endTimeUnixNano, "the replayed check comes first");
   } finally {
     killIfRunning(daemon.child);
