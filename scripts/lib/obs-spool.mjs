@@ -19,7 +19,7 @@ const RETRY_MAX_MS = 10 * 60_000;
 const KEPT = new Set(["failed", "unsupported"]);
 const BATCH_FAULTS = new Set(["export_failed"]);
 
-const FIELDS = /^\d+-(\d+)-([0-9a-f]{64})-([0-9a-f-]{36})-(\d+)-(\d+)\.json$/;
+const FIELDS = /^\d+-(\d+)-([0-9a-f]{64})-([0-9a-f-]{36})-(\d+)-(\d+)-(\d+)\.json$/;
 const BINDING = /^[0-9a-f]{64}$/;
 
 const spoolDir = (dataDir) => path.join(dataDir, "obs-spool");
@@ -27,12 +27,13 @@ const spoolDir = (dataDir) => path.join(dataDir, "obs-spool");
 function spoolFields(ready) {
   const match = FIELDS.exec(ready);
   if (!match) return null;
-  const [, bytes, binding, id, tries, dueAt] = match;
-  return { bytes: Number(bytes), binding, id, tries: Number(tries), dueAt: Number(dueAt) };
+  const [, bytes, binding, id, tries, fails, dueAt] = match;
+  const counts = { tries: Number(tries), fails: Number(fails), dueAt: Number(dueAt) };
+  return { bytes: Number(bytes), binding, id, ...counts };
 }
 
-const batchName = ({ at, bytes, binding, id, tries, dueAt }) =>
-  `${at}-${bytes}-${binding}-${id}-${tries}-${dueAt}.json`;
+const batchName = ({ at, bytes, binding, id, tries, fails, dueAt }) =>
+  `${at}-${bytes}-${binding}-${id}-${tries}-${fails}-${dueAt}.json`;
 
 async function pruneSpool(dir) {
   const live = await dropExpired(dir, await listRecords(dir, spoolFields), Date.now());
@@ -65,7 +66,8 @@ export async function writeSpoolBatch(dataDir, batch) {
   const text = JSON.stringify(batch);
   const bytes = Buffer.byteLength(text);
   const id = randomUUID();
-  const name = batchName({ at: Date.now(), bytes, binding: batch.binding, id, tries: 0, dueAt: 0 });
+  const fresh = { tries: 0, fails: 0, dueAt: 0 };
+  const name = batchName({ at: Date.now(), bytes, binding: batch.binding, id, ...fresh });
   await ensurePrivateDir(dir);
   await writePrivateFile(path.join(dir, name), text);
   return pruneSpool(dir);
@@ -77,20 +79,21 @@ export function shipRetryDelayMs(failures) {
 
 async function settle(dir, entry, result, { skip, answered }) {
   const fault = BATCH_FAULTS.has(result.reason);
-  const tries = entry.tries + (fault ? 1 : 0);
-  if (!KEPT.has(result.status) || (answered && tries >= SPOOL_MAX_TRIES)) {
+  const fails = entry.fails + (fault ? 1 : 0);
+  const tries = entry.tries + (fault && answered ? 1 : 0);
+  if (!KEPT.has(result.status) || tries >= SPOOL_MAX_TRIES) {
     await removeRecord(dir, entry.claimed);
     return { settled: !KEPT.has(result.status), dropped: KEPT.has(result.status), dueAt: Infinity };
   }
   if (result.status === "unsupported") skip.add(entry.ready);
-  const dueAt = fault ? Date.now() + shipRetryDelayMs(tries) : entry.dueAt;
-  const next = path.join(dir, batchName({ ...entry, tries, dueAt }));
+  const dueAt = fault ? Date.now() + shipRetryDelayMs(fails) : entry.dueAt;
+  const next = path.join(dir, batchName({ ...entry, tries, fails, dueAt }));
   await rename(path.join(dir, entry.claimed), next).catch(() => undefined);
   return { settled: false, dropped: false, dueAt: fault ? dueAt : Infinity };
 }
 
 const failedBefore = (entry) => entry.dueAt > 0;
-const freshFirst = (a, b) => failedBefore(a) - failedBefore(b) || a.tries - b.tries || a.at - b.at;
+const freshFirst = (a, b) => failedBefore(a) - failedBefore(b) || a.fails - b.fails || a.at - b.at;
 const notTheBatch = (entry, result) =>
   result.status === "failed" && (!failedBefore(entry) || !BATCH_FAULTS.has(result.reason));
 const rejection = ({ reason, httpStatus }) => (httpStatus ? `${reason} ${httpStatus}` : reason);

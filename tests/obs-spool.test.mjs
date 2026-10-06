@@ -26,8 +26,8 @@ const spoolDir = (dataDir) => path.join(dataDir, "obs-spool");
 
 const place = (dataDir, name, text) => placeFile(spoolDir(dataDir), name, text);
 
-const entryName = (at, bytes, binding = BINDING, n = 0, tries = 0, dueAt = 0) =>
-  `${at}-${bytes}-${binding}-${UUID.slice(0, -1)}${n}-${tries}-${dueAt}.json`;
+const entryName = (at, bytes, binding = BINDING, n = 0, tries = 0, dueAt = 0, fails = tries) =>
+  `${at}-${bytes}-${binding}-${UUID.slice(0, -1)}${n}-${tries}-${fails}-${dueAt}.json`;
 
 const listed = (dataDir) => readdirSync(spoolDir(dataDir)).sort();
 
@@ -53,7 +53,7 @@ test("a spooled batch is one whole owner-only file in an owner-only directory (#
   const text = readFileSync(path.join(spoolDir(dataDir), name), "utf8");
   assert.match(
     name,
-    new RegExp(`^\\d+-${Buffer.byteLength(text)}-${BINDING}-[0-9a-f-]{36}-0-0\\.json$`)
+    new RegExp(`^\\d+-${Buffer.byteLength(text)}-${BINDING}-[0-9a-f-]{36}-0-0-0\\.json$`)
   );
   assert.deepEqual(JSON.parse(text), batch);
   assert.equal(statSync(spoolDir(dataDir)).mode & 0o777, 0o700);
@@ -185,7 +185,7 @@ test("a batch that fails while the backend answers others waits out its own back
   assert.ok(!listed(dataDir).includes(poison));
 });
 
-test("an outage that answers no batch drops none of them, however often they failed (#193)", async () => {
+test("an outage that answers no batch drops none of them and counts no try, only a longer wait (#193)", async () => {
   const dataDir = tempDataDir();
   const now = Date.now();
   const tries = SPOOL_MAX_TRIES - 1;
@@ -194,8 +194,23 @@ test("an outage that answers no batch drops none of them, however often they fai
   const runtime = fakeRuntime(() => "failed/export_failed");
   const outcome = await shipSpool(dataDir, BINDING, runtime);
   assert.deepEqual([outcome.dropped, outcome.outage], [0, true]);
-  const left = listed(dataDir).map((name) => name.split("-").at(-2));
-  assert.deepEqual(left.sort(), ["1", String(tries + 1)]);
+  const counts = listed(dataDir).map((name) => name.split("-").slice(-3, -1).join("/"));
+  assert.deepEqual(counts.sort(), ["0/1", `${tries}/${tries + 1}`], "tries/fails");
+});
+
+test("failures during an outage do not bring a batch closer to its drop once the backend is back (#193)", async () => {
+  const dataDir = tempDataDir();
+  const now = Date.now();
+  const outlasted = place(dataDir, entryName(now - 2, 2, BINDING, 1, 0, now - 1, 12), '"slow"');
+  place(dataDir, entryName(now - 1, 2, BINDING, 2), '"live"');
+  const runtime = fakeRuntime((batch) =>
+    batch === "slow" ? "failed/export_failed" : "acknowledged"
+  );
+  const round = await shipSpool(dataDir, BINDING, runtime);
+  assert.equal(round.dropped, 0);
+  const [kept] = listed(dataDir);
+  assert.ok(kept.startsWith(outlasted.split("-0-12-")[0]));
+  assert.equal(kept.split("-").slice(-3, -1).join("/"), "1/13", "tries/fails");
 });
 
 test("a batch that keeps failing on its own backs off by doubling (#193)", async () => {

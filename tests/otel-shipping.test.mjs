@@ -1230,7 +1230,7 @@ test("a batch another key recorded is deleted unsent, its own key's batch ships 
     const plant = (batch) =>
       placeFile(
         path.join(dataDir, "obs-spool"),
-        `${Date.now()}-10-${binding}-${randomUUID()}-0-0.json`,
+        `${Date.now()}-10-${binding}-${randomUUID()}-0-0-0.json`,
         JSON.stringify(batch)
       );
     const [own] = await recordedBatches(backend.url, API_KEY);
@@ -1382,7 +1382,7 @@ test("a retried batch that fails again does not hold back the shipper's next rou
     const spool = path.join(dataDir, "obs-spool");
     renameSync(
       path.join(spool, fresh),
-      path.join(spool, fresh.replace(/-0-0\.json$/, `-1-${Date.now() - 1}.json`))
+      path.join(spool, fresh.replace(/-0-0-0\.json$/, `-1-1-${Date.now() - 1}.json`))
     );
     const stop = shipInProcess(backend, dataDir);
     try {
