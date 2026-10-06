@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 import { appendDaemonLog } from "./daemon-log.mjs";
+import { DECISION_CODE } from "./hook-output.mjs";
 import { obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
 import { SPOOL_MAX_TRIES, shipRetryDelayMs, shipSpool, writeSpoolBatch } from "./obs-spool.mjs";
 import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
@@ -290,8 +291,12 @@ function toolCall(input, config) {
 
 async function obsCheck(sessionId, config, input, output) {
   const entry = await getOrInitEntry(sessionId, config);
+  const code = output?.[DECISION_CODE];
   return safeObsAsync(() =>
-    entry.session.recordPolicy(toolCall(input, config), { decision: classifyDecision(output) })
+    entry.session.recordPolicy(toolCall(input, config), {
+      decision: classifyDecision(output),
+      ...(code ? { policyReasonCode: code } : {}),
+    })
   );
 }
 

@@ -934,12 +934,7 @@ const ENFORCING_POLICY = {
   },
 };
 
-const filesUnder = (dir) =>
-  readdirSync(dir, { recursive: true, withFileTypes: true })
-    .filter((entry) => entry.isFile())
-    .map((entry) => path.join(entry.parentPath, entry.name));
-
-test("a deny-with-hint keeps the prompt and tool input out of the export and the data dir (#201)", async () => {
+test("a deny-with-hint exports the rule's code and keeps the prompt and tool input out of the export and the data dir (#201)", async () => {
   const backend = await startBackend();
   try {
     const home = await tempDir("aq-home-");
@@ -953,6 +948,7 @@ test("a deny-with-hint keeps the prompt and tool input out of the export and the
     await hook({ hook_event_name: "UserPromptSubmit", prompt: "deploy with PROMPT_SECRET_77" });
     const { stdout } = await hook({ hook_event_name: "PreToolUse", ...tool });
     assert.match(stdout, /"permissionDecision":"deny".*PROMPT_SECRET_77/);
+    assert.doesNotMatch(stdout, /intent_plan_missing/);
     const secret = /PROMPT_SECRET_77|TOOL_SECRET_41/;
     const holders = filesUnder(dataDir).filter((file) => secret.test(readFileSync(file, "utf8")));
     assert.deepEqual(
@@ -963,7 +959,7 @@ test("a deny-with-hint keeps the prompt and tool input out of the export and the
     await shipSpoolWithDaemon(env, dataDir);
     const [policy] = backend.exports.filter((s) => s.name === "armoriq.policy.evaluate");
     assert.equal(policy.attributes["armoriq.policy.decision"], "deny");
-    assert.equal(policy.attributes["armoriq.policy.reason_code"], undefined);
+    assert.equal(policy.attributes["armoriq.policy.reason_code"], "intent_plan_missing");
     assert.ok(!secret.test(JSON.stringify(backend.exports.map((span) => span.attributes))));
   } finally {
     await backend.close();
