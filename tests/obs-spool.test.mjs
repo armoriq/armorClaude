@@ -37,8 +37,8 @@ function fakeRuntime(statusOf) {
     exportSpooled: async (batches) => {
       seen.push(...batches);
       return batches.map((batch) => {
-        const [status, reason] = statusOf(batch).split("/");
-        return { status, reason };
+        const [status, reason, httpStatus] = statusOf(batch).split("/");
+        return { status, reason, ...(httpStatus ? { httpStatus: Number(httpStatus) } : {}) };
       });
     },
   };
@@ -91,7 +91,10 @@ test("shipping deletes acknowledged, discarded and rejected batches, keeps faile
     place(dataDir, entryName(now + i, 20, BINDING, i), JSON.stringify({ status }))
   );
   const garbled = place(dataDir, entryName(now + 5, 3, BINDING, 5), "{no");
-  const runtime = fakeRuntime((batch) => (batch === null ? "rejected" : batch.status));
+  const outcomes = { rejected: "rejected/backend_rejected/401" };
+  const runtime = fakeRuntime((batch) =>
+    batch === null ? "rejected/malformed" : (outcomes[batch.status] ?? batch.status)
+  );
   const skip = new Set();
   const round = await shipSpool(dataDir, BINDING, runtime, { skip });
   assert.deepEqual(runtime.seen, [...statuses.map((status) => ({ status })), null]);
@@ -99,6 +102,7 @@ test("shipping deletes acknowledged, discarded and rejected batches, keeps faile
     shipped: 6,
     settled: 4,
     dropped: 0,
+    rejected: ["backend_rejected 401", "malformed"],
     outage: true,
     more: false,
     nextDueAt: Infinity,
@@ -148,6 +152,7 @@ test("shipping an empty spool sends nothing (#193)", async () => {
     shipped: 0,
     settled: 0,
     dropped: 0,
+    rejected: [],
     outage: false,
     more: false,
     nextDueAt: Infinity,
