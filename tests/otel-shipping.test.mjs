@@ -471,3 +471,50 @@ test("a second shutdown signal waits for the first shutdown's export", async () 
     await backend.close();
   }
 });
+
+const ENFORCING_POLICY = {
+  version: 1,
+  updatedAt: new Date().toISOString(),
+  history: [],
+  policy: {
+    schemaVersion: "armor.policy.v1",
+    kind: "PolicyProfile",
+    metadata: { name: "enforcing", description: "" },
+    defaults: { decision: "allow", conflictResolution: "deny_overrides" },
+    statements: [
+      {
+        id: "forbid-webfetch",
+        effect: "forbid",
+        principal: { type: "agent", id: "claude-code" },
+        action: { type: "tool", in: ["WebFetch"] },
+        resource: { type: "workspace", scope: "current" },
+        conditions: [],
+      },
+    ],
+  },
+};
+
+test("a deny-with-hint exports the rule's code and keeps the prompt and tool input out of the export (#201)", async () => {
+  const backend = await startBackend();
+  try {
+    const home = await tempDir("aq-home-");
+    const dataDir = await tempDir("aq-hint-");
+    await withoutDaemon(dataDir);
+    await writeFile(path.join(dataDir, "policy.json"), JSON.stringify(ENFORCING_POLICY));
+    const env = pluginEnv(home, dataDir, backend.url);
+    const hook = (payload) => runHook(env, { session_id: "sess-hint", ...payload });
+    const tool = { tool_name: "Bash", tool_input: { command: "TOOL_SECRET_41=1 ls" } };
+    await hook({ hook_event_name: "SessionStart", source: "startup" });
+    await hook({ hook_event_name: "UserPromptSubmit", prompt: "deploy with PROMPT_SECRET_77" });
+    const { stdout } = await hook({ hook_event_name: "PreToolUse", ...tool });
+    assert.match(stdout, /"permissionDecision":"deny".*PROMPT_SECRET_77/);
+    assert.doesNotMatch(stdout, /intent_plan_missing/);
+    const [policy] = backend.exports.filter((s) => s.name === "armoriq.policy.evaluate");
+    assert.equal(policy.attributes["armoriq.policy.decision"], "deny");
+    assert.equal(policy.attributes["armoriq.policy.reason_code"], "intent_plan_missing");
+    const secret = /PROMPT_SECRET_77|TOOL_SECRET_41/;
+    assert.ok(!secret.test(JSON.stringify(backend.exports.map((span) => span.attributes))));
+  } finally {
+    await backend.close();
+  }
+});

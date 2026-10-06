@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../scripts/lib/config.mjs";
+import { denyPreToolWithHint } from "../scripts/lib/hook-output.mjs";
 import {
   NodeTracerProvider,
   SimpleSpanProcessor,
@@ -141,25 +142,23 @@ test("observeHook builds one turn root per session", async () => {
   await provider.shutdown();
 });
 
-test("PreToolUse deny records a blocked policy evaluation", async () => {
+test("PreToolUse deny records a blocked policy evaluation under the rule's code, not its text (#201)", async () => {
   installHooks();
   const config = testConfig();
   await observeHook(
     "PreToolUse",
     { session_id: "sess-deny", tool_name: "Bash", tool_input: { command: "rm -rf /" } },
-    {
-      hookSpecificOutput: {
-        permissionDecision: "deny",
-        permissionDecisionReason: "no registered plan",
-      },
-    },
+    denyPreToolWithHint("intent_plan_missing", "no registered plan", {
+      toolName: "Bash",
+      toolInput: { command: "rm -rf /" },
+    }),
     config
   );
   await observeHook("SessionEnd", { session_id: "sess-deny" }, null, config);
   const policy = spansByName("armoriq.policy.evaluate");
   assert.equal(policy.length, 1);
   assert.equal(policy[0].attributes["armoriq.policy.decision"], "deny");
-  assert.equal(policy[0].attributes["armoriq.policy.reason_code"], "no registered plan");
+  assert.equal(policy[0].attributes["armoriq.policy.reason_code"], "intent_plan_missing");
   await provider.shutdown();
 });
 

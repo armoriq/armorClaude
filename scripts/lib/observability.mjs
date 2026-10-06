@@ -3,6 +3,7 @@
 import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
+import { DECISION_CODE } from "./hook-output.mjs";
 import { claimRootStart, releaseRootStart, rootStartReleased } from "./obs-root-marker.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
@@ -114,15 +115,13 @@ function operationCategory(toolName) {
 
 async function obsCheck(sessionId, config, toolName, toolInput, output) {
   const entry = await getOrInitEntry(sessionId, config);
-  return safeObsAsync(async () => {
-    const reason =
-      (output && output.hookSpecificOutput && output.hookSpecificOutput.permissionDecisionReason) ||
-      undefined;
-    await entry.session.recordPolicy(
+  const code = output?.[DECISION_CODE];
+  return safeObsAsync(() =>
+    entry.session.recordPolicy(
       { toolName, arguments: sanitizeParams(toolInput, config.sanitize) },
-      { decision: classifyDecision(output), ...(reason ? { policyReasonCode: reason } : {}) }
-    );
-  });
+      { decision: classifyDecision(output), ...(code ? { policyReasonCode: code } : {}) }
+    )
+  );
 }
 
 async function obsReport(sessionId, config, toolName, toolInput, toolResponse, outcome) {

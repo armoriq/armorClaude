@@ -84,7 +84,7 @@ async function main() {
     // enforcement missed, so deny in enforce mode instead of silent allow.
     // Other events just exit — they can't allow anything on their own.
     if (config.mode === "enforce") {
-      emitJson(denyPreTool("ArmorClaude hook payload invalid JSON"));
+      emitJson(denyPreTool("invalid_payload", "ArmorClaude hook payload invalid JSON"));
     }
     return;
   }
@@ -125,6 +125,6 @@ main().catch((error) => {
     process.stderr.write(`[armorclaude] error=${message}\n`);
   }
   if (mode === "enforce") {
-    emitJson(denyPreTool(`ArmorClaude internal error: ${message}`));
+    emitJson(denyPreTool("internal_error", `ArmorClaude internal error: ${message}`));
   }
 });
