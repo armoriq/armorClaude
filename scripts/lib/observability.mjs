@@ -160,13 +160,17 @@ async function initEntry(key, record, config) {
   });
   sessions.set(key, entry);
   if (!shipping) hookEntries.add(entry);
+  await openRoot(entry, config);
+  return entry;
+}
+
+async function openRoot(entry, config) {
   await (shipping
     ? safeObsAsync(() => entry.session.refreshPolicy())
     : awaitHookLease(entry, config));
   if (shipping || hasLease(entry)) {
     await safeObsAsync(() => entry.session.beginRoot({ input: connectedInput(config) }));
   }
-  return entry;
 }
 
 function shipperFor(config) {
