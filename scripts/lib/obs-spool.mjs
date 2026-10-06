@@ -66,13 +66,13 @@ export function shipRetryDelayMs(failures) {
 
 async function settle(dir, entry, result, { skip, answered }) {
   const fault = BATCH_FAULTS.has(result.reason);
-  const tries = entry.tries + (answered && fault ? 1 : 0);
-  if (!KEPT.has(result.status) || tries >= SPOOL_MAX_TRIES) {
+  const tries = entry.tries + (fault ? 1 : 0);
+  if (!KEPT.has(result.status) || (answered && tries >= SPOOL_MAX_TRIES)) {
     await removeRecord(dir, entry.claimed);
     return { settled: !KEPT.has(result.status), dropped: KEPT.has(result.status), dueAt: Infinity };
   }
   if (result.status === "unsupported") skip.add(entry.ready);
-  const dueAt = fault ? Date.now() + shipRetryDelayMs(Math.max(tries, 1)) : entry.dueAt;
+  const dueAt = fault ? Date.now() + shipRetryDelayMs(tries) : entry.dueAt;
   const next = path.join(dir, batchName({ ...entry, tries, dueAt }));
   await rename(path.join(dir, entry.claimed), next).catch(() => undefined);
   return { settled: false, dropped: false, dueAt: fault ? dueAt : Infinity };
