@@ -8,6 +8,7 @@ import {
   SPOOL_MAX_TRIES,
   shipRetryDelayMs,
   shipSpool,
+  spooledJournal,
   writeSpoolBatch,
 } from "../scripts/lib/obs-spool.mjs";
 import { deadPid, placeFile } from "./helpers/obs-files.mjs";
@@ -206,4 +207,21 @@ test("a batch that keeps failing on its own backs off by doubling (#193)", async
   const [name] = listed(dataDir);
   assert.equal(name.split("-").at(-2), "3");
   assert.ok(outcome.nextDueAt - Date.now() > 19_000, "the third failure waits 20 s");
+});
+
+test("only placed batches name journal entries, and an unreadable one names none (#194)", async () => {
+  const dataDir = tempDataDir();
+  const now = Date.now();
+  const batch = (journal) => JSON.stringify({ version: 1, binding: BINDING, spans: [], journal });
+  place(dataDir, entryName(now - 3, 2, BINDING, 1), batch(["placed.json"]));
+  place(
+    dataDir,
+    `${entryName(now - 2, 2, BINDING, 2)}.claim-${deadPid()}`,
+    batch(["claimed.json"])
+  );
+  place(dataDir, `${entryName(now - 1, 2, BINDING, 3)}.tmp.1.x`, batch(["draft.json"]));
+  place(dataDir, entryName(now, 2, BINDING, 4), '{"version":1,"jour');
+  place(dataDir, entryName(now, 2, OTHER, 5), batch(["other-key.json"]));
+  const named = await spooledJournal(dataDir, BINDING);
+  assert.deepEqual([...named].sort(), ["claimed.json", "placed.json"]);
 });
