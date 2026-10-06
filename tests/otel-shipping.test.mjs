@@ -1121,7 +1121,9 @@ test("fallback hooks wait once for a lease endpoint that never answers, not on e
       took.push(Date.now() - started);
     }
     assert.ok(took[0] < 3_000, `the first hook took ${took[0]} ms`);
-    for (const ms of took.slice(1)) assert.ok(ms < 1_000, `a later hook took ${ms} ms`);
+    for (const ms of took.slice(1)) {
+      assert.ok(ms < took[0] - 1_000, `a later hook took ${ms} ms, the waiting one ${took[0]} ms`);
+    }
   } finally {
     await backend.close();
   }
