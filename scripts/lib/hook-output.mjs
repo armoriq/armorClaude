@@ -1,22 +1,19 @@
-export function denyPreTool(reason) {
+export const DECISION_CODE = Symbol("armorclaude.decisionCode");
+
+function preToolDecision(code, permissionDecision, permissionDecisionReason) {
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: reason,
+      permissionDecision,
+      permissionDecisionReason,
     },
+    [DECISION_CODE]: code,
   };
 }
 
-export function askPreTool(reason) {
-  return {
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "ask",
-      permissionDecisionReason: reason,
-    },
-  };
-}
+export const denyPreTool = (code, reason) => preToolDecision(code, "deny", reason);
+
+export const askPreTool = (code, reason) => preToolDecision(code, "ask", reason);
 
 /**
  * Phase 4 A3: actionable deny output.
@@ -27,6 +24,7 @@ export function askPreTool(reason) {
  * follow-up turn instead of 3 (deny → re-prompt user → re-prompt for the
  * right format → finally register).
  *
+ * @param {string} code              the rule or check that denied the call
  * @param {string} reason            free-form explanation
  * @param {object} args
  * @param {string} args.toolName     the tool that was blocked (will end up in the suggested plan)
@@ -34,7 +32,7 @@ export function askPreTool(reason) {
  * @param {string} [args.goal]       inferred goal from session.lastPrompt or the tool name
  * @param {object} [args.knownPlan]  the currently-cached plan (if any) — we'll suggest extending it
  */
-export function denyPreToolWithHint(reason, args = {}) {
+export function denyPreToolWithHint(code, reason, args = {}) {
   const { toolName = "Tool", toolInput, goal, knownPlan } = args;
   const newStep = {
     action: toolName,
@@ -62,13 +60,7 @@ export function denyPreToolWithHint(reason, args = {}) {
     "```json\n" +
     JSON.stringify(suggestedPlan, null, 2) +
     "\n```";
-  return {
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: reason + hint,
-    },
-  };
+  return denyPreTool(code, reason + hint);
 }
 
 /**

@@ -30,11 +30,14 @@
  */
 
 import { createServer } from "node:net";
-import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, chmodSync } from "node:fs";
+import { readFileSync, unlinkSync, existsSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./lib/config.mjs";
+import { daemonSocketPath, prepareDaemonSocketDir } from "./lib/daemon-socket.mjs";
 import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
+import { ensurePrivateDirSync, writePrivateFileSync } from "./lib/fs-store.mjs";
+import { capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
 import {
   handleSessionStart,
   handleUserPromptExpansion,
@@ -45,21 +48,28 @@ import {
   handleStop,
   handleSessionEnd,
 } from "./lib/engine.mjs";
-import { observeHook, obsFlushAll } from "./lib/observability.mjs";
+import {
+  journalHook,
+  obsFlushAll,
+  obsReleaseIdle,
+  obsRetryBacklog,
+  obsServeAsDaemon,
+} from "./lib/observability.mjs";
+import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
 import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
 
-const DAEMON_VERSION = "0.2.21";
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
 const USAGE_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 
 let config = loadConfig();
-mkdirSync(config.dataDir, { recursive: true });
+ensurePrivateDirSync(config.dataDir);
 // Seed built-in profiles eagerly so new templates are available immediately
 // after a daemon restart — no lazy first-access required.
 await seedBuiltinProfiles(config);
 
-const socketPath = path.join(config.dataDir, "daemon.sock");
+const socketPath = daemonSocketPath(config.dataDir);
+prepareDaemonSocketDir(socketPath);
 const pidPath = path.join(config.dataDir, "daemon.pid");
 
 // ---- PID file: claim ownership or refuse to start ------------------------
@@ -86,7 +96,7 @@ function claimPid() {
       // unreadable / malformed — overwrite
     }
   }
-  writeFileSync(pidPath, String(process.pid), "utf8");
+  writePrivateFileSync(pidPath, String(process.pid));
 }
 
 // ---- Socket cleanup ------------------------------------------------------
@@ -379,8 +389,17 @@ function syncUsageAfter(event, cfg) {
 // ---- Idle timeout --------------------------------------------------------
 let lastActivity = Date.now();
 const idleTimer = setInterval(() => {
+  try {
+    capDaemonLog(daemonLogPath(config.dataDir));
+  } catch (err) {
+    process.stderr.write(`[armorclaude-daemon] daemon.log cap failed: ${err?.message ?? err}\n`);
+  }
+  obsReleaseIdle(IDLE_TIMEOUT_MS);
+  obsRetryBacklog();
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
-    if (config.debug) process.stderr.write("[daemon] idle timeout, exiting\n");
+    process.stderr.write(
+      `[armorclaude-daemon] idle for ${IDLE_TIMEOUT_MS / 60_000} min, exiting pid=${process.pid} at=${new Date().toISOString()}\n`
+    );
     shutdown(0);
   }
 }, 60_000);
@@ -475,9 +494,7 @@ async function handleLine(rawLine, socket) {
       const output = await withSessionLock(sessionId, () =>
         dispatchHook(event, input, effectiveConfig)
       );
-      // Additive, fail-open observability. Never awaited into the decision path
-      // above; runs after the handler with the decision output in hand.
-      await observeHook(event, input, output, effectiveConfig);
+      await journalHook(event, input, output, effectiveConfig);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
       syncUsageAfter(event, effectiveConfig);
       return;
@@ -490,8 +507,10 @@ async function handleLine(rawLine, socket) {
 
 server.on("error", (err) => {
   process.stderr.write(`[armorclaude-daemon] server error: ${err?.message ?? err}\n`);
+  if (!server.listening) shutdown(1);
 });
 
+await obsServeAsDaemon(config);
 server.listen(socketPath, () => {
   // 0600 so only this user can connect (defense in depth — Unix sockets
   // already inherit dir perms, but we set explicitly).
@@ -500,24 +519,25 @@ server.listen(socketPath, () => {
   } catch {
     /* best-effort */
   }
-  if (config.debug)
-    process.stderr.write(`[armorclaude-daemon] listening on ${socketPath} pid=${process.pid}\n`);
+  process.stderr.write(
+    `[armorclaude-daemon] listening on ${socketPath} pid=${process.pid} version=${DAEMON_VERSION} at=${new Date().toISOString()}\n`
+  );
 });
 
 // ---- Shutdown handlers ---------------------------------------------------
+let stopping = null;
 function shutdown(code) {
-  // Try to flush audits AND observability one last time before exit, so any
-  // ended-but-unshipped turn traces reach the backend. Both are fail-open.
-  Promise.allSettled([flushAudit("shutdown"), obsFlushAll()]).finally(() => {
-    try {
-      server.close();
-    } catch {
-      /* empty */
-    }
-    cleanupSocket();
-    cleanupPid();
-    process.exit(code);
-  });
+  stopping ??= stopAndExit(code);
+  return stopping;
+}
+
+async function stopAndExit(code) {
+  server.close();
+  await flushAudit("shutdown").catch(() => undefined);
+  cleanupSocket();
+  cleanupPid();
+  await obsFlushAll();
+  process.exit(code);
 }
 
 process.on("SIGTERM", () => shutdown(0));
