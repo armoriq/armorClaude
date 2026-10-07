@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { deviceIdentity } from "../scripts/lib/device.mjs";
@@ -27,21 +27,31 @@ test("deviceIdentity falls back to a stable hostname hash without a CLI id", () 
   assert.equal(a.deviceId, b.deviceId);
 });
 
-// The usage sync is the only writer of token-usage rows (#156, #158).
-test("Stop posts no token usage itself", async () => {
+async function stopPosts() {
   const { handleStop } = await import("../scripts/lib/engine.mjs");
   const intentMod = await import("../scripts/lib/intent.mjs");
   const tmp = mkdtempSync(path.join(tmpdir(), "ac-stop-"));
   const transcript = path.join(tmp, "sess-tokens.jsonl");
-  writeFileSync(
-    transcript,
+  const line = (id, timestamp, input) =>
     JSON.stringify({
       type: "assistant",
       cwd: "/work/repo-a",
-      timestamp: "2026-09-21T00:05:00Z",
-      requestId: "req-m1",
-      message: { id: "m1", model: "claude-opus", usage: { input_tokens: 20, output_tokens: 1 } },
-    })
+      timestamp,
+      requestId: `req-${id}`,
+      message: { id, model: "claude-opus", usage: { input_tokens: input, output_tokens: 1 } },
+    });
+  writeFileSync(
+    transcript,
+    [
+      line("m1", "2026-09-20T23:55:00Z", 10),
+      line("m1", "2026-09-20T23:55:01Z", 10),
+      line("m2", "2026-09-21T00:05:00Z", 20),
+    ].join("\n")
+  );
+  mkdirSync(path.join(tmp, "sess-tokens", "subagents"), { recursive: true });
+  writeFileSync(
+    path.join(tmp, "sess-tokens", "subagents", "agent-a1.jsonl"),
+    [line("m2", "2026-09-21T00:05:00Z", 20), line("s1", "2026-09-21T00:06:00Z", 300)].join("\n")
   );
   const config = {
     mode: "enforce",
@@ -80,8 +90,13 @@ test("Stop posts no token usage itself", async () => {
   } finally {
     client.recordTokenUsage = original;
   }
-  assert.deepEqual(posts, []);
-  const saved = await loadRuntimeState(config.runtimeFile);
-  assert.equal(typeof saved.sessions["sess-tokens"].lastStopAt, "number");
-  assert.equal(saved.sessions["sess-tokens"].lastTokenTotal, undefined);
+  assert.ok(posts.every((p) => p.deviceId && p.sessionId === "sess-tokens"));
+  return posts.map((p) => [p.usageDate, p.usageHour, p.repo, p.entries[0].inputTokens]);
+}
+
+test("Stop reports one row per UTC hour for the session and its subagents", async () => {
+  assert.deepEqual(await stopPosts(), [
+    ["2026-09-20", 23, "/work/repo-a", 10],
+    ["2026-09-21", 0, "/work/repo-a", 320],
+  ]);
 });
