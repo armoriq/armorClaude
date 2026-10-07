@@ -4,7 +4,7 @@ import { sessionTranscriptPaths, summarizeSessionUsageByHour } from "@armoriq/sd
 import { readJson } from "./fs-store.mjs";
 import { classifyTranscripts } from "./transcripts.mjs";
 
-const STATE_VERSION = 3;
+const STATE_VERSION = 2;
 
 class RecordingSet extends Set {
   added = [];
