@@ -55,6 +55,7 @@ async function stopPosts() {
   );
   const config = {
     mode: "enforce",
+    useProduction: false,
     dataDir: tmp,
     policyFile: path.join(tmp, "policy.json"),
     runtimeFile: path.join(tmp, "runtime.json"),

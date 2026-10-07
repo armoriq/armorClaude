@@ -11,6 +11,8 @@ import {
   handleUserPromptSubmit,
 } from "./lib/engine.mjs";
 import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
+import { appendDaemonLog } from "./lib/daemon-log.mjs";
+import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
 import { observeHook, obsFlush } from "./lib/observability.mjs";
 
 async function readStdin() {
@@ -32,8 +34,44 @@ function debugLog(config, message) {
   process.stderr.write(`[armorclaude] ${message}\n`);
 }
 
+const HANDLERS = {
+  SessionStart: handleSessionStart,
+  UserPromptSubmit: handleUserPromptSubmit,
+  UserPromptExpansion: handleUserPromptExpansion,
+  PreToolUse: handlePreToolUse,
+  PostToolUse: handlePostToolUse,
+  PostToolUseFailure: handlePostToolUseFailure,
+  Stop: handleStop,
+  SessionEnd: handleSessionEnd,
+};
+
+function logDaemonFallback(event, err, config) {
+  const reason = err?.message ?? String(err);
+  debugLog(config, `daemon dispatch failed; falling back in-process: ${reason}`);
+  try {
+    appendDaemonLog(
+      config.dataDir,
+      `[armorclaude] daemon unreachable, handling ${event} in-process pid=${process.pid} at=${new Date().toISOString()}: ${reason}`
+    );
+  } catch (logErr) {
+    debugLog(config, `daemon.log write failed: ${logErr?.message ?? logErr}`);
+  }
+}
+
+async function dispatchInDaemon(event, input, config) {
+  try {
+    const output = await dispatchViaDaemon({ event, input, config });
+    if (output) emitJson(output);
+    return true;
+  } catch (err) {
+    logDaemonFallback(event, err, config);
+    return false;
+  }
+}
+
 async function main() {
   const config = loadConfig();
+  ensurePrivateDirSync(config.dataDir);
   const rawInput = await readStdin();
   if (!rawInput.trim()) {
     return;
@@ -46,68 +84,26 @@ async function main() {
     // enforcement missed, so deny in enforce mode instead of silent allow.
     // Other events just exit — they can't allow anything on their own.
     if (config.mode === "enforce") {
-      emitJson(denyPreTool("ArmorClaude hook payload invalid JSON"));
+      emitJson(denyPreTool("invalid_payload", "ArmorClaude hook payload invalid JSON"));
     }
     return;
   }
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   debugLog(config, `hook=${event}`);
 
-  // Phase 4 Tier B: try the daemon first if enabled. The daemon dispatches
-  // exactly the same handlers in-process (long-lived) and replies with the
-  // hook output. On any error — daemon down, socket missing, timeout — we
-  // fall back to the legacy in-process path so the plugin never fails just
-  // because of daemon trouble.
-  if (config.daemonEnabled) {
-    try {
-      const output = await dispatchViaDaemon({ event, input, config });
-      if (output) emitJson(output);
-      return;
-    } catch (err) {
-      debugLog(config, `daemon dispatch failed; falling back in-process: ${err?.message ?? err}`);
-      // Fall through to in-process below
-    }
-  }
+  if (config.daemonEnabled && (await dispatchInDaemon(event, input, config))) return;
 
-  let output;
-
-  switch (event) {
-    case "SessionStart":
-      output = await handleSessionStart(input, config);
-      break;
-    case "UserPromptSubmit":
-      output = await handleUserPromptSubmit(input, config);
-      break;
-    case "UserPromptExpansion":
-      output = await handleUserPromptExpansion(input, config);
-      break;
-    case "PreToolUse":
-      output = await handlePreToolUse(input, config);
-      break;
-    case "PostToolUse":
-      output = await handlePostToolUse(input, config);
-      break;
-    case "PostToolUseFailure":
-      output = await handlePostToolUseFailure(input, config);
-      break;
-    case "Stop":
-      output = await handleStop(input, config);
-      break;
-    case "SessionEnd":
-      output = await handleSessionEnd(input, config);
-      break;
-    default:
-      debugLog(config, `unhandled hook event: ${event}`);
-      return;
+  const handler = Object.hasOwn(HANDLERS, event) ? HANDLERS[event] : null;
+  if (!handler) {
+    debugLog(config, `unhandled hook event: ${event}`);
+    return;
   }
+  const output = await handler(input, config);
 
   if (output) {
     emitJson(output);
   }
 
-  // In-process fallback path: emit observability with the decision output,
-  // then force-flush before this short-lived process exits (the SDK's
-  // beforeExit handler is a backstop, but flush explicitly to be safe).
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   await observeHook(event, input, output, config);
   await obsFlush(sessionId, config);
@@ -129,6 +125,6 @@ main().catch((error) => {
     process.stderr.write(`[armorclaude] error=${message}\n`);
   }
   if (mode === "enforce") {
-    emitJson(denyPreTool(`ArmorClaude internal error: ${message}`));
+    emitJson(denyPreTool("internal_error", `ArmorClaude internal error: ${message}`));
   }
 });
