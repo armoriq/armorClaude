@@ -40,8 +40,8 @@ import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs
 import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
-import { readJson } from "./fs-store.mjs";
-import { mkdir, stat, unlink, writeFile } from "node:fs/promises";
+import { readJson, writePrivateFile } from "./fs-store.mjs";
+import { stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { homedir } from "node:os";
 import {
@@ -285,9 +285,9 @@ function readIntentTokenRaw(input, session) {
   return "";
 }
 
-function denyOrAllow(config, reason) {
+function denyOrAllow(config, code, reason) {
   if (shouldDeny(config)) {
-    return denyPreTool(reason);
+    return denyPreTool(code, reason);
   }
   return null;
 }
@@ -313,12 +313,13 @@ async function evaluateConfiguredPolicy(config, policyState, toolName, toolInput
 function preToolPolicyOutput(policyDecision, toolName) {
   if (policyDecisionRequiresApproval(policyDecision)) {
     return askPreTool(
+      "policy_requires_approval",
       policyDecision.reason ||
         `ArmorClaude policy requires your approval before running ${toolName}.`
     );
   }
   if (!policyDecision.allowed) {
-    return denyPreTool(policyDecision.reason || "ArmorClaude policy denied");
+    return denyPreTool("policy_denied", policyDecision.reason || "ArmorClaude policy denied");
   }
   return null;
 }
@@ -571,8 +572,7 @@ export async function handleSessionStart(input, config) {
           "  /armorclaude:armor policy add allow Read and Grep, deny Write, hold Bash\n\n" +
           "Type /armorclaude:armor for all commands.";
       }
-      await mkdir(config.dataDir, { recursive: true });
-      await writeFile(onboardingFlag, new Date().toISOString(), "utf8");
+      await writePrivateFile(onboardingFlag, new Date().toISOString());
     }
   }
 
@@ -694,7 +694,7 @@ export async function handlePreToolUse(input, config) {
   if (!toolName) {
     // Missing tool_name on a PreToolUse event means the payload shape is
     // unexpected. Fail-closed in enforce mode instead of silently allowing.
-    return denyOrAllow(config, "ArmorClaude: missing tool_name on PreToolUse");
+    return denyOrAllow(config, "missing_tool_name", "ArmorClaude: missing tool_name on PreToolUse");
   }
 
   // --- Allowlist: ArmorClaude's own MCP tools must never be blocked,
@@ -766,6 +766,7 @@ export async function handlePreToolUse(input, config) {
       )
     ) {
       return denyPreTool(
+        "protected_policy_file",
         "ArmorClaude: direct modification of policy files is blocked. Use /armorclaude:armor policy commands."
       );
     }
@@ -781,6 +782,7 @@ export async function handlePreToolUse(input, config) {
       )
     ) {
       return denyPreTool(
+        "policy_admin_command",
         "ArmorClaude: policy management is human-only. Type /armorclaude:armor policy in the terminal."
       );
     }
@@ -788,6 +790,7 @@ export async function handlePreToolUse(input, config) {
       /\b(>|>>|tee|mv|cp|rm|sed\s+-i|awk\s.*>|chmod|cat\s*<<|echo.*>|truncate|dd\b)/;
     if (PROTECTED_PATHS.some((p) => cmd.includes(path.basename(p))) && WRITE_OPS.test(cmd)) {
       return denyPreTool(
+        "protected_policy_file",
         "ArmorClaude: shell write commands targeting policy files are blocked. Use /armorclaude:armor policy commands."
       );
     }
@@ -861,6 +864,7 @@ export async function handlePreToolUse(input, config) {
       }
       if (entry?.status === "denied") {
         return denyPreTool(
+          "mcp_server_denied",
           `ArmorClaude: MCP server "${server}" is denied by policy. ` +
             `Type /armorclaude:armor policy mcp approve ${server} to change this.`
         );
@@ -988,7 +992,11 @@ export async function handlePreToolUse(input, config) {
       if (cachedState?.policyDigest) {
         const check = cryptoService.verifyPolicyDigest(currentPolicyHash, cachedState.policyDigest);
         if (!check.valid) {
-          return denyOrAllow(config, `ArmorClaude crypto policy mismatch: ${check.reason}`);
+          return denyOrAllow(
+            config,
+            "crypto_policy_mismatch",
+            `ArmorClaude crypto policy mismatch: ${check.reason}`
+          );
         }
       }
     } catch (error) {
@@ -1000,7 +1008,7 @@ export async function handlePreToolUse(input, config) {
   let policyDecision = await evaluateConfiguredPolicy(config, policyState, toolName, toolInput);
   const requiresUserApproval = policyDecisionRequiresApproval(policyDecision);
   if (!policyDecision.allowed && !requiresUserApproval) {
-    return denyPreTool(policyDecision.reason || "ArmorClaude policy denied");
+    return denyPreTool("policy_denied", policyDecision.reason || "ArmorClaude policy denied");
   }
 
   // --- Intent token verification ---
@@ -1103,21 +1111,29 @@ export async function handlePreToolUse(input, config) {
         strict: !!config.strictParamCheck,
       });
       if (!preMintCheck.allowed) {
-        return denyPreToolWithHint(preMintCheck.reason || "ArmorClaude intent drift", {
-          toolName,
-          toolInput,
-          goal: session.lastPrompt,
-          knownPlan: localPlan,
-        });
+        return denyPreToolWithHint(
+          "intent_drift",
+          preMintCheck.reason || "ArmorClaude intent drift",
+          {
+            toolName,
+            toolInput,
+            goal: session.lastPrompt,
+            knownPlan: localPlan,
+          }
+        );
       }
     } else {
       // Nothing registered for this session. Minting a plan from the tool call
       // would rubber-stamp it, so require register_intent_plan instead.
-      return denyPreToolWithHint("ArmorClaude intent plan missing for this session", {
-        toolName,
-        toolInput,
-        goal: session.lastPrompt,
-      });
+      return denyPreToolWithHint(
+        "intent_plan_missing",
+        "ArmorClaude intent plan missing for this session",
+        {
+          toolName,
+          toolInput,
+          goal: session.lastPrompt,
+        }
+      );
     }
   }
 
@@ -1179,7 +1195,10 @@ export async function handlePreToolUse(input, config) {
             `still enforced locally (allow / deny / hold). Upgrade: ${upgradeUrl}`;
         }
       } else if (enforceIntent && shouldDeny(config)) {
-        return denyPreTool(`ArmorClaude intent planning failed: ${message}`);
+        return denyPreTool(
+          "intent_planning_failed",
+          `ArmorClaude intent planning failed: ${message}`
+        );
       }
     }
   }
@@ -1194,7 +1213,7 @@ export async function handlePreToolUse(input, config) {
     if (tokenCheck.matched) {
       tokenCheckMatched = true;
       if (tokenCheck.blockReason && !allowAll) {
-        return denyOrAllow(config, tokenCheck.blockReason);
+        return denyOrAllow(config, "intent_token_blocked", tokenCheck.blockReason);
       }
       localPlan = tokenCheck.plan || localPlan;
       remoteAllowed = true;
@@ -1204,7 +1223,7 @@ export async function handlePreToolUse(input, config) {
   // --- CSRG proof handling ---
   const parsedProofs = parseCsrgProofHeaders(input);
   if (parsedProofs.error) {
-    return denyOrAllow(config, parsedProofs.error);
+    return denyOrAllow(config, "csrg_proof_invalid", parsedProofs.error);
   }
   let csrgProofs = parsedProofs.proofs;
   if (!csrgProofs && intentTokenRaw && localPlan && typeof localPlan === "object") {
@@ -1227,7 +1246,7 @@ export async function handlePreToolUse(input, config) {
       Boolean(intentTokenRaw)
   );
   if (proofError) {
-    return denyOrAllow(config, proofError);
+    return denyOrAllow(config, "csrg_proof_rejected", proofError);
   }
 
   // --- Remote step verification ---
@@ -1239,7 +1258,11 @@ export async function handlePreToolUse(input, config) {
         remoteAllowed = verifyResult.allowed === true;
       }
       if (verifyResult.allowed === false) {
-        return denyOrAllow(config, formatRemoteVerifyDeny(toolName, verifyResult));
+        return denyOrAllow(
+          config,
+          "remote_verify_denied",
+          formatRemoteVerifyDeny(toolName, verifyResult)
+        );
       }
       const merged = mergeIntentIntoSession(session, verifyResult, config);
       merged.policyHash = currentPolicyHash;
@@ -1256,7 +1279,11 @@ export async function handlePreToolUse(input, config) {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const deny = denyOrAllow(config, `ArmorClaude verify-step failed: ${message}`);
+      const deny = denyOrAllow(
+        config,
+        "remote_verify_failed",
+        `ArmorClaude verify-step failed: ${message}`
+      );
       if (deny) {
         return deny;
       }
@@ -1267,6 +1294,7 @@ export async function handlePreToolUse(input, config) {
   if (Number.isFinite(localExpiresAt) && localExpiresAt > 0 && nowEpochSeconds() > localExpiresAt) {
     const deny = denyOrAllow(
       config,
+      "intent_token_expired",
       "ArmorClaude intent token expired — call register_intent_plan with your current plan to refresh, then retry the tool"
     );
     if (deny) {
@@ -1292,12 +1320,16 @@ export async function handlePreToolUse(input, config) {
       // Phase 4 A3: include the exact register_intent_plan JSON in the deny
       // reason so the LLM auto-corrects in 1 follow-up turn.
       if (shouldDeny(config) && !allowAll) {
-        return denyPreToolWithHint(localCheck.reason || "ArmorClaude intent drift", {
-          toolName,
-          toolInput,
-          goal: session.lastPrompt,
-          knownPlan: localPlan,
-        });
+        return denyPreToolWithHint(
+          "intent_drift",
+          localCheck.reason || "ArmorClaude intent drift",
+          {
+            toolName,
+            toolInput,
+            goal: session.lastPrompt,
+            knownPlan: localPlan,
+          }
+        );
       }
     }
   }
@@ -1313,13 +1345,21 @@ export async function handlePreToolUse(input, config) {
     !localPlanMatched
   ) {
     if (shouldDeny(config)) {
-      return denyPreToolWithHint("ArmorClaude intent plan missing for this session", {
-        toolName,
-        toolInput,
-        goal: session.lastPrompt,
-      });
+      return denyPreToolWithHint(
+        "intent_plan_missing",
+        "ArmorClaude intent plan missing for this session",
+        {
+          toolName,
+          toolInput,
+          goal: session.lastPrompt,
+        }
+      );
     }
-    const deny = denyOrAllow(config, "ArmorClaude intent plan missing for this session");
+    const deny = denyOrAllow(
+      config,
+      "intent_plan_missing",
+      "ArmorClaude intent plan missing for this session"
+    );
     if (deny) {
       return deny;
     }
@@ -1329,13 +1369,16 @@ export async function handlePreToolUse(input, config) {
   upsertDiscoveredTool(runtimeState, toolName);
   await saveRuntimeState(config.runtimeFile, runtimeState);
   if (mcpApprovalReason) {
-    return askPreTool(mcpApprovalReason);
+    return askPreTool("mcp_server_unapproved", mcpApprovalReason);
   }
   if (requiresUserApproval) {
     const askReason =
       policyDecision.reason ||
       `ArmorClaude policy requires your approval before running ${toolName}.`;
-    const ask = askPreTool(billingNotice ? `${askReason}\n\n${billingNotice}` : askReason);
+    const ask = askPreTool(
+      "policy_requires_approval",
+      billingNotice ? `${askReason}\n\n${billingNotice}` : askReason
+    );
     if (billingNotice) ask.systemMessage = billingNotice;
     return ask;
   }
