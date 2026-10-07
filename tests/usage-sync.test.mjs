@@ -1,10 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadConfig } from "../scripts/lib/config.mjs";
+import { dispatchViaDaemon } from "../scripts/lib/daemon-client.mjs";
+import {
+  loadRuntimeState,
+  saveRuntimeState,
+  upsertSession,
+} from "../scripts/lib/runtime-state.mjs";
 import { classifyTranscripts } from "../scripts/lib/transcripts.mjs";
 import { writeJson } from "../scripts/lib/fs-store.mjs";
 import { loadSyncState, syncUsage } from "../scripts/lib/usage-sync.mjs";
@@ -15,6 +30,13 @@ const SYNC = path.join(
   "scripts",
   "usage-sync.mjs"
 );
+const DAEMON = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "scripts",
+  "daemon.mjs"
+);
+const ROUTER = path.join(path.dirname(DAEMON), "hook-router.mjs");
 const S1 = "aaaaaaaa-0000-4000-8000-000000000001";
 const S2 = "aaaaaaaa-0000-4000-8000-000000000002";
 const S3 = "aaaaaaaa-0000-4000-8000-000000000003";
@@ -391,4 +413,133 @@ test("usage-sync without an API key posts nothing", () => {
   const res = cli(home, []);
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stderr, /no API key, nothing synced/);
+});
+
+function fakeBackend(answer = () => [200, { ok: true }]) {
+  const posts = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      let status = 200;
+      let reply = { ok: true };
+      if (req.method === "POST" && req.url === "/dashboard/token-usage") {
+        posts.push(JSON.parse(body));
+        [status, reply] = answer(posts.at(-1));
+      }
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(reply));
+    });
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve({ server, posts, port: server.address().port }))
+  );
+}
+
+async function until(check, what, timeoutMs = 20_000) {
+  const start = Date.now();
+  while (!(await check())) {
+    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+const readLastRun = (statePath) => {
+  try {
+    return JSON.parse(readFileSync(statePath, "utf8")).lastRun?.at;
+  } catch {
+    return undefined;
+  }
+};
+
+const pluginEnv = (home, dataDir, port) => ({
+  PATH: process.env.PATH,
+  HOME: home,
+  ARMORCLAUDE_DATA_DIR: dataDir,
+  ARMORCLAUDE_DEBUG: "false",
+  ARMORCLAUDE_USE_SDK_INTENT: "false",
+  ARMORIQ_ENV: "local",
+  ARMORIQ_BACKEND_URL: `http://127.0.0.1:${port}`,
+  ARMORIQ_CSRG_URL: `http://127.0.0.1:${port}`,
+  CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_usage_sync_stop",
+  ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
+});
+
+test("a Stop through the daemon triggers the sync, the only writer of a forked session's rows", async () => {
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  const statePath = path.join(dataDir, "usage-sync-state.json");
+  const { server, posts, port } = await fakeBackend();
+  const env = pluginEnv(home, dataDir, port);
+  mkdirSync(dataDir, { recursive: true });
+  const runtimeFile = path.join(dataDir, "runtime.json");
+  const runtime = await loadRuntimeState(runtimeFile);
+  upsertSession(runtime, S2, { lastPrompt: "p" });
+  await saveRuntimeState(runtimeFile, runtime);
+  const daemon = spawn(process.execPath, [DAEMON], { stdio: "ignore", env, cwd: dataDir });
+  try {
+    await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
+    const config = loadConfig(env);
+    const stop = (sessionId) =>
+      dispatchViaDaemon({
+        event: "Stop",
+        input: {
+          hook_event_name: "Stop",
+          session_id: sessionId,
+          transcript_path: path.join(projectsOf(home), "-work-repo-a", `${sessionId}.jsonl`),
+        },
+        config,
+      });
+    const settled = (after) => () =>
+      readLastRun(statePath) !== after && !existsSync(`${statePath}.lock`);
+
+    await stop(S2);
+    await until(settled(undefined), "the first sync pass");
+    const rows = (list) =>
+      list
+        .map((p) => [p.sessionId, p.usageDate, p.usageHour, p.entries[0].inputTokens, p.armored])
+        .sort();
+    const expected = [
+      [S1, "2026-09-20", 9, 133, false],
+      [S1, "2026-09-21", 9, 1000, false],
+      [S2, "2026-09-21", 10, 7, true],
+    ];
+    assert.deepEqual(rows(posts), expected);
+
+    const firstRun = readLastRun(statePath);
+    append(home, `${S2}.jsonl`, assistant("m4", "2026-09-21T10:30:00Z", 40));
+    await stop(S2);
+    await until(settled(firstRun), "the pass after a new turn");
+    assert.deepEqual(rows(posts), [...expected, [S2, "2026-09-21", 10, 47, true]].sort());
+
+    const secondRun = readLastRun(statePath);
+    await stop(S2);
+    await stop(S1);
+    await until(settled(secondRun), "the pass after turns that changed nothing");
+    assert.equal(posts.length, 4);
+  } finally {
+    daemon.kill("SIGTERM");
+    server.close();
+  }
+});
+
+test("an in-process Stop, with no daemon reachable, triggers the sync", async () => {
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  const statePath = path.join(dataDir, "usage-sync-state.json");
+  mkdirSync(dataDir, { recursive: true });
+  // The daemon exits on startup when profiles is a file, so the hook runs in-process.
+  writeFileSync(path.join(dataDir, "profiles"), "not a directory");
+  const { server, posts, port } = await fakeBackend();
+  try {
+    const hook = spawn(process.execPath, [ROUTER], { env: pluginEnv(home, dataDir, port) });
+    const exited = new Promise((resolve) => hook.once("exit", resolve));
+    hook.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: S2 }));
+    assert.equal(await exited, 0);
+    await until(() => readLastRun(statePath) && !existsSync(`${statePath}.lock`), "the sync pass");
+    assert.equal(existsSync(path.join(dataDir, "daemon.sock")), false);
+    assert.equal(posts.length, 3);
+  } finally {
+    server.close();
+  }
 });

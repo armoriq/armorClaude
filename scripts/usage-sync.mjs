@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Uploads token usage for every local Claude Code session, with or without
 // ArmorClaude, one row per session and UTC hour to POST {backendEndpoint}/dashboard/token-usage.
+// The daemon launches it every 10 minutes and after each Stop, the in-process
+// hook path on SessionStart and Stop; it can also be run by hand.
 //
 //   node scripts/usage-sync.mjs [--dry-run] [--state <path>]
 //
