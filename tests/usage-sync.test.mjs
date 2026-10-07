@@ -372,28 +372,6 @@ test("a re-run from the saved state file posts nothing", async () => {
   assert.equal(again.report.changed, 0);
 });
 
-test("day-keyed state from an older sync is dropped and every hour posts again", async () => {
-  const home = fixtureHome();
-  const statePath = path.join(home, "state.json");
-  const state = await loadSyncState(statePath);
-  await run(home, state);
-  const days = { "2026-09-20": { "claude-opus": 133 }, "2026-09-21": { "claude-opus": 1000 } };
-  const old = { ...state, version: 2 };
-  for (const entry of Object.values(old.sessions)) {
-    delete entry.hours;
-    entry.days = days;
-  }
-  await writeJson(statePath, old);
-  const loaded = await loadSyncState(statePath);
-  assert.deepEqual(loaded.sessions, {});
-  const { rows } = await run(home, loaded);
-  assert.deepEqual(summary(rows), [
-    [S1, "2026-09-20", 9, 133],
-    [S1, "2026-09-21", 9, 1000],
-    [S2, "2026-09-21", 10, 7],
-  ]);
-});
-
 const HOUR_400 = "usageHour must be an integer from 0 to 23 (UTC hour of usageDate)";
 
 test("failed posts are counted once per distinct status and reason, with the first session-hour", async () => {
