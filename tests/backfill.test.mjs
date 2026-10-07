@@ -68,7 +68,7 @@ test("classifyTranscripts sorts main, subagent, journal and other files", async 
   assert.deepEqual(rel(groups.other), ["-work-repo-a/notes.jsonl"]);
 });
 
-test("backfill --dry-run posts one row per session-day and counts forked history once", () => {
+test("backfill --dry-run posts one row per session-hour and counts forked history once", () => {
   const home = fixtureHome();
   const run = spawnSync(process.execPath, [BACKFILL, "--dry-run"], {
     encoding: "utf8",
@@ -84,14 +84,17 @@ test("backfill --dry-run posts one row per session-day and counts forked history
     .trim()
     .split("\n")
     .map((l) => JSON.parse(l));
-  assert.deepEqual(rows.map((r) => [r.sessionId, r.usageDate, r.entries[0].inputTokens]).sort(), [
-    [S1, "2026-09-20", 130],
-    [S1, "2026-09-21", 1000],
-    [S2, "2026-09-21", 7],
-  ]);
+  assert.deepEqual(
+    rows.map((r) => [r.sessionId, r.usageDate, r.usageHour, r.entries[0].inputTokens]).sort(),
+    [
+      [S1, "2026-09-20", 9, 130],
+      [S1, "2026-09-21", 9, 1000],
+      [S2, "2026-09-21", 10, 7],
+    ]
+  );
   assert.match(run.stderr, /2 main, 2 subagent, 1 workflow journal, 1 other transcript\(s\)/);
   assert.match(run.stderr, /not read .*notes\.jsonl/);
-  assert.match(run.stderr, /done: would post 3 session-day\(s\) \(1137 tokens\)/);
+  assert.match(run.stderr, /done: would post 3 session-hour\(s\) \(1137 tokens\)/);
   assert.doesNotMatch(run.stderr, /posted/);
 });
 

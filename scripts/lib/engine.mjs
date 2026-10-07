@@ -379,11 +379,11 @@ async function emitAudit({ dto, config, iapService }) {
 
 /**
  * Best-effort: report the session's token usage to the dashboard via the SDK
- * (`POST /dashboard/token-usage`), one row per UTC day with the repo and device.
+ * (`POST /dashboard/token-usage`), one row per UTC hour with the repo and device.
  * The session covers the main transcript and its subagent transcripts.
  *
  * Stop fires every turn, so we debounce on the session total and only POST
- * when it changed. Each day's row is replaced server-side, so re-posting is
+ * when it changed. Each hour's row is replaced server-side, so re-posting is
  * idempotent. `product` is sent explicitly so attribution works even if the API
  * key has product=NULL. `session.lastTokenTotal` is mutated in place; the caller
  * persists it. Failures are swallowed: token telemetry never breaks the hook.
@@ -392,9 +392,9 @@ async function reportTokenUsage(input, config, session, sessionId) {
   const transcriptPath = input?.transcript_path;
   if (!config.apiKey || typeof transcriptPath !== "string" || !transcriptPath) return;
   try {
-    const { days, repo } = armoriqSdk.summarizeSessionUsageByDay(transcriptPath);
-    const total = days
-      .flatMap((day) => day.entries)
+    const { hours, repo } = armoriqSdk.summarizeSessionUsageByHour(transcriptPath);
+    const total = hours
+      .flatMap((hour) => hour.entries)
       .reduce(
         (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
         0
@@ -403,12 +403,13 @@ async function reportTokenUsage(input, config, session, sessionId) {
       const client = getSdkClient(config);
       const device = deviceIdentity();
       let allOk = true;
-      for (const day of days) {
+      for (const hour of hours) {
         const result = await client.recordTokenUsage({
           product: config.productSlug,
           sessionId,
-          entries: day.entries,
-          usageDate: day.usageDate,
+          entries: hour.entries,
+          usageDate: hour.usageDate,
+          usageHour: hour.usageHour,
           repo: repo ?? input?.cwd,
           ...device,
           armored: true,
@@ -416,7 +417,7 @@ async function reportTokenUsage(input, config, session, sessionId) {
         if (!result?.ok) allOk = false;
         debugLog(
           config,
-          `[tokens] ${day.usageDate} ${day.entries.length} model(s) ${result?.ok ? "ok" : "failed:" + (result?.reason || "")}`
+          `[tokens] ${hour.usageDate}T${String(hour.usageHour).padStart(2, "0")} ${hour.entries.length} model(s) ${result?.ok ? "ok" : "failed:" + (result?.reason || "")}`
         );
       }
       if (allOk) session.lastTokenTotal = total;

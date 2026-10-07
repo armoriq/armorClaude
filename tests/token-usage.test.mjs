@@ -91,12 +91,12 @@ async function stopPosts() {
     client.recordTokenUsage = original;
   }
   assert.ok(posts.every((p) => p.deviceId && p.sessionId === "sess-tokens"));
-  return posts.map((p) => [p.usageDate, p.repo, p.entries[0].inputTokens]);
+  return posts.map((p) => [p.usageDate, p.usageHour, p.repo, p.entries[0].inputTokens]);
 }
 
-test("Stop reports one row per UTC day for the session and its subagents", async () => {
+test("Stop reports one row per UTC hour for the session and its subagents", async () => {
   assert.deepEqual(await stopPosts(), [
-    ["2026-09-20", "/work/repo-a", 10],
-    ["2026-09-21", "/work/repo-a", 320],
+    ["2026-09-20", 23, "/work/repo-a", 10],
+    ["2026-09-21", 0, "/work/repo-a", 320],
   ]);
 });

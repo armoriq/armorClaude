@@ -2,21 +2,17 @@
 // One-shot historical token-usage backfill for ArmorClaude.
 //
 // Enumerates every local Claude Code session, summarizes its token usage with
-// the SDK split by UTC day (main transcript plus subagent transcripts), and
-// POSTs one row per session-day, with the repo and device, to
+// the SDK split by UTC hour (main transcript plus subagent transcripts), and
+// POSTs one row per session-hour, with the repo and device, to
 // POST {backendEndpoint}/dashboard/token-usage. One seen set spans the run, so
 // history copied into a forked session is counted once.
 // This exists so usage from sessions that ran before the plugin was installed,
 // or while it was disabled and later re-enabled, still shows on the dashboard
 // with its real date instead of "today".
 //
-//   node scripts/backfill.mjs [--dry-run] [--compat] [--armored] [--limit N]
+//   node scripts/backfill.mjs [--dry-run] [--armored] [--limit N]
 //
 // --dry-run : summarize and print each body, POST nothing.
-// --compat  : POST only { product, sessionId, entries }. Use this when the
-//             endpoint is an older backend that rejects usageDate/deviceId/etc.
-//             (loses the real date: every row lands on "today"). The current
-//             dev backend accepts the full body, so omit this against dev.
 // --armored : mark every backfilled row armored=true. Default false: a session
 //             run without the plugin is indistinguishable after the fact, and
 //             the analytics on/off filter reads a server-derived signal anyway.
@@ -24,7 +20,7 @@
 
 import { homedir } from "node:os";
 import path from "node:path";
-import { sessionTranscriptPaths, summarizeSessionUsageByDay } from "@armoriq/sdk-dev";
+import { sessionTranscriptPaths, summarizeSessionUsageByHour } from "@armoriq/sdk-dev";
 import { loadConfig } from "./lib/config.mjs";
 import { deviceIdentity } from "./lib/device.mjs";
 import { classifyTranscripts } from "./lib/transcripts.mjs";
@@ -32,7 +28,6 @@ import { classifyTranscripts } from "./lib/transcripts.mjs";
 const argv = process.argv.slice(2);
 const args = new Set(argv);
 const DRY = args.has("--dry-run");
-const COMPAT = args.has("--compat");
 const ARMORED = args.has("--armored");
 const limitIdx = argv.indexOf("--limit");
 const LIMIT = limitIdx >= 0 ? Number(argv[limitIdx + 1]) : Infinity;
@@ -42,13 +37,10 @@ const PROJECTS_DIR = path.join(homedir(), ".claude", "projects");
 const { deviceId, deviceName } = deviceIdentity();
 
 async function post(config, body) {
-  const payload = COMPAT
-    ? { product: body.product, sessionId: body.sessionId, entries: body.entries }
-    : body;
   const res = await fetch(`${config.backendEndpoint}/dashboard/token-usage`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-API-Key": config.apiKey },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
   const text = await res.text().catch(() => "");
   return { ok: res.status < 400, status: res.status, body: text };
@@ -64,7 +56,7 @@ async function main() {
   }
   console.error(
     `[backfill] endpoint=${config.backendEndpoint} product=${config.productSlug} ` +
-      `device=${deviceName} armored=${ARMORED} compat=${COMPAT} dryRun=${DRY}`
+      `device=${deviceName} armored=${ARMORED} dryRun=${DRY}`
   );
 
   const groups = await classifyTranscripts(PROJECTS_DIR);
@@ -93,45 +85,46 @@ async function main() {
     const sessionId = path.basename(file, ".jsonl");
     let usage;
     try {
-      usage = summarizeSessionUsageByDay(file, { seen });
+      usage = summarizeSessionUsageByHour(file, { seen });
     } catch (e) {
       failed++;
       console.error(`[backfill] FAIL summarize ${sessionId}: ${e?.message ?? e}`);
       continue;
     }
-    if (!usage.days.length) {
+    if (!usage.hours.length) {
       empty++;
       console.error(`[backfill] skip  ${sessionId} (no usage)`);
       continue;
     }
-    for (const day of usage.days) {
+    for (const hour of usage.hours) {
       const body = {
         product: config.productSlug,
         sessionId,
-        usageDate: day.usageDate,
+        usageDate: hour.usageDate,
+        usageHour: hour.usageHour,
         deviceId,
         deviceName,
         armored: ARMORED,
         repo: usage.repo,
-        entries: day.entries,
+        entries: hour.entries,
       };
-      const dayTokens = day.entries.reduce(
+      const hourTokens = hour.entries.reduce(
         (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
         0
       );
       if (DRY) {
         console.log(JSON.stringify(body));
         rows++;
-        tokens += dayTokens;
+        tokens += hourTokens;
         continue;
       }
       try {
         const r = await post(config, body);
         if (r.ok) {
           rows++;
-          tokens += dayTokens;
+          tokens += hourTokens;
           console.error(
-            `[backfill] ok    ${sessionId} date=${body.usageDate} models=${day.entries.length}`
+            `[backfill] ok    ${sessionId} date=${body.usageDate} hour=${body.usageHour} models=${hour.entries.length}`
           );
         } else {
           failed++;
@@ -143,7 +136,7 @@ async function main() {
       }
     }
   }
-  const outcome = DRY ? `would post ${rows} session-day(s)` : `${rows} session-day(s) posted`;
+  const outcome = DRY ? `would post ${rows} session-hour(s)` : `${rows} session-hour(s) posted`;
   console.error(
     `[backfill] done: ${outcome} (${tokens} tokens), ${empty} no-usage, ${failed} failed, ` +
       `${sessions.length} session(s)`
