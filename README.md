@@ -270,7 +270,7 @@ Turning off observability also stops the token usage sync.
 
 ### Turning off the token usage sync
 
-While observability is on, a background sync uploads token counts (per session, model and day,
+While observability is on, a background sync uploads token counts (per session, model and UTC hour,
 with the repo path and device name) for every Claude Code session in `~/.claude/projects`,
 including sessions that ran without ArmorClaude. It sends no prompts or transcript text. To stop
 it and keep observability traces:
