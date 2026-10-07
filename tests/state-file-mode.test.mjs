@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 import { createAuditWal } from "../scripts/lib/audit-wal.mjs";
 import { handleSessionStart } from "../scripts/lib/engine.mjs";
 import {
-  appendPrivateFile,
+  appendPrivateFileSync,
   openPrivateSync,
   writeJson,
+  writePrivateFile,
   writePrivateFileSync,
 } from "../scripts/lib/fs-store.mjs";
 import { seedBuiltinProfiles } from "../scripts/lib/policy-profiles.mjs";
@@ -22,6 +23,13 @@ import {
 } from "../scripts/lib/runtime-state.mjs";
 
 process.umask(0o022);
+
+const HOOK_ROUTER = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "scripts",
+  "hook-router.mjs"
+);
 
 const DAEMON = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -49,6 +57,26 @@ async function openFile(file, text) {
   await chmod(file, 0o644);
 }
 
+function isRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function daemonPid(dataDir) {
+  return Number(await readFile(path.join(dataDir, "daemon.pid"), "utf8").catch(() => ""));
+}
+
+async function stopProcess(pid) {
+  if (!pid || !isRunning(pid)) return;
+  process.kill(pid, "SIGTERM");
+  for (let i = 0; i < 100 && isRunning(pid); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(!isRunning(pid), `process ${pid} still running`);
+}
+
 test("writeJson creates a missing data dir 0700 and the file 0600", async () => {
   const dataDir = path.join(await tmpRoot(), "fresh", "armorclaude");
   await writeJson(path.join(dataDir, "policy.json"), { rules: [] });
@@ -56,13 +84,13 @@ test("writeJson creates a missing data dir 0700 and the file 0600", async () => 
   assert.equal(await modeOf(path.join(dataDir, "policy.json")), 0o600);
 });
 
-test("writeJson replaces a 0644 file in a 0755 dir with an owner-only one", async () => {
-  const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
-  const file = path.join(dataDir, "state.json");
+test("writeJson replaces a 0644 file with an owner-only one and leaves its existing dir alone", async () => {
+  const projectDir = await openDir(path.join(await tmpRoot(), "project"));
+  const file = path.join(projectDir, "state.json");
   await openFile(file, "{}");
   await writeJson(file, { secret: "x" });
   assert.equal(await modeOf(file), 0o600);
-  assert.equal(await modeOf(dataDir), 0o700);
+  assert.equal(await modeOf(projectDir), 0o755);
   assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { secret: "x" });
 });
 
@@ -154,27 +182,67 @@ test("the onboarding flag is owner-only", async () => {
     }
   );
   assert.equal(await modeOf(path.join(dataDir, "onboarding-shown")), 0o600);
-  assert.equal(await modeOf(dataDir), 0o700);
 });
 
-test("appendPrivateFile and the sync writers create 0600 files and tighten 0644 ones", async () => {
+test("the hook router makes an existing data dir 0700", async () => {
+  const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
+  const child = spawn(process.execPath, [HOOK_ROUTER], {
+    stdio: ["pipe", "ignore", "ignore"],
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      NODE_OPTIONS: process.env.NODE_OPTIONS ?? "",
+      ARMORCLAUDE_DATA_DIR: dataDir,
+      ARMORIQ_ENV: "local",
+      ARMORIQ_API_KEY: "",
+    },
+  });
+  try {
+    child.stdin.end(JSON.stringify({ hook_event_name: "SessionEnd", session_id: "mode-router" }));
+    await new Promise((resolve) => child.once("exit", resolve));
+    assert.equal(await modeOf(dataDir), 0o700);
+  } finally {
+    await stopProcess(await daemonPid(dataDir));
+  }
+});
+
+test("the sync writers create 0600 files and tighten 0644 ones", async () => {
   const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
   const log = path.join(dataDir, "some.log");
   await openFile(log, "old\n");
-  await appendPrivateFile(log, "new\n");
+  appendPrivateFileSync(log, "new\n");
   assert.equal(await readFile(log, "utf8"), "old\nnew\n");
   assert.equal(await modeOf(log), 0o600);
-  assert.equal(await modeOf(dataDir), 0o700);
+  assert.equal(await modeOf(dataDir), 0o755);
 
   const syncDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
   const appended = path.join(syncDir, "daemon.out");
   await openFile(appended, "");
   closeSync(openPrivateSync(appended, "a"));
   assert.equal(await modeOf(appended), 0o600);
-  assert.equal(await modeOf(syncDir), 0o700);
+  const fresh = path.join(syncDir, "new", "marker");
+  writePrivateFileSync(fresh, "1");
+  assert.equal(await modeOf(path.dirname(fresh)), 0o700);
   const marker = path.join(syncDir, "marker");
   writePrivateFileSync(marker, "1");
   assert.equal(await modeOf(marker), 0o600);
+});
+
+test("private modes keep owner-only bits and concurrent writes never share a temp file", async () => {
+  const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
+  const readOnly = path.join(dataDir, "read-only");
+  await writeFile(readOnly, "x", { mode: 0o400 });
+  await chmod(readOnly, 0o400);
+  closeSync(openPrivateSync(readOnly, "r"));
+  assert.equal(await modeOf(readOnly), 0o400);
+
+  const target = path.join(dataDir, "state.json");
+  await Promise.all(Array.from({ length: 20 }, (_, i) => writePrivateFile(target, String(i))));
+  assert.match(await readFile(target, "utf8"), /^\d+$/);
+  assert.deepEqual(
+    (await readdir(dataDir)).filter((f) => f.includes(".tmp.")),
+    []
+  );
 });
 
 test("the daemon makes its data dir 0700 and its PID file 0600", async () => {
@@ -208,6 +276,6 @@ test("the daemon makes its data dir 0700 and its PID file 0600", async () => {
     assert.equal(await modeOf(dataDir), 0o700);
     assert.equal(await modeOf(path.join(dataDir, "profiles")), 0o700);
   } finally {
-    child.kill("SIGTERM");
+    await stopProcess(child.pid);
   }
 });
