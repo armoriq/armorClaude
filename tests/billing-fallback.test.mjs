@@ -33,6 +33,6 @@ test("allowWithNotice steps aside (no permissionDecision) and surfaces the nudge
 });
 
 test("regression: denyPreTool still hard-denies (non-billing path unchanged)", () => {
-  const out = denyPreTool("intent drift");
+  const out = denyPreTool("intent_drift", "intent drift");
   assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
 });
