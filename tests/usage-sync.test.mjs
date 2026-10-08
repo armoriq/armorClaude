@@ -1034,6 +1034,7 @@ const settledAt = (statePath, after) => () =>
 const S4 = "bbbbbbbb-0000-4000-8000-000000000004";
 const S5 = "cccccccc-0000-4000-8000-000000000005";
 const S6 = "dddddddd-0000-4000-8000-000000000006";
+const S7 = "eeeeeeee-0000-4000-8000-000000000007";
 
 function addProject(home, repo, sessionId, lines) {
   writeTree(path.join(projectsOf(home), `-work-${repo}`), {
@@ -1150,11 +1151,11 @@ test("a claim whose key's organization is not known yet is not assigned elsewher
     const taken = await assignProject(home, port, KEY_B, "-work-repo-c");
     assert.equal(taken.status, 1, taken.stderr);
     assert.match(taken.stderr, new RegExp(`refused ${S5}`));
-    assert.equal(ownerOf(home, S5).org, undefined);
+    assert.equal(ownerOf(home, "repo-c", S5).org, undefined);
 
     await ok(cliAgainst(home, port, withKey(KEY_PENDING)));
-    assert.equal(ownerOf(home, S5).org, "org-a");
-    assert.equal(ownerOf(home, S5).key, keyIdOf(loadConfig(env)));
+    assert.equal(ownerOf(home, "repo-c", S5).org, "org-a");
+    assert.equal(ownerOf(home, "repo-c", S5).key, keyIdOf(loadConfig(env)));
     assert.deepEqual(rowsBy(backend, KEY_PENDING), [row]);
     assert.deepEqual(rowsBy(backend, KEY_B), []);
   } finally {
@@ -1283,6 +1284,10 @@ test("only a SessionStart that begins a session with no usage yet claims it", ()
     false
   );
   assert.equal(claim(stopOf(home, "repo-c", S5)), false);
+  writeTree(path.join(projectsOf(home), "-work-repo-e"), {
+    [`${S7}/subagents/agent-e.jsonl`]: [assistant("e1", "2026-09-23T07:00:00Z", 300)],
+  });
+  assert.equal(claim(startOf(home, "repo-e", S7)), false);
   assert.equal(claim(startOf(home, "repo-c", S5)), true);
   assert.equal(claim(startOf(home, "repo-c", S5)), false);
   assert.equal(claim(startOf(home, "repo-d", S6, "clear")), true);
@@ -1369,7 +1374,7 @@ test("a new session claimed once its key's organization is known is uploaded by 
     await assigned(home, backend.port, KEY_A);
     const env = { ...pluginEnv(home, path.join(home, "data"), backend.port), ...withKey(KEY_A) };
     assert.equal(claimNewSession(loadConfig(env), startOf(home, "repo-c", S5)), true);
-    assert.equal(ownerOf(home, S5).org, "org-a");
+    assert.equal(ownerOf(home, "repo-c", S5).org, "org-a");
     const row = writeTurn(home, "repo-c", S5, 61);
 
     await ok(cliAgainst(home, backend.port, withKey(KEY_A2)));
@@ -1379,5 +1384,39 @@ test("a new session claimed once its key's organization is known is uploaded by 
     );
   } finally {
     backend.server.close();
+  }
+});
+
+test("a session id reused in another project claims only the new transcript, on both hook paths", async () => {
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  mkdirSync(dataDir, { recursive: true });
+  const { server, port, ...backend } = await fakeBackend();
+  const env = { ...pluginEnv(home, dataDir, port), ...withKey(KEY_B) };
+  const daemon = spawn(process.execPath, [DAEMON], { stdio: "ignore", env, cwd: dataDir });
+  const viaDaemon = (input) =>
+    dispatchViaDaemon({ event: input.hook_event_name, input, config: loadConfig(env) });
+  const rowsOf = (id) => rowsBy(backend, KEY_B).filter((r) => r[0] === id);
+  try {
+    await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
+    await viaDaemon(startOf(home, "repo-x", S1));
+    const rowX = writeTurn(home, "repo-x", S1, 7);
+    await viaDaemon(stopOf(home, "repo-x", S1));
+    await until(() => rowsOf(S1).length > 0 && idle(dataDir, port, "org-b")(), "the daemon pass");
+    assert.deepEqual(rowsOf(S1), [rowX]);
+    assert.equal(ownerOf(home, "repo-a", S1), undefined);
+
+    const inProcess = { ...env, ARMORCLAUDE_DATA_DIR: path.join(home, "data-inproc") };
+    mkdirSync(inProcess.ARMORCLAUDE_DATA_DIR, { recursive: true });
+    writeFileSync(path.join(inProcess.ARMORCLAUDE_DATA_DIR, "profiles"), "not a directory");
+    assert.equal(await inProcessHook(inProcess, startOf(home, "repo-y", S2)), 0);
+    const rowY = writeTurn(home, "repo-y", S2, 9);
+    assert.equal(await inProcessHook(inProcess, stopOf(home, "repo-y", S2)), 0);
+    const inprocDone = () => idle(inProcess.ARMORCLAUDE_DATA_DIR, port, "org-b")();
+    await until(() => rowsOf(S2).length > 0 && inprocDone(), "the in-process pass");
+    assert.deepEqual(rowsOf(S2), [rowY]);
+  } finally {
+    daemon.kill("SIGTERM");
+    server.close();
   }
 });

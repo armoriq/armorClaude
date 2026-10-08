@@ -2,8 +2,11 @@ import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { sessionTranscriptPaths } from "@armoriq/sdk-dev";
 import { buildAuthHeaders, postJson } from "./common.mjs";
 import { ensurePrivateDirSync, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
+
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const digest = (text) => createHash("sha256").update(text).digest("hex").slice(0, 32);
 
@@ -43,7 +46,7 @@ function cachedOrg(dataDir, keyId) {
   }
 }
 
-function hasUsage(file) {
+function fileHasUsage(file) {
   let raw;
   try {
     raw = readFileSync(file, "utf8");
@@ -65,19 +68,21 @@ const isNewSession = ({ session_id: id, source, transcript_path: file } = {}) =>
   (source === "startup" || source === "clear") &&
   typeof file === "string" &&
   path.basename(file) === `${id}.jsonl` &&
-  !hasUsage(file);
+  !sessionTranscriptPaths(file).some(fileHasUsage);
 
 /**
- * Give a session that this SessionStart begins, with no usage in its transcript
- * yet, to the config's backend and key. A resumed or compacted session, or one
- * already holding usage, is left for --assign. The first owner is kept for good.
+ * Give the transcript of a session this SessionStart begins, with no usage in
+ * it or its subagent transcripts yet, to the config's backend and key. A
+ * resumed or compacted session, or one already holding usage, is left for
+ * --assign. The first owner of a transcript file is kept for good.
  */
 export function claimNewSession(config, input) {
   if (!config?.usageSyncEnabled || !isNewSession(input)) return false;
   const key = keyIdOf(config);
-  const claim = { backend: backendOrigin(config), key, ...cachedOrg(config.dataDir, key) };
+  const file = path.resolve(input.transcript_path);
+  const claim = { file, backend: backendOrigin(config), key, ...cachedOrg(config.dataDir, key) };
   try {
-    return createClaim(ownerPath(config.dataDir, input.session_id), claim);
+    return createClaim(ownerPath(config.dataDir, file), claim);
   } catch (err) {
     process.stderr.write(`[armorclaude] usage owner claim failed: ${err?.message ?? err}\n`);
     return false;
