@@ -19,7 +19,7 @@ import {
   obsRetryBacklog,
   obsServeAsDaemon,
 } from "../scripts/lib/observability.mjs";
-import { batchCalls, eventCall } from "../scripts/lib/obs-journal.mjs";
+import { batchCalls, eventCall, journalName } from "../scripts/lib/obs-journal.mjs";
 import { shipSpool, writeSpoolBatch } from "../scripts/lib/obs-spool.mjs";
 import { deadPid, placeFile } from "./helpers/obs-files.mjs";
 
@@ -248,8 +248,6 @@ const rootsByEnd = (exports) =>
   exports
     .filter((s) => s.name === "armoriq.agent.run")
     .sort((a, b) => (a.endTimeUnixNano < b.endTimeUnixNano ? -1 : 1));
-
-const readyName = (file) => file.replace(/\.claim-\d+$/, "");
 
 function dataFiles(dataDir, name = "obs-spool") {
   const dir = path.join(dataDir, name);
@@ -1048,20 +1046,30 @@ test("the spool batch that carries a slash command's span names the command's jo
   try {
     await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
     const sessionId = randomUUID();
-    const journaled = () => new Set(dataFiles(dataDir, "obs-journal").map(readyName));
+    const journaled = () => new Set(dataFiles(dataDir, "obs-journal").map(journalName));
     await daemonHook(daemon.socketPath, sessionId, "SessionStart");
     const before = journaled();
     const command = { expansion_type: "slash_command", command_name: "review" };
     await daemonHook(daemon.socketPath, sessionId, "UserPromptExpansion", command);
     const [entry] = [...journaled()].filter((name) => !before.has(name));
+    assert.ok(entry, "the command was journaled");
     await daemonHook(daemon.socketPath, sessionId, "Stop");
     const spool = path.join(dataDir, "obs-spool");
-    const placed = () => dataFiles(dataDir).filter((file) => !file.includes(".tmp."));
-    await waitFor(() => placed().length > 0, 10_000, "the Stop batch");
-    const listed = placed().flatMap(
-      (file) => JSON.parse(readFileSync(path.join(spool, file), "utf8")).journal
-    );
-    assert.ok(entry, "the command was journaled");
+    const journalList = (file) => {
+      try {
+        return JSON.parse(readFileSync(path.join(spool, file), "utf8")).journal;
+      } catch {
+        return [];
+      }
+    };
+    let listed = [];
+    const named = () => {
+      listed = dataFiles(dataDir)
+        .filter((file) => !file.includes(".tmp."))
+        .flatMap(journalList);
+      return listed.includes(entry);
+    };
+    await waitFor(named, 10_000, "a batch that names the command's journal entry");
     assert.deepEqual(listed, [entry]);
   } finally {
     killIfRunning(daemon.child);
