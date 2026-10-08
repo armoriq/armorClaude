@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
-import { accessSync, constants, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { accessSync, constants, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { summarizeSessionUsageByHour } from "@armoriq/sdk-dev";
 import { buildAuthHeaders, postJson } from "./common.mjs";
@@ -54,8 +54,9 @@ const isNewSession = ({ session_id: id, source, transcript_path: file } = {}) =>
 
 const missing = (err) => err?.code === "ENOENT";
 
-const readableOrMissing = (file) => {
+const readableFileOrMissing = (file) => {
   try {
+    if (!statSync(file).isFile()) return false;
     accessSync(file, constants.R_OK);
     return true;
   } catch (err) {
@@ -79,12 +80,12 @@ function subagentsReadable(root, dir = root) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) return subagentsReadable(root, full);
     if (!entry.name.endsWith(".jsonl") || isWorkflowJournal(root, full)) return true;
-    return readableOrMissing(full);
+    return readableFileOrMissing(full);
   });
 }
 
 const canReadSession = (file) =>
-  readableOrMissing(file) &&
+  readableFileOrMissing(file) &&
   subagentsReadable(path.join(path.dirname(file), path.basename(file, ".jsonl"), "subagents"));
 
 /**

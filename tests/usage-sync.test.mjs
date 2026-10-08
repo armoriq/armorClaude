@@ -1319,6 +1319,27 @@ test("only a SessionStart that begins a session with no usage yet claims it", ()
   rmSync(path.join(dangling, "agent-e.jsonl"));
   assert.equal(claim(startOf(home, "repo-e", S7)), false);
   chmodSync(path.join(dangling, "zz.jsonl"), 0o600);
+  rmSync(path.join(dangling, "zz.jsonl"));
+  rmSync(path.join(dangling, "000-dangling.jsonl"));
+  const fifo = path.join(dangling, "f.jsonl");
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  assert.equal(claim(startOf(home, "repo-e", S7)), false);
+  rmSync(fifo);
+  const hidden = path.join(home, "hidden.jsonl");
+  writeFileSync(hidden, "");
+  chmodSync(hidden, 0o000);
+  symlinkSync(hidden, path.join(dangling, "link.jsonl"));
+  assert.equal(claim(startOf(home, "repo-e", S7)), false);
+  rmSync(path.join(dangling, "link.jsonl"));
+  writeTree(dangling, {
+    "workflows/w1/journal.jsonl": [{ type: "started" }],
+    "other/journal.jsonl": [{ type: "started" }],
+  });
+  chmodSync(path.join(dangling, "workflows", "w1", "journal.jsonl"), 0o000);
+  chmodSync(path.join(dangling, "other", "journal.jsonl"), 0o000);
+  assert.equal(claim(startOf(home, "repo-e", S7)), false);
+  chmodSync(path.join(dangling, "other", "journal.jsonl"), 0o600);
+  assert.equal(claim(startOf(home, "repo-e", S7)), true);
   assert.equal(claim(startOf(home, "repo-c", S5)), true);
   assert.equal(claim(startOf(home, "repo-c", S5)), false);
   assert.equal(claim(startOf(home, "repo-d", S6, "clear")), true);
