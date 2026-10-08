@@ -24,8 +24,8 @@ import { getSdkClient } from "./lib/intent.mjs";
 import { loadRuntimeState } from "./lib/runtime-state.mjs";
 import { classifyTranscripts } from "./lib/transcripts.mjs";
 import {
-  assignSessions,
-  ownedSessions,
+  assignTranscripts,
+  ownedTranscripts,
   resolveScope,
   scopeStatePath,
 } from "./lib/usage-ownership.mjs";
@@ -81,7 +81,7 @@ async function debounce(requestPath, deadline) {
 
 async function syncPass({ config, scope, statePath, deadline }) {
   const state = await loadSyncState(statePath);
-  const owned = await ownedSessions(config, scope, { pin: !DRY });
+  const owned = await ownedTranscripts(config, scope, { pin: !DRY });
   const runtime = await loadRuntimeState(config.runtimeFile);
   const { deviceId, deviceName } = deviceIdentity();
   const toBody = (row) => ({ product: config.productSlug, deviceId, deviceName, ...row });
@@ -114,31 +114,31 @@ async function syncPass({ config, scope, statePath, deadline }) {
   log(
     `${report.main} session(s) under ${PROJECTS_DIR} (${report.subagent} subagent, ` +
       `${report.journal} journal, ${report.other} other file(s)); ${report.changed} changed, ` +
-      `${report.read} read, ${report.unowned} not owned by this organization; ${verb} ${report.sessionHours} session-hour(s) ` +
+      `${report.read} read, ${report.unowned} not owned by this organization; ` +
+      `${verb} ${report.sessionHours} session-hour(s) ` +
       `(${report.tokens} tokens), ${report.failed} failed${why ? ` (${why})` : ""}, ` +
       `${report.left} left for the next run, ${Date.now() - started}ms`
   );
   if (report.failed) process.exitCode = 1;
 }
 
-async function sessionsAt(target) {
+async function transcriptsAt(target) {
   const full = path.resolve(target);
   const { main } = await classifyTranscripts(PROJECTS_DIR);
   const isDir = (await stat(full).catch(() => null))?.isDirectory();
-  const picked = main.filter((f) => (isDir ? path.dirname(f) === full : f === full));
-  return picked.map((f) => path.basename(f, ".jsonl"));
+  return main.filter((f) => (isDir ? path.dirname(f) === full : f === full));
 }
 
 async function assign(config, scope, target) {
-  const sessionIds = await sessionsAt(target);
-  if (!sessionIds.length) {
+  const transcripts = await transcriptsAt(target);
+  if (!transcripts.length) {
     log(`no sessions at ${target} under ${PROJECTS_DIR}`);
     process.exitCode = 1;
     return;
   }
-  const { assigned, refused } = await assignSessions(config, scope, sessionIds);
-  for (const id of refused)
-    log(`refused ${id}: another organization owns it, or its owner's is not known yet`);
+  const { assigned, refused } = await assignTranscripts(config, scope, transcripts);
+  const why = "another organization owns it, or its owner's is not known yet";
+  for (const file of refused) log(`refused ${path.basename(file, ".jsonl")}: ${why}`);
   log(
     `assigned ${assigned.length} session(s) to organization ${scope.orgId}, refused ${refused.length}`
   );

@@ -112,17 +112,15 @@ function projectsOf(home) {
   return path.join(home, ".claude", "projects");
 }
 
-const ALL = new Map([
-  [S1, { since: null }],
-  [S2, { since: null }],
-]);
+const allOwned = async (home) =>
+  new Set((await classifyTranscripts(projectsOf(home))).main.map((f) => path.resolve(f)));
 
 async function run(home, state, opts = {}) {
   const rows = [];
   const report = await syncUsage({
     projectsDir: projectsOf(home),
     state,
-    owned: ALL,
+    owned: await allOwned(home),
     post: async (row) => {
       rows.push(row);
       return { ok: opts.fail ? !opts.fail(row) : true };
@@ -401,7 +399,7 @@ test("failed posts are counted once per distinct status and reason, with the fir
   const report = await syncUsage({
     projectsDir: projectsOf(home),
     state,
-    owned: ALL,
+    owned: await allOwned(home),
     post: async (row) => answers[row.sessionId],
   });
   assert.equal(report.failed, 3);
@@ -432,7 +430,7 @@ test("an unreachable backend ends the run after one post and leaves every sessio
   const down = await syncUsage({
     projectsDir: projectsOf(home),
     state,
-    owned: ALL,
+    owned: await allOwned(home),
     post: async (row) => {
       calls.push(row);
       return { ok: false, unreachable: true, reason: "connect ECONNREFUSED 127.0.0.1:9" };
@@ -462,7 +460,7 @@ test("an unreachable backend after some posts keeps the sessions already posted"
   const report = await syncUsage({
     projectsDir: projectsOf(home),
     state,
-    owned: ALL,
+    owned: await allOwned(home),
     post: async () =>
       ++n <= 2 ? { ok: true } : { ok: false, unreachable: true, reason: "socket hang up" },
   });
@@ -480,7 +478,7 @@ test("a failed post with no reason is still reported", async () => {
   const report = await syncUsage({
     projectsDir: projectsOf(home),
     state: await loadSyncState(path.join(home, "none.json")),
-    owned: ALL,
+    owned: await allOwned(home),
     post: async () => ({ ok: false, status: 503 }),
   });
   assert.deepEqual(
@@ -1081,10 +1079,13 @@ test("a key uploads only the sessions its organization owns, and the other organ
   }
 });
 
-const ownerOf = (home, sessionId) =>
-  JSON.parse(
-    readFileSync(path.join(home, "data", "usage-sync", "owners", `${sessionId}.json`), "utf8")
-  );
+const ownerOf = (home, repo, sessionId) => {
+  const dir = path.join(home, "data", "usage-sync", "owners");
+  const file = path.join(projectsOf(home), `-work-${repo}`, `${sessionId}.jsonl`);
+  return readdirSync(dir)
+    .map((name) => JSON.parse(readFileSync(path.join(dir, name), "utf8")))
+    .find((claim) => claim.file === file);
+};
 
 test("an assignment never moves a session another organization owns", async () => {
   const { server, port, ...backend } = await fakeBackend();
@@ -1095,10 +1096,24 @@ test("an assignment never moves a session another organization owns", async () =
     assert.equal(moved.status, 1, moved.stderr);
     assert.match(moved.stderr, new RegExp(`refused ${S1}`));
     assert.match(moved.stderr, /assigned 0 session\(s\) to organization org-b, refused 2/);
-    assert.equal(ownerOf(home, S1).org, "org-a");
+    assert.equal(ownerOf(home, "repo-a", S1).org, "org-a");
 
     await ok(cliAgainst(home, port, withKey(KEY_B)));
     assert.equal(backend.posts.length, 0);
+  } finally {
+    server.close();
+  }
+});
+
+test("ownership follows the transcript file, so a session id reused in another project is not assigned with it", async () => {
+  const { server, port, ...backend } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    addProject(home, "repo-b", S1, [assistant("b-own", "2026-09-22T08:00:00Z", 70)]);
+    await ok(assignProject(home, port, KEY_A, "-work-repo-b"));
+    await ok(cliAgainst(home, port, withKey(KEY_A)));
+    assert.deepEqual(rowsBy(backend, KEY_A), [[S1, "2026-09-22", 8, 70, "/work/repo-b"]]);
+    assert.equal(ownerOf(home, "repo-a", S1), undefined);
   } finally {
     server.close();
   }
