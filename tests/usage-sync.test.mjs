@@ -1296,6 +1296,14 @@ test("only a SessionStart that begins a session with no usage yet claims it", ()
     [`${S8}.jsonl`]: [{ type: "assistant", timestamp: "2026-09-23T07:00:00Z", payload }],
   });
   assert.equal(claim(startOf(home, "repo-f", S8)), false);
+  const locked = transcriptOf(home, "repo-a", S2);
+  chmodSync(locked, 0o000);
+  assert.equal(claim(startOf(home, "repo-a", S2)), false);
+  chmodSync(locked, 0o600);
+  const lockedDir = path.join(projectsOf(home), "-work-repo-e", S7, "subagents");
+  chmodSync(lockedDir, 0o000);
+  assert.equal(claim(startOf(home, "repo-e", S7)), false);
+  chmodSync(lockedDir, 0o700);
   assert.equal(claim(startOf(home, "repo-c", S5)), true);
   assert.equal(claim(startOf(home, "repo-c", S5)), false);
   assert.equal(claim(startOf(home, "repo-d", S6, "clear")), true);

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
-import { readFileSync, writeFileSync } from "node:fs";
+import { accessSync, constants, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { summarizeSessionUsageByHour } from "@armoriq/sdk-dev";
 import { buildAuthHeaders, postJson } from "./common.mjs";
@@ -52,6 +52,25 @@ const isNewSession = ({ session_id: id, source, transcript_path: file } = {}) =>
   typeof file === "string" &&
   path.basename(file) === `${id}.jsonl`;
 
+const missing = (err) => err?.code === "ENOENT";
+
+function canReadSession(file) {
+  const subagents = path.join(path.dirname(file), path.basename(file, ".jsonl"), "subagents");
+  try {
+    accessSync(file, constants.R_OK);
+  } catch (err) {
+    if (!missing(err)) return false;
+  }
+  try {
+    for (const entry of readdirSync(subagents, { recursive: true })) {
+      accessSync(path.join(subagents, entry), constants.R_OK);
+    }
+  } catch (err) {
+    if (!missing(err)) return false;
+  }
+  return true;
+}
+
 /**
  * Give the transcript of a session this SessionStart begins, with no usage in
  * it or its subagent transcripts yet, to the config's backend and key. A
@@ -64,7 +83,7 @@ export function claimNewSession(config, input) {
   const key = keyIdOf(config);
   const claim = { file, backend: backendOrigin(config), key, ...cachedOrg(config.dataDir, key) };
   try {
-    if (summarizeSessionUsageByHour(file).hours.length > 0) return false;
+    if (!canReadSession(file) || summarizeSessionUsageByHour(file).hours.length > 0) return false;
     return createClaim(ownerPath(config.dataDir, file), claim);
   } catch (err) {
     process.stderr.write(`[armorclaude] usage owner claim failed: ${err?.message ?? err}\n`);
