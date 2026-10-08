@@ -3,21 +3,20 @@ import { closeSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensurePrivateDirSync, openPrivateSync, writePrivateFileSync } from "./fs-store.mjs";
+import { claimSession, keyBase, keyIdOf } from "./usage-ownership.mjs";
 
 const LOG_MAX_BYTES = 1024 * 1024;
 const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "usage-sync.mjs");
 
 /**
- * The files next to a sync state file: the lock a running sync holds and
- * the request marker a Stop touches to ask for another pass.
+ * The files next to a base path: the lock a running sync holds and the
+ * request marker a Stop touches to ask for another pass.
  */
-export function syncPaths(statePath) {
-  return { lock: `${statePath}.lock`, request: `${statePath}.request` };
+export function syncPaths(base) {
+  return { lock: `${base}.lock`, request: `${base}.request` };
 }
 
-export function defaultStatePath(dataDir) {
-  return path.join(dataDir, "usage-sync-state.json");
-}
+export const keySyncPaths = (config) => syncPaths(keyBase(config.dataDir, keyIdOf(config)));
 
 export function isAlive(pid) {
   try {
@@ -70,18 +69,20 @@ function childEnv(config) {
 }
 
 /**
- * Start scripts/usage-sync.mjs as a detached process with this config's
- * credentials and data dir, and return without waiting for it. Its stderr goes
- * to usage-sync.log in the data dir. Starts nothing while a live sync holds the
- * lock. Returns false when the config disables the usage sync (no API key,
+ * Claim the hook's session for this config, then start scripts/usage-sync.mjs
+ * as a detached process with this config's credentials and data dir, and
+ * return without waiting for it. Its stderr goes to usage-sync.log in the data
+ * dir. Starts nothing while a live sync for the same key holds its lock.
+ * Returns false when the config disables the usage sync (no API key,
  * observability off, or `disable_usage_sync` set) or the process could not be
  * started.
  */
-export function launchUsageSync(config) {
+export function launchUsageSync(config, sessionId) {
   if (!config?.usageSyncEnabled) return false;
   try {
     ensurePrivateDirSync(config.dataDir);
-    if (lockHeld(syncPaths(defaultStatePath(config.dataDir)).lock)) return true;
+    claimSession(config, sessionId);
+    if (lockHeld(keySyncPaths(config).lock)) return true;
     const logPath = path.join(config.dataDir, "usage-sync.log");
     const logFd = openPrivateSync(logPath, logSize(logPath) > LOG_MAX_BYTES ? "w" : "a");
     try {
@@ -110,13 +111,13 @@ export function launchUsageSync(config) {
  * launch a sync unless one is running. A running sync checks the marker after
  * each pass and after releasing its lock, so it runs again instead.
  */
-export function requestUsageSync(config) {
+export function requestUsageSync(config, sessionId) {
   if (!config?.usageSyncEnabled) return false;
   try {
-    writePrivateFileSync(syncPaths(defaultStatePath(config.dataDir)).request, String(Date.now()));
+    writePrivateFileSync(keySyncPaths(config).request, String(Date.now()));
   } catch (err) {
     process.stderr.write(`[armorclaude] usage sync request failed: ${err?.message ?? err}\n`);
     return false;
   }
-  return launchUsageSync(config);
+  return launchUsageSync(config, sessionId);
 }

@@ -1,28 +1,36 @@
 #!/usr/bin/env node
-// Uploads token usage for every local Claude Code session, with or without
-// ArmorClaude, one row per session and UTC hour to POST {backendEndpoint}/dashboard/token-usage.
-// It is the only writer of those rows. The daemon launches it every 10 minutes
-// and after each Stop, the in-process hook path on SessionStart and Stop; it
-// can also be run by hand.
+// Uploads token usage of the sessions this API key's organization owns, one
+// row per session and UTC hour, to POST {backendEndpoint}/dashboard/token-usage.
 //
-//   node scripts/usage-sync.mjs [--dry-run] [--state <path>]
+//   node scripts/usage-sync.mjs [--dry-run]
+//   node scripts/usage-sync.mjs --assign <project dir or session .jsonl>
 //
-// --dry-run : print each row instead of posting it. Needs no API key, ignores
-//             the observability and usage sync switches, and keeps its own
-//             state file, so it never changes what a real run posts.
-// --state   : state file to read and update.
+// --dry-run : print each row instead of posting it, from its own state file.
+// --assign  : give this key's organization those sessions' whole history.
 
 import { homedir } from "node:os";
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { loadConfig } from "./lib/config.mjs";
 import { deviceIdentity } from "./lib/device.mjs";
-import { ensurePrivateDir, PRIVATE_FILE_MODE, writeJson } from "./lib/fs-store.mjs";
+import {
+  ensurePrivateDir,
+  PRIVATE_FILE_MODE,
+  writeJson,
+  writePrivateFile,
+} from "./lib/fs-store.mjs";
 import { getSdkClient } from "./lib/intent.mjs";
 import { loadRuntimeState } from "./lib/runtime-state.mjs";
+import { classifyTranscripts } from "./lib/transcripts.mjs";
+import {
+  assignSessions,
+  ownedSessions,
+  resolveScope,
+  scopeStatePath,
+} from "./lib/usage-ownership.mjs";
 import { loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
-import { defaultStatePath, isAlive, requestedAt, syncPaths } from "./lib/usage-sync-launch.mjs";
+import { isAlive, keySyncPaths, requestedAt, syncPaths } from "./lib/usage-sync-launch.mjs";
 
 const BUDGET_MS = 90_000;
 const HARD_STOP_MS = BUDGET_MS + 30_000;
@@ -30,7 +38,7 @@ const DEBOUNCE_MS = 2_000;
 
 const argv = process.argv.slice(2);
 const DRY = argv.includes("--dry-run");
-const stateIdx = argv.indexOf("--state");
+const assignIdx = argv.indexOf("--assign");
 const PROJECTS_DIR = path.join(homedir(), ".claude", "projects");
 
 function log(message) {
@@ -71,8 +79,9 @@ async function debounce(requestPath, deadline) {
   if (wait > 0) await sleep(wait);
 }
 
-async function syncPass({ config, statePath, deadline }) {
+async function syncPass({ config, scope, statePath, deadline }) {
   const state = await loadSyncState(statePath);
+  const owned = await ownedSessions(config, scope, { pin: !DRY });
   const runtime = await loadRuntimeState(config.runtimeFile);
   const { deviceId, deviceName } = deviceIdentity();
   const toBody = (row) => ({ product: config.productSlug, deviceId, deviceName, ...row });
@@ -87,6 +96,7 @@ async function syncPass({ config, statePath, deadline }) {
   const report = await syncUsage({
     projectsDir: PROJECTS_DIR,
     state,
+    owned,
     post,
     isArmored: (sessionId) => Boolean(runtime.sessions[sessionId]),
     deadline,
@@ -104,60 +114,123 @@ async function syncPass({ config, statePath, deadline }) {
   log(
     `${report.main} session(s) under ${PROJECTS_DIR} (${report.subagent} subagent, ` +
       `${report.journal} journal, ${report.other} other file(s)); ${report.changed} changed, ` +
-      `${report.read} read; ${verb} ${report.sessionHours} session-hour(s) ` +
+      `${report.read} read, ${report.unowned} not owned by this organization; ${verb} ${report.sessionHours} session-hour(s) ` +
       `(${report.tokens} tokens), ${report.failed} failed${why ? ` (${why})` : ""}, ` +
       `${report.left} left for the next run, ${Date.now() - started}ms`
   );
   if (report.failed) process.exitCode = 1;
 }
 
-async function main() {
-  const config = loadConfig(process.env);
-  if (!DRY && !config.apiKey) {
-    log("no API key, nothing synced");
+async function sessionsAt(target) {
+  const full = path.resolve(target);
+  const { main } = await classifyTranscripts(PROJECTS_DIR);
+  const isDir = (await stat(full).catch(() => null))?.isDirectory();
+  const picked = main.filter((f) => (isDir ? path.dirname(f) === full : f === full));
+  return picked.map((f) => path.basename(f, ".jsonl"));
+}
+
+async function assign(config, scope, target) {
+  const sessionIds = await sessionsAt(target);
+  if (!sessionIds.length) {
+    log(`no sessions at ${target} under ${PROJECTS_DIR}`);
+    process.exitCode = 1;
     return;
   }
-  if (!DRY && !config.usageSyncEnabled) {
-    log("usage sync is off (observability disabled or disable_usage_sync set), nothing synced");
-    return;
-  }
-  const statePath =
-    stateIdx >= 0
-      ? path.resolve(argv[stateIdx + 1])
-      : DRY
-        ? path.join(config.dataDir, "usage-sync-dry-run.json")
-        : defaultStatePath(config.dataDir);
+  const { assigned, refused } = await assignSessions(config, scope, sessionIds);
+  for (const id of refused)
+    log(`refused ${id}: another organization owns it, or its owner's is not known yet`);
+  log(
+    `assigned ${assigned.length} session(s) to organization ${scope.orgId}, refused ${refused.length}`
+  );
+  if (refused.length) process.exitCode = 1;
+}
+
+async function scopedPass({ config, scope, deadline }) {
+  const statePath = scopeStatePath(config.dataDir, scope.scopeId);
   const paths = syncPaths(statePath);
+  let release = await acquireLock(paths.lock);
+  if (!release) {
+    await writePrivateFile(paths.request, String(Date.now()));
+    release = await acquireLock(paths.lock);
+    if (!release) return null;
+  }
+  try {
+    const passStart = Date.now();
+    await syncPass({ config, scope, statePath, deadline });
+    return { request: paths.request, passStart };
+  } finally {
+    await release();
+  }
+}
+
+async function runPasses(config, scope) {
+  const paths = keySyncPaths(config);
   const deadline = Date.now() + BUDGET_MS;
+  let passStart = -Infinity;
+  const again = (ran) =>
+    requestedAt(paths.request) >= passStart || (ran && requestedAt(ran.request) >= ran.passStart);
+  while (Date.now() < deadline) {
+    const release = await acquireLock(paths.lock);
+    if (!release) {
+      if (passStart === -Infinity) log("another sync for this key holds the lock, skipping");
+      return;
+    }
+    try {
+      let ran;
+      do {
+        await debounce(paths.request, deadline);
+        passStart = Date.now();
+        ran = await scopedPass({ config, scope, deadline });
+      } while (again(ran) && Date.now() < deadline);
+    } finally {
+      await release();
+    }
+    if (requestedAt(paths.request) < passStart) return;
+  }
+}
+
+const COMMAND = assignIdx >= 0 ? "assign" : DRY ? "dry-run" : "sync";
+
+async function scopeOf(config) {
+  try {
+    return await resolveScope(config);
+  } catch (err) {
+    log(`nothing synced: ${err?.message ?? err}`);
+    process.exitCode = 1;
+    return null;
+  }
+}
+
+async function sync(config, scope) {
   const hardStop = setTimeout(() => {
     log(`still running after ${HARD_STOP_MS}ms, exiting`);
     process.exit(1);
   }, HARD_STOP_MS);
   hardStop.unref();
   try {
-    let passStart = -Infinity;
-    // A Stop can touch the request marker after the last pass began but see
-    // the lock still held, so the marker is checked again once it is released.
-    while (Date.now() < deadline) {
-      const release = await acquireLock(paths.lock);
-      if (!release) {
-        if (passStart === -Infinity) log("another sync holds the lock, skipping");
-        return;
-      }
-      try {
-        do {
-          await debounce(paths.request, deadline);
-          passStart = Date.now();
-          await syncPass({ config, statePath, deadline });
-        } while (requestedAt(paths.request) >= passStart && Date.now() < deadline);
-      } finally {
-        await release();
-      }
-      if (requestedAt(paths.request) < passStart) return;
-    }
+    if (COMMAND === "sync") return await runPasses(config, scope);
+    const statePath = path.join(
+      path.dirname(scopeStatePath(config.dataDir, scope.scopeId)),
+      "dry-run.json"
+    );
+    await syncPass({ config, scope, statePath, deadline: Date.now() + BUDGET_MS });
   } finally {
     clearTimeout(hardStop);
   }
+}
+
+async function main() {
+  const config = loadConfig(process.env);
+  if (!config.apiKey) return log("no API key, nothing synced");
+  if (COMMAND === "sync" && !config.usageSyncEnabled) {
+    return log(
+      "usage sync is off (observability disabled or disable_usage_sync set), nothing synced"
+    );
+  }
+  const scope = await scopeOf(config);
+  if (!scope) return;
+  if (COMMAND === "assign") return assign(config, scope, argv[assignIdx + 1] ?? "");
+  return sync(config, scope);
 }
 
 main().catch((err) => {

@@ -89,6 +89,12 @@ function changedHours(usage, prevHours = {}) {
   return { hours, rows };
 }
 
+function ownedRows(usage, claim, prev) {
+  const covered = usage.hours.filter((h) => !claim.since || hourKey(h) >= claim.since);
+  const posted = prev?.owner === undefined ? {} : prev.hours;
+  return changedHours({ hours: covered }, posted);
+}
+
 function countFailure(failures, failure) {
   const key = `${failure.status ?? ""} ${failure.reason}`;
   const known = failures.get(key);
@@ -98,17 +104,19 @@ function countFailure(failures, failure) {
 
 /**
  * Post the session-hours that changed since the last run, reading only sessions
- * whose main or subagent transcripts changed size or mtime.
- *
- * Each session's entry in `state.sessions` keeps the message keys it counted.
- * The run's seen set starts with the keys of every session it does not read,
- * so a changed fork still skips history it copied from an unchanged original.
- * A session's entry is replaced only when all of its changed hours posted, so
- * a failed hour is retried on the next run. `state` is updated in place.
+ * whose main or subagent transcripts changed size or mtime, or whose owner did.
+ * `owned` maps each session id this scope may post to the first UTC hour it
+ * covers (null for all). Each session's entry in
+ * `state.sessions` keeps the message keys it counted. The run's seen set starts
+ * with the keys of every session it does not read, so a changed fork still
+ * skips history it copied from an unchanged original. A session's entry is
+ * replaced only when all of its changed hours posted, so a failed hour is
+ * retried on the next run. `state` is updated in place.
  */
 export async function syncUsage({
   projectsDir,
   state,
+  owned,
   post,
   isArmored = () => false,
   deadline = Infinity,
@@ -121,7 +129,13 @@ export async function syncUsage({
 
   const current = new Map();
   for (const file of groups.main) current.set(file, await sessionFiles(file));
-  const changed = groups.main.filter((f) => !sameFiles(state.sessions[f]?.files, current.get(f)));
+  const ownerChanged = (f) => {
+    const claim = owned.get(path.basename(f, ".jsonl"));
+    return claim !== undefined && state.sessions[f]?.owner !== claim.since;
+  };
+  const changed = groups.main.filter(
+    (f) => !sameFiles(state.sessions[f]?.files, current.get(f)) || ownerChanged(f)
+  );
   const changedSet = new Set(changed);
 
   const seen = new RecordingSet();
@@ -139,6 +153,7 @@ export async function syncUsage({
     notRead: [...groups.subagent.filter((f) => !folded.has(f)), ...groups.other],
     changed: changed.length,
     read: 0,
+    unowned: 0,
     sessionHours: 0,
     tokens: 0,
     failed: 0,
@@ -163,9 +178,15 @@ export async function syncUsage({
       continue;
     }
     report.read++;
+    const claim = owned.get(sessionId);
+    if (!claim) {
+      report.unowned++;
+      state.sessions[file] = { files: current.get(file), keys: seen.added };
+      continue;
+    }
     const prev = state.sessions[file];
     const armored = Boolean(prev?.armored) || isArmored(sessionId);
-    const { hours, rows } = changedHours(usage, prev?.hours);
+    const { hours, rows } = ownedRows(usage, claim, prev);
     let ok = true;
     let unreachable = false;
     for (const row of rows) {
@@ -204,6 +225,7 @@ export async function syncUsage({
         files: current.get(file),
         hours,
         keys: seen.added,
+        owner: claim.since,
         ...(armored ? { armored: true } : {}),
       };
     }

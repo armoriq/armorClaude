@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   statSync,
   writeFileSync,
@@ -25,7 +26,17 @@ import {
 import { classifyTranscripts } from "../scripts/lib/transcripts.mjs";
 import { writeJson } from "../scripts/lib/fs-store.mjs";
 import { loadSyncState, syncUsage } from "../scripts/lib/usage-sync.mjs";
-import { launchUsageSync, requestUsageSync } from "../scripts/lib/usage-sync-launch.mjs";
+import {
+  keySyncPaths,
+  launchUsageSync,
+  requestUsageSync,
+} from "../scripts/lib/usage-sync-launch.mjs";
+import {
+  claimSession,
+  keyIdOf,
+  scopeIdOf,
+  scopeStatePath,
+} from "../scripts/lib/usage-ownership.mjs";
 
 const SYNC = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -101,11 +112,17 @@ function projectsOf(home) {
   return path.join(home, ".claude", "projects");
 }
 
+const ALL = new Map([
+  [S1, { since: null }],
+  [S2, { since: null }],
+]);
+
 async function run(home, state, opts = {}) {
   const rows = [];
   const report = await syncUsage({
     projectsDir: projectsOf(home),
     state,
+    owned: ALL,
     post: async (row) => {
       rows.push(row);
       return { ok: opts.fail ? !opts.fail(row) : true };
@@ -384,6 +401,7 @@ test("failed posts are counted once per distinct status and reason, with the fir
   const report = await syncUsage({
     projectsDir: projectsOf(home),
     state,
+    owned: ALL,
     post: async (row) => answers[row.sessionId],
   });
   assert.equal(report.failed, 3);
@@ -414,6 +432,7 @@ test("an unreachable backend ends the run after one post and leaves every sessio
   const down = await syncUsage({
     projectsDir: projectsOf(home),
     state,
+    owned: ALL,
     post: async (row) => {
       calls.push(row);
       return { ok: false, unreachable: true, reason: "connect ECONNREFUSED 127.0.0.1:9" };
@@ -443,6 +462,7 @@ test("an unreachable backend after some posts keeps the sessions already posted"
   const report = await syncUsage({
     projectsDir: projectsOf(home),
     state,
+    owned: ALL,
     post: async () =>
       ++n <= 2 ? { ok: true } : { ok: false, unreachable: true, reason: "socket hang up" },
   });
@@ -460,6 +480,7 @@ test("a failed post with no reason is still reported", async () => {
   const report = await syncUsage({
     projectsDir: projectsOf(home),
     state: await loadSyncState(path.join(home, "none.json")),
+    owned: ALL,
     post: async () => ({ ok: false, status: 503 }),
   });
   assert.deepEqual(
@@ -480,31 +501,44 @@ function cli(home, args) {
   });
 }
 
-test("usage-sync --dry-run prints each row, then finds nothing changed", () => {
-  const home = fixtureHome();
-  const first = cli(home, ["--dry-run"]);
-  assert.equal(first.status, 0, first.stderr);
-  const rows = first.stdout
-    .trim()
-    .split("\n")
-    .map((l) => JSON.parse(l));
-  assert.deepEqual(summary(rows), [
-    [S1, "2026-09-20", 9, 133],
-    [S1, "2026-09-21", 9, 1000],
-    [S2, "2026-09-21", 10, 7],
-  ]);
-  for (const row of rows) {
-    assert.equal(row.product, "armorclaude");
-    assertHourRow(row);
-  }
-  assert.match(first.stderr, /2 session\(s\) under .*\(3 subagent, 1 journal, 1 other file\(s\)\)/);
-  assert.match(first.stderr, /2 changed, 2 read; would post 3 session-hour\(s\) \(1140 tokens\)/);
-  assert.match(first.stderr, /not read .*notes\.jsonl/);
+test("usage-sync --dry-run prints each owned row, then finds nothing changed", async () => {
+  const { server, posts, port } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    await assigned(home, port);
+    const first = await cliAgainst(home, port, {}, ["--dry-run"]);
+    assert.equal(first.status, 0, first.stderr);
+    const rows = first.stdout
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    assert.deepEqual(summary(rows), [
+      [S1, "2026-09-20", 9, 133],
+      [S1, "2026-09-21", 9, 1000],
+      [S2, "2026-09-21", 10, 7],
+    ]);
+    for (const row of rows) {
+      assert.equal(row.product, "armorclaude");
+      assertHourRow(row);
+    }
+    assert.match(
+      first.stderr,
+      /2 session\(s\) under .*\(3 subagent, 1 journal, 1 other file\(s\)\)/
+    );
+    assert.match(first.stderr, /2 changed, 2 read, 0 not owned .*; would post 3 session-hour\(s\)/);
+    assert.match(first.stderr, /not read .*notes\.jsonl/);
 
-  const second = cli(home, ["--dry-run"]);
-  assert.equal(second.status, 0, second.stderr);
-  assert.equal(second.stdout, "");
-  assert.match(second.stderr, /0 changed, 0 read; would post 0 session-hour\(s\) \(0 tokens\)/);
+    const second = await cliAgainst(home, port, {}, ["--dry-run"]);
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(second.stdout, "");
+    assert.match(
+      second.stderr,
+      /0 changed, 0 read, 0 not owned .*; would post 0 session-hour\(s\)/
+    );
+    assert.equal(posts.length, 0);
+  } finally {
+    server.close();
+  }
 });
 
 test("usage-sync without an API key posts nothing", () => {
@@ -516,22 +550,32 @@ test("usage-sync without an API key posts nothing", () => {
 
 function fakeBackend(answer = () => [200, { ok: true }]) {
   const posts = [];
+  const keys = [];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
+      const bearer = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+      const key = bearer ?? req.headers["x-api-key"];
       let status = 200;
       let reply = { ok: true };
-      if (req.method === "POST" && req.url === "/dashboard/token-usage") {
+      if (req.method === "POST" && req.url === "/iap/validate-key") {
+        [status, reply] = ORGS[key] ? [200, { orgId: ORGS[key] }] : [401, { message: "no" }];
+      } else if (req.method === "POST" && req.url === "/dashboard/token-usage") {
         posts.push(JSON.parse(body));
-        [status, reply] = answer(posts.at(-1));
+        keys.push(key);
+        const answered = answer(posts.at(-1), key);
+        if (!answered) return req.socket.destroy();
+        [status, reply] = answered;
       }
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(reply));
     });
   });
   return new Promise((resolve) =>
-    server.listen(0, "127.0.0.1", () => resolve({ server, posts, port: server.address().port }))
+    server.listen(0, "127.0.0.1", () =>
+      resolve({ server, posts, keys, port: server.address().port })
+    )
   );
 }
 
@@ -560,15 +604,15 @@ const pluginEnv = (home, dataDir, port) => ({
   ARMORIQ_ENV: "local",
   ARMORIQ_BACKEND_URL: `http://127.0.0.1:${port}`,
   ARMORIQ_CSRG_URL: `http://127.0.0.1:${port}`,
-  CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_usage_sync_stop",
+  CLAUDE_PLUGIN_OPTION_API_KEY: STOP_KEY,
   ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
 });
 
 test("a Stop through the daemon triggers the sync, the only writer of a forked session's rows", async () => {
   const home = fixtureHome();
   const dataDir = path.join(home, "data");
-  const statePath = path.join(dataDir, "usage-sync-state.json");
   const { server, posts, port } = await fakeBackend();
+  const statePath = scopeState(dataDir, port);
   const env = pluginEnv(home, dataDir, port);
   mkdirSync(dataDir, { recursive: true });
   const runtimeFile = path.join(dataDir, "runtime.json");
@@ -577,6 +621,7 @@ test("a Stop through the daemon triggers the sync, the only writer of a forked s
   await saveRuntimeState(runtimeFile, runtime);
   const daemon = spawn(process.execPath, [DAEMON], { stdio: "ignore", env, cwd: dataDir });
   try {
+    await assigned(home, port, STOP_KEY);
     await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
     const config = loadConfig(env);
     const stop = (sessionId) =>
@@ -625,12 +670,13 @@ test("a Stop through the daemon triggers the sync, the only writer of a forked s
 test("an in-process Stop, with no daemon reachable, triggers the sync", async () => {
   const home = fixtureHome();
   const dataDir = path.join(home, "data");
-  const statePath = path.join(dataDir, "usage-sync-state.json");
   mkdirSync(dataDir, { recursive: true });
   // The daemon exits on startup when profiles is a file, so the hook runs in-process.
   writeFileSync(path.join(dataDir, "profiles"), "not a directory");
   const { server, posts, port } = await fakeBackend();
+  const statePath = scopeState(dataDir, port);
   try {
+    await assigned(home, port, STOP_KEY);
     const hook = spawn(process.execPath, [ROUTER], { env: pluginEnv(home, dataDir, port) });
     const exited = new Promise((resolve) => hook.once("exit", resolve));
     hook.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: S2 }));
@@ -643,35 +689,46 @@ test("an in-process Stop, with no daemon reachable, triggers the sync", async ()
   }
 });
 
-test("the sync's log, request marker and state are owner-only, and 0644 ones are tightened", async () => {
+function filesUnder(dir) {
+  const out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    out.push(full);
+    if (entry.isDirectory()) out.push(...filesUnder(full));
+  }
+  return out;
+}
+
+test("the sync's log, owners, request markers and state are owner-only, and a 0644 log is tightened", async () => {
   const home = fixtureHome();
   const dataDir = path.join(home, "data");
-  const statePath = path.join(dataDir, "usage-sync-state.json");
   mkdirSync(dataDir, { recursive: true, mode: 0o755 });
   chmodSync(dataDir, 0o755);
   writeFileSync(path.join(dataDir, "profiles"), "not a directory");
-  const files = [path.join(dataDir, "usage-sync.log"), `${statePath}.request`, statePath];
-  for (const file of files) {
-    writeFileSync(file, file === statePath ? "{}" : "");
-    chmodSync(file, 0o644);
-  }
+  const logPath = path.join(dataDir, "usage-sync.log");
+  writeFileSync(logPath, "");
+  chmodSync(logPath, 0o644);
   const { server, posts, port } = await fakeBackend();
+  const statePath = scopeState(dataDir, port);
   try {
-    const hook = spawn(process.execPath, [ROUTER], { env: pluginEnv(home, dataDir, port) });
-    const exited = new Promise((resolve) => hook.once("exit", resolve));
-    hook.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: S2 }));
-    assert.equal(await exited, 0);
-    await until(() => readLastRun(statePath) && !existsSync(`${statePath}.lock`), "the sync pass");
+    await assigned(home, port, STOP_KEY);
+    const env = pluginEnv(home, dataDir, port);
+    assert.equal(await inProcessHook(env, { hook_event_name: "Stop", session_id: S2 }), 0);
+    await until(settledAt(statePath, undefined), "the sync pass");
     assert.equal(posts.length, 3);
     const mode = (file) => statSync(file).mode & 0o777;
-    for (const file of files) assert.equal(mode(file), 0o600, file);
+    const tree = filesUnder(path.join(dataDir, "usage-sync"));
+    assert.ok(tree.includes(keySyncPaths(loadConfig(env)).request));
+    assert.ok(tree.includes(statePath));
+    for (const file of [logPath, ...tree]) {
+      assert.equal(mode(file), statSync(file).isDirectory() ? 0o700 : 0o600, file);
+    }
     assert.equal(mode(dataDir), 0o700);
   } finally {
     server.close();
   }
 });
 
-const KEY = "ak_test_usage_sync_toggle";
 const OBS_OFF = { CLAUDE_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "true" };
 const SYNC_OFF = { CLAUDE_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "true" };
 const TOGGLES = [
@@ -704,7 +761,7 @@ test("usageSyncEnabled needs observability on and disable_usage_sync unset", () 
   }
 });
 
-test("the launcher starts no sync and writes no request while the usage sync is off", () => {
+test("the launcher claims nothing, starts no sync and writes no request while the usage sync is off", () => {
   for (const [name, toggles] of TOGGLES) {
     const dataDir = mkdtempSync(path.join(tmpdir(), "ac-sync-off-"));
     const cfg = loadConfig({
@@ -713,16 +770,17 @@ test("the launcher starts no sync and writes no request while the usage sync is 
       CLAUDE_PLUGIN_DATA: dataDir,
       ...toggles,
     });
-    assert.equal(requestUsageSync(cfg), false, name);
-    assert.equal(launchUsageSync(cfg), false, name);
-    assert.equal(existsSync(path.join(dataDir, "usage-sync-state.json.request")), false, name);
+    assert.equal(requestUsageSync(cfg, S1), false, name);
+    assert.equal(launchUsageSync(cfg, S1), false, name);
+    assert.equal(claimSession(cfg, S1), false, name);
+    assert.equal(existsSync(path.join(dataDir, "usage-sync")), false, name);
     assert.equal(existsSync(path.join(dataDir, "usage-sync.log")), false, name);
   }
 });
 
-function cliAgainst(home, port, env) {
+function cliAgainst(home, port, env = {}, args = []) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [SYNC], {
+    const child = spawn(process.execPath, [SYNC, ...args], {
       env: {
         PATH: process.env.PATH,
         HOME: home,
@@ -734,10 +792,23 @@ function cliAgainst(home, port, env) {
         ...env,
       },
     });
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
     child.stderr.on("data", (chunk) => (stderr += chunk));
-    child.on("close", (status) => resolve({ status, stderr }));
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
   });
+}
+
+const withKey = (key) => ({ CLAUDE_PLUGIN_OPTION_API_KEY: key });
+
+const assignProject = (home, port, key = KEY, project = "-work-repo-a") =>
+  cliAgainst(home, port, withKey(key), ["--assign", path.join(projectsOf(home), project)]);
+
+async function assigned(home, port, key = KEY) {
+  const res = await assignProject(home, port, key);
+  assert.equal(res.status, 0, res.stderr);
+  return res;
 }
 
 test("usage-sync posts nothing while observability or the usage sync is off", async () => {
@@ -748,11 +819,13 @@ test("usage-sync posts nothing while observability or the usage sync is off", as
       const res = await cliAgainst(home, port, toggles);
       assert.equal(res.status, 0, res.stderr);
       assert.match(res.stderr, /usage sync is off .*nothing synced/, name);
-      assert.equal(existsSync(path.join(home, "data", "usage-sync-state.json")), false, name);
+      assert.equal(existsSync(path.join(home, "data", "usage-sync")), false, name);
     }
     assert.equal(posts.length, 0);
 
-    const res = await cliAgainst(fixtureHome(), port, {
+    const home = fixtureHome();
+    await assigned(home, port);
+    const res = await cliAgainst(home, port, {
       CLAUDE_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "false",
       CLAUDE_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "false",
     });
@@ -768,6 +841,7 @@ test("usage-sync logs a backend 400 once with its session-hour, status and messa
   const { server, posts, port } = await fakeBackend(() => [400, body]);
   try {
     const home = fixtureHome();
+    await assigned(home, port);
     const res = await cliAgainst(home, port, {});
     assert.equal(posts.length, 3);
     assert.equal(res.status, 1, res.stderr);
@@ -786,7 +860,7 @@ test("usage-sync logs a backend 400 once with its session-hour, status and messa
     );
     assert.equal(res.stderr.includes(KEY), false);
     const lastRun = JSON.parse(
-      readFileSync(path.join(home, "data", "usage-sync-state.json"), "utf8")
+      readFileSync(scopeState(path.join(home, "data"), port), "utf8")
     ).lastRun;
     assert.equal(lastRun.failed, 3);
     assert.deepEqual(
@@ -798,34 +872,38 @@ test("usage-sync logs a backend 400 once with its session-hour, status and messa
   }
 });
 
-test("usage-sync against a closed port stops after one row, exits 1 fast and keeps every row", async () => {
-  const closed = createServer();
-  await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
-  const deadPort = closed.address().port;
-  await new Promise((resolve) => closed.close(resolve));
-  const home = fixtureHome();
-  const started = Date.now();
-  const res = await cliAgainst(home, deadPort, {});
-  const elapsed = Date.now() - started;
-  assert.equal(res.status, 1, res.stderr);
-  assert.ok(elapsed < 10_000, `took ${elapsed}ms`);
-  const origin = `http://127.0.0.1:${deadPort}`;
-  const failedLines = res.stderr.split("\n").filter((l) => l.includes(" failed 1x"));
-  assert.equal(failedLines.length, 1, res.stderr);
-  assert.ok(failedLines[0].includes(`backend unreachable at ${origin}: `), res.stderr);
-  assert.match(
-    res.stderr,
-    /posted 0 session-hour\(s\) \(0 tokens\), 1 failed \(1x backend unreachable at /
+test("usage-sync whose posts cannot reach the backend stops after one row, exits 1 fast and keeps every row", async () => {
+  let reachable = false;
+  const { server, port, ...backend } = await fakeBackend(() =>
+    reachable ? [200, { ok: true }] : null
   );
-  assert.match(res.stderr, /2 left for the next run/);
-  const statePath = path.join(home, "data", "usage-sync-state.json");
-  assert.deepEqual(JSON.parse(readFileSync(statePath, "utf8")).sessions, {});
-
-  const { server, posts, port } = await fakeBackend();
   try {
+    const home = fixtureHome();
+    await assigned(home, port);
+    const started = Date.now();
+    const res = await cliAgainst(home, port, {});
+    const elapsed = Date.now() - started;
+    assert.equal(res.status, 1, res.stderr);
+    assert.ok(elapsed < 10_000, `took ${elapsed}ms`);
+    const failedLines = res.stderr.split("\n").filter((l) => l.includes(" failed 1x"));
+    assert.equal(failedLines.length, 1, res.stderr);
+    assert.ok(
+      failedLines[0].includes(`backend unreachable at http://127.0.0.1:${port}: `),
+      res.stderr
+    );
+    assert.match(res.stderr, /2 left for the next run/);
+    const statePath = scopeState(path.join(home, "data"), port);
+    const sessions = JSON.parse(readFileSync(statePath, "utf8")).sessions;
+    assert.equal(
+      Object.values(sessions).some((entry) => entry.hours),
+      false
+    );
+
+    reachable = true;
+    backend.posts.length = 0;
     const next = await cliAgainst(home, port, {});
     assert.equal(next.status, 0, next.stderr);
-    assert.deepEqual(summary(posts), [
+    assert.deepEqual(summary(backend.posts), [
       [S1, "2026-09-20", 9, 133],
       [S1, "2026-09-21", 9, 1000],
       [S2, "2026-09-21", 10, 7],
@@ -838,8 +916,8 @@ test("usage-sync against a closed port stops after one row, exits 1 fast and kee
 async function withDaemon(daemonToggles, fn) {
   const home = fixtureHome();
   const dataDir = path.join(home, "data");
-  const statePath = path.join(dataDir, "usage-sync-state.json");
   const { server, posts, port } = await fakeBackend();
+  const statePath = scopeState(dataDir, port);
   const env = { ...pluginEnv(home, dataDir, port), CLAUDE_PLUGIN_OPTION_API_KEY: KEY };
   mkdirSync(dataDir, { recursive: true });
   const daemon = spawn(process.execPath, [DAEMON], {
@@ -847,6 +925,7 @@ async function withDaemon(daemonToggles, fn) {
     env: { ...env, ...daemonToggles },
     cwd: dataDir,
   });
+  const config = (toggles) => loadConfig({ ...env, ...toggles });
   const stop = (toggles) =>
     dispatchViaDaemon({
       event: "Stop",
@@ -855,7 +934,7 @@ async function withDaemon(daemonToggles, fn) {
         session_id: S2,
         transcript_path: path.join(projectsOf(home), "-work-repo-a", `${S2}.jsonl`),
       },
-      config: loadConfig({ ...env, ...toggles }),
+      config: config(toggles),
     });
   const synced = () =>
     until(
@@ -863,8 +942,9 @@ async function withDaemon(daemonToggles, fn) {
       "a sync pass"
     );
   try {
+    await assigned(home, port);
     await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
-    await fn({ stop, synced, posts, statePath });
+    await fn({ stop, synced, posts, statePath, request: keySyncPaths(config({})).request });
   } finally {
     daemon.kill("SIGTERM");
     server.close();
@@ -872,10 +952,10 @@ async function withDaemon(daemonToggles, fn) {
 }
 
 test("a Stop through the daemon starts no sync while the calling session turns it off", async () => {
-  await withDaemon({}, async ({ stop, synced, posts, statePath }) => {
+  await withDaemon({}, async ({ stop, synced, posts, statePath, request }) => {
     for (const [name, toggles] of TOGGLES) {
       await stop(toggles);
-      assert.equal(existsSync(`${statePath}.request`), false, name);
+      assert.equal(existsSync(request), false, name);
       assert.equal(existsSync(`${statePath}.lock`), false, name);
     }
     await new Promise((r) => setTimeout(r, 3000));
@@ -928,4 +1008,311 @@ test("a fork's copied lines never stop its original from counting them", async (
   ]);
   append(home, `${S1}.jsonl`, { ...assistant("o3", "2026-09-20T09:20:00Z", 1), sessionId: S1 });
   assert.deepEqual(summary((await run(home, state)).rows), [[S1, "2026-09-20", 9, 301]]);
+});
+
+const KEY = "ak_test_usage_sync_toggle";
+const STOP_KEY = "ak_test_usage_sync_stop";
+const KEY_A = "ak_test_usage_sync_org_a";
+const KEY_A2 = "ak_test_usage_sync_org_a_rotated";
+const KEY_B = "ak_test_usage_sync_org_b";
+const KEY_PENDING = "ak_test_usage_sync_org_a_unsynced";
+const ORG = "org-test";
+const ORGS = {
+  [KEY]: ORG,
+  [STOP_KEY]: ORG,
+  [KEY_A]: "org-a",
+  [KEY_A2]: "org-a",
+  [KEY_PENDING]: "org-a",
+  [KEY_B]: "org-b",
+};
+
+const scopeState = (dataDir, port, org = ORG) =>
+  scopeStatePath(dataDir, scopeIdOf(`http://127.0.0.1:${port}`, org));
+
+const settledAt = (statePath, after) => () =>
+  readLastRun(statePath) !== after && !existsSync(`${statePath}.lock`);
+
+const S4 = "bbbbbbbb-0000-4000-8000-000000000004";
+const S5 = "cccccccc-0000-4000-8000-000000000005";
+const S6 = "dddddddd-0000-4000-8000-000000000006";
+
+function addProject(home, repo, sessionId, lines) {
+  writeTree(path.join(projectsOf(home), `-work-${repo}`), {
+    [`${sessionId}.jsonl`]: lines.map((l) => ({ ...l, cwd: `/work/${repo}` })),
+  });
+}
+
+async function ok(pending) {
+  const res = await pending;
+  assert.equal(res.status, 0, res.stderr);
+  return res;
+}
+
+const rowsBy = ({ posts, keys }, key) =>
+  posts
+    .filter((_, i) => keys[i] === key)
+    .map((p) => [p.sessionId, p.usageDate, p.usageHour, p.entries[0].inputTokens, p.repo])
+    .sort();
+
+test("a key uploads only the sessions its organization owns, and the other organization's run still uploads its own", async () => {
+  const { server, port, ...backend } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    addProject(home, "repo-b", S4, [assistant("b1", "2026-09-22T08:00:00Z", 50)]);
+    await assigned(home, port, KEY_A);
+    await ok(assignProject(home, port, KEY_B, "-work-repo-b"));
+
+    const first = await ok(cliAgainst(home, port, withKey(KEY_B)));
+    assert.match(first.stderr, /2 not owned by this organization; posted 1 session-hour/);
+    assert.deepEqual(rowsBy(backend, KEY_B), [[S4, "2026-09-22", 8, 50, "/work/repo-b"]]);
+
+    await ok(cliAgainst(home, port, withKey(KEY_A)));
+    assert.deepEqual(rowsBy(backend, KEY_A), [
+      [S1, "2026-09-20", 9, 133, "/work/repo-a"],
+      [S1, "2026-09-21", 9, 1000, "/work/repo-a"],
+      [S2, "2026-09-21", 10, 7, "/work/repo-a"],
+    ]);
+
+    await ok(cliAgainst(home, port, withKey(KEY_B)));
+    assert.equal(backend.posts.length, 4);
+  } finally {
+    server.close();
+  }
+});
+
+const ownerOf = (home, sessionId) =>
+  JSON.parse(
+    readFileSync(path.join(home, "data", "usage-sync", "owners", `${sessionId}.json`), "utf8")
+  );
+
+test("an assignment never moves a session another organization owns", async () => {
+  const { server, port, ...backend } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    await assigned(home, port, KEY_A);
+    const moved = await assignProject(home, port, KEY_B);
+    assert.equal(moved.status, 1, moved.stderr);
+    assert.match(moved.stderr, new RegExp(`refused ${S1}`));
+    assert.match(moved.stderr, /assigned 0 session\(s\) to organization org-b, refused 2/);
+    assert.equal(ownerOf(home, S1).org, "org-a");
+
+    await ok(cliAgainst(home, port, withKey(KEY_B)));
+    assert.equal(backend.posts.length, 0);
+  } finally {
+    server.close();
+  }
+});
+
+test("a new key of the same organization continues its sessions without re-posting; another organization's key gets none of them", async () => {
+  const { server, port, ...backend } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    await assigned(home, port, KEY_A);
+    assert.equal((await cliAgainst(home, port, withKey(KEY_A))).status, 0);
+    assert.equal(backend.posts.length, 3);
+
+    append(home, `${S2}.jsonl`, assistant("m4", "2026-09-21T10:30:00Z", 40));
+    await ok(cliAgainst(home, port, withKey(KEY_A2)));
+    assert.deepEqual(rowsBy(backend, KEY_A2), [[S2, "2026-09-21", 10, 47, "/work/repo-a"]]);
+
+    const other = await ok(cliAgainst(home, port, withKey(KEY_B)));
+    assert.match(other.stderr, /2 not owned by this organization; posted 0 session-hour/);
+    assert.equal(backend.posts.length, 4);
+  } finally {
+    server.close();
+  }
+});
+
+test("a claim whose key's organization is not known yet is not assigned elsewhere, and its own key pins it", async () => {
+  const { server, port, ...backend } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    const env = { ...pluginEnv(home, path.join(home, "data"), port), ...withKey(KEY_PENDING) };
+    assert.equal(claimSession(loadConfig(env), S1), true);
+
+    const taken = await assignProject(home, port, KEY_B);
+    assert.equal(taken.status, 1, taken.stderr);
+    assert.match(taken.stderr, new RegExp(`refused ${S1}`));
+    assert.equal(ownerOf(home, S1).org, undefined);
+    assert.equal(ownerOf(home, S2).org, "org-b");
+
+    await ok(cliAgainst(home, port, withKey(KEY_PENDING)));
+    assert.equal(ownerOf(home, S1).org, "org-a");
+    assert.equal(ownerOf(home, S1).key, keyIdOf(loadConfig(env)));
+    assert.deepEqual(rowsBy(backend, KEY_B), []);
+  } finally {
+    server.close();
+  }
+});
+
+test("concurrent syncs of two organizations each post their own rows, and a failing one retries without touching the other", async () => {
+  let aFails = true;
+  const { server, port, ...backend } = await fakeBackend((_, key) =>
+    key === KEY_A && aFails ? [500, { message: "down" }] : [200, { ok: true }]
+  );
+  try {
+    const home = fixtureHome();
+    addProject(home, "repo-b", S4, [assistant("b1", "2026-09-22T08:00:00Z", 50)]);
+    await assigned(home, port, KEY_A);
+    await ok(assignProject(home, port, KEY_B, "-work-repo-b"));
+
+    const [a, b] = await Promise.all([
+      cliAgainst(home, port, withKey(KEY_A)),
+      cliAgainst(home, port, withKey(KEY_B)),
+    ]);
+    assert.equal(a.status, 1, a.stderr);
+    assert.equal(b.status, 0, b.stderr);
+    assert.deepEqual(rowsBy(backend, KEY_B), [[S4, "2026-09-22", 8, 50, "/work/repo-b"]]);
+
+    aFails = false;
+    const before = backend.posts.length;
+    await ok(cliAgainst(home, port, withKey(KEY_A)));
+    assert.deepEqual(summary(backend.posts.slice(before)), [
+      [S1, "2026-09-20", 9, 133],
+      [S1, "2026-09-21", 9, 1000],
+      [S2, "2026-09-21", 10, 7],
+    ]);
+    assert.deepEqual(backend.keys.slice(before), [KEY_A, KEY_A, KEY_A]);
+    assert.equal(rowsBy(backend, KEY_B).length, 1);
+  } finally {
+    server.close();
+  }
+});
+
+test("two keys of one organization syncing at once post every row exactly once", async () => {
+  const { server, port, ...backend } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    await assigned(home, port, KEY_A);
+    const runs = await Promise.all([
+      cliAgainst(home, port, withKey(KEY_A)),
+      cliAgainst(home, port, withKey(KEY_A2)),
+    ]);
+    for (const r of runs) assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(summary(backend.posts), [
+      [S1, "2026-09-20", 9, 133],
+      [S1, "2026-09-21", 9, 1000],
+      [S2, "2026-09-21", 10, 7],
+    ]);
+  } finally {
+    server.close();
+  }
+});
+
+test("an API key the backend rejects posts nothing and says why without the key", async () => {
+  const backend = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    const key = "ak_test_usage_sync_unknown";
+    const res = await cliAgainst(home, backend.port, withKey(key));
+    assert.equal(res.status, 1, res.stderr);
+    assert.match(res.stderr, /could not resolve the API key's organization: HTTP 401/);
+    assert.equal(res.stderr.includes(key), false);
+    assert.equal(backend.posts.length, 0);
+  } finally {
+    backend.server.close();
+  }
+});
+
+async function pastHourEdge() {
+  const msLeft = 3_600_000 - (Date.now() % 3_600_000);
+  if (msLeft < 30_000) await new Promise((r) => setTimeout(r, msLeft + 1000));
+}
+
+function liveProject(home, repo, sessionId, input) {
+  const now = new Date().toISOString();
+  addProject(home, repo, sessionId, [
+    assistant(`${repo}-old`, "2026-09-23T07:00:00Z", input),
+    assistant(`${repo}-now`, now, input + 1),
+  ]);
+  return { date: now.slice(0, 10), hour: Number(now.slice(11, 13)) };
+}
+
+function inProcessHook(env, input) {
+  const hook = spawn(process.execPath, [ROUTER], { env });
+  const exited = new Promise((resolve) => hook.once("exit", resolve));
+  hook.stdin.end(JSON.stringify(input));
+  return exited;
+}
+
+test("an in-process hook claims only its own session from the hook's hour, and --assign adds its earlier history", async () => {
+  await pastHourEdge();
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  mkdirSync(dataDir, { recursive: true });
+  // The daemon exits on startup when profiles is a file, so the hook runs in-process.
+  writeFileSync(path.join(dataDir, "profiles"), "not a directory");
+  const { server, port, ...backend } = await fakeBackend();
+  const statePath = scopeState(dataDir, port, "org-a");
+  try {
+    const now = liveProject(home, "repo-c", S5, 60);
+    const env = { ...pluginEnv(home, dataDir, port), ...withKey(KEY_A) };
+    assert.equal(await inProcessHook(env, { hook_event_name: "SessionStart", session_id: S5 }), 0);
+    await until(settledAt(statePath, undefined), "the sync pass");
+    assert.equal(existsSync(path.join(dataDir, "daemon.sock")), false);
+    assert.deepEqual(rowsBy(backend, KEY_A), [[S5, now.date, now.hour, 61, "/work/repo-c"]]);
+
+    const transcript = path.join(projectsOf(home), "-work-repo-c", `${S5}.jsonl`);
+    await ok(cliAgainst(home, port, withKey(KEY_A), ["--assign", transcript]));
+    assert.equal((await cliAgainst(home, port, withKey(KEY_A))).status, 0);
+    assert.deepEqual(rowsBy(backend, KEY_A), [
+      [S5, "2026-09-23", 7, 60, "/work/repo-c"],
+      [S5, now.date, now.hour, 61, "/work/repo-c"],
+    ]);
+  } finally {
+    server.close();
+  }
+});
+
+test("through the daemon, each project's hooks claim and upload only their own session under their own key", async () => {
+  await pastHourEdge();
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  mkdirSync(dataDir, { recursive: true });
+  const { server, port, ...backend } = await fakeBackend();
+  const nowC = liveProject(home, "repo-c", S5, 60);
+  const nowD = liveProject(home, "repo-d", S6, 80);
+  const env = pluginEnv(home, dataDir, port);
+  const daemon = spawn(process.execPath, [DAEMON], { stdio: "ignore", env, cwd: dataDir });
+  const hook = (event, sessionId, key) =>
+    dispatchViaDaemon({
+      event,
+      input: { hook_event_name: event, session_id: sessionId },
+      config: loadConfig({ ...env, ...withKey(key) }),
+    });
+  try {
+    await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
+    await hook("SessionStart", S5, KEY_A);
+    await hook("SessionStart", S6, KEY_B);
+    await hook("Stop", S5, KEY_A);
+    await hook("Stop", S6, KEY_B);
+    await until(settledAt(scopeState(dataDir, port, "org-a"), undefined), "org-a's pass");
+    await until(settledAt(scopeState(dataDir, port, "org-b"), undefined), "org-b's pass");
+    await until(() => backend.posts.length >= 2, "both sessions' rows");
+    assert.deepEqual(rowsBy(backend, KEY_A), [[S5, nowC.date, nowC.hour, 61, "/work/repo-c"]]);
+    assert.deepEqual(rowsBy(backend, KEY_B), [[S6, nowD.date, nowD.hour, 81, "/work/repo-d"]]);
+    assert.equal(backend.posts.length, 2);
+  } finally {
+    daemon.kill("SIGTERM");
+    server.close();
+  }
+});
+
+test("a hook claim made once its key's organization is known is uploaded by that organization's next key", async () => {
+  await pastHourEdge();
+  const backend = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    await assigned(home, backend.port, KEY_A);
+    const now = liveProject(home, "repo-c", S5, 60);
+    const env = { ...pluginEnv(home, path.join(home, "data"), backend.port), ...withKey(KEY_A) };
+    assert.equal(claimSession(loadConfig(env), S5), true);
+    assert.equal(ownerOf(home, S5).org, "org-a");
+
+    await ok(cliAgainst(home, backend.port, withKey(KEY_A2)));
+    const s5 = rowsBy(backend, KEY_A2).filter(([id]) => id === S5);
+    assert.deepEqual(s5, [[S5, now.date, now.hour, 61, "/work/repo-c"]]);
+  } finally {
+    backend.server.close();
+  }
 });

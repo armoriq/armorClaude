@@ -252,8 +252,9 @@ machine depends entirely on whether an ArmorIQ API key is configured:**
   - **Observability execution traces** (spans for planning, policy checks, and tool
     inputs/outputs) — **on by default** in connected mode.
   - **Token usage** per Claude Code session, model and UTC hour, with the repo path and device name,
-    for every session in `~/.claude/projects`, including sessions that ran without ArmorClaude.
-    On by default while observability is on; see below to turn it off.
+    for the sessions in `~/.claude/projects` that belong to the API key's organization (see
+    "Which sessions the token usage sync uploads"). On by default while observability is on; see
+    below to turn it off.
 
   Tool inputs and outputs are passed through secret redaction and parameter sanitization before
   transmission.
@@ -268,12 +269,21 @@ and intent enforcement still work):
 
 Turning off observability also stops the token usage sync.
 
-### Turning off the token usage sync
+### Which sessions the token usage sync uploads
 
 While observability is on, a background sync uploads token counts (per session, model and UTC hour,
-with the repo path and device name) for every Claude Code session in `~/.claude/projects`,
-including sessions that ran without ArmorClaude. It sends no prompts or transcript text. To stop
-it and keep observability traces:
+with the repo path and device name). It sends no prompts or transcript text. A session belongs to
+the organization of the API key its own hooks ran with, from that hour on, and never moves to
+another organization. Older sessions, and sessions that ran without ArmorClaude or with the sync
+off, upload only once assigned with the project's key set:
+
+```bash
+node scripts/usage-sync.mjs --assign ~/.claude/projects/<project directory or session .jsonl>
+```
+
+### Turning off the token usage sync
+
+To stop the sync and keep observability traces:
 
 - **Plugin option:** set `disable_usage_sync: true` in the plugin's userConfig, **or**
 - **Environment variable:** set `ARMORIQ_USAGE_SYNC_DISABLED=true` (also accepts `1` / `yes`).
