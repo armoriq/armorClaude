@@ -57,6 +57,7 @@ import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./too
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
+import { claimNewSession } from "./usage-ownership.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -396,6 +397,7 @@ function pickStepIndex(plan, toolName, toolInput) {
 export async function handleSessionStart(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
+  claimNewSession(config, input);
 
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   upsertSession(runtimeState, sessionId, {

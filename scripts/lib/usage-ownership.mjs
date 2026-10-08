@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { buildAuthHeaders, postJson } from "./common.mjs";
 import { ensurePrivateDirSync, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
@@ -33,6 +33,56 @@ function createClaim(file, claim) {
   } catch (err) {
     if (err?.code === "EEXIST") return false;
     throw err;
+  }
+}
+
+function cachedOrg(dataDir, keyId) {
+  try {
+    const { orgId } = JSON.parse(readFileSync(`${keyBase(dataDir, keyId)}.json`, "utf8"));
+    return typeof orgId === "string" && orgId ? { org: orgId } : {};
+  } catch {
+    return {};
+  }
+}
+
+function hasUsage(file) {
+  let raw;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch (err) {
+    return err?.code !== "ENOENT";
+  }
+  return raw.split("\n").some((line) => {
+    try {
+      const obj = JSON.parse(line);
+      return Boolean(obj?.message?.usage ?? obj?.usage);
+    } catch {
+      return false;
+    }
+  });
+}
+
+const isNewSession = ({ session_id: id, source, transcript_path: file } = {}) =>
+  SESSION_ID.test(String(id)) &&
+  (source === "startup" || source === "clear") &&
+  typeof file === "string" &&
+  path.basename(file) === `${id}.jsonl` &&
+  !hasUsage(file);
+
+/**
+ * Give a session that this SessionStart begins, with no usage in its transcript
+ * yet, to the config's backend and key. A resumed or compacted session, or one
+ * already holding usage, is left for --assign. The first owner is kept for good.
+ */
+export function claimNewSession(config, input) {
+  if (!config?.usageSyncEnabled || !isNewSession(input)) return false;
+  const key = keyIdOf(config);
+  const claim = { backend: backendOrigin(config), key, ...cachedOrg(config.dataDir, key) };
+  try {
+    return createClaim(ownerPath(config.dataDir, input.session_id), claim);
+  } catch (err) {
+    process.stderr.write(`[armorclaude] usage owner claim failed: ${err?.message ?? err}\n`);
+    return false;
   }
 }
 

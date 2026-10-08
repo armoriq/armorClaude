@@ -31,7 +31,12 @@ import {
   launchUsageSync,
   requestUsageSync,
 } from "../scripts/lib/usage-sync-launch.mjs";
-import { scopeIdOf, scopeStatePath } from "../scripts/lib/usage-ownership.mjs";
+import {
+  claimNewSession,
+  keyIdOf,
+  scopeIdOf,
+  scopeStatePath,
+} from "../scripts/lib/usage-ownership.mjs";
 
 const SYNC = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -767,6 +772,8 @@ test("the launcher claims nothing, starts no sync and writes no request while th
     });
     assert.equal(requestUsageSync(cfg, S1), false, name);
     assert.equal(launchUsageSync(cfg, S1), false, name);
+    const start = { session_id: S1, source: "startup", transcript_path: path.join(dataDir, S1) };
+    assert.equal(claimNewSession(cfg, start), false, name);
     assert.equal(existsSync(path.join(dataDir, "usage-sync")), false, name);
     assert.equal(existsSync(path.join(dataDir, "usage-sync.log")), false, name);
   }
@@ -1009,12 +1016,14 @@ const STOP_KEY = "ak_test_usage_sync_stop";
 const KEY_A = "ak_test_usage_sync_org_a";
 const KEY_A2 = "ak_test_usage_sync_org_a_rotated";
 const KEY_B = "ak_test_usage_sync_org_b";
+const KEY_PENDING = "ak_test_usage_sync_org_a_unsynced";
 const ORG = "org-test";
 const ORGS = {
   [KEY]: ORG,
   [STOP_KEY]: ORG,
   [KEY_A]: "org-a",
   [KEY_A2]: "org-a",
+  [KEY_PENDING]: "org-a",
   [KEY_B]: "org-b",
 };
 
@@ -1025,6 +1034,8 @@ const settledAt = (statePath, after) => () =>
   readLastRun(statePath) !== after && !existsSync(`${statePath}.lock`);
 
 const S4 = "bbbbbbbb-0000-4000-8000-000000000004";
+const S5 = "cccccccc-0000-4000-8000-000000000005";
+const S6 = "dddddddd-0000-4000-8000-000000000006";
 
 function addProject(home, repo, sessionId, lines) {
   writeTree(path.join(projectsOf(home), `-work-${repo}`), {
@@ -1113,6 +1124,29 @@ test("a new key of the same organization continues its sessions without re-posti
   }
 });
 
+test("a claim whose key's organization is not known yet is not assigned elsewhere, and its own key pins it", async () => {
+  const { server, port, ...backend } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    const env = { ...pluginEnv(home, path.join(home, "data"), port), ...withKey(KEY_PENDING) };
+    assert.equal(claimNewSession(loadConfig(env), startOf(home, "repo-c", S5)), true);
+    const row = writeTurn(home, "repo-c", S5, 9);
+
+    const taken = await assignProject(home, port, KEY_B, "-work-repo-c");
+    assert.equal(taken.status, 1, taken.stderr);
+    assert.match(taken.stderr, new RegExp(`refused ${S5}`));
+    assert.equal(ownerOf(home, S5).org, undefined);
+
+    await ok(cliAgainst(home, port, withKey(KEY_PENDING)));
+    assert.equal(ownerOf(home, S5).org, "org-a");
+    assert.equal(ownerOf(home, S5).key, keyIdOf(loadConfig(env)));
+    assert.deepEqual(rowsBy(backend, KEY_PENDING), [row]);
+    assert.deepEqual(rowsBy(backend, KEY_B), []);
+  } finally {
+    server.close();
+  }
+});
+
 test("concurrent syncs of two organizations each post their own rows, and a failing one retries without touching the other", async () => {
   let aFails = true;
   const { server, port, ...backend } = await fakeBackend((_, key) =>
@@ -1182,9 +1216,153 @@ test("an API key the backend rejects posts nothing and says why without the key"
   }
 });
 
+const transcriptOf = (home, repo, sessionId) =>
+  path.join(projectsOf(home), `-work-${repo}`, `${sessionId}.jsonl`);
+
+const startOf = (home, repo, sessionId, source = "startup") => ({
+  hook_event_name: "SessionStart",
+  session_id: sessionId,
+  source,
+  transcript_path: transcriptOf(home, repo, sessionId),
+});
+
+const stopOf = (home, repo, sessionId) => ({
+  hook_event_name: "Stop",
+  session_id: sessionId,
+  transcript_path: transcriptOf(home, repo, sessionId),
+});
+
+function writeTurn(home, repo, sessionId, input) {
+  const now = new Date().toISOString();
+  addProject(home, repo, sessionId, [assistant(`${sessionId}-turn`, now, input)]);
+  return [sessionId, now.slice(0, 10), Number(now.slice(11, 13)), input, `/work/${repo}`];
+}
+
+function recentOldTurn(home) {
+  const at = new Date(Date.now() - 60_000).toISOString();
+  append(home, `${S1}.jsonl`, assistant("m-recent", at, 500));
+  return [S1, at.slice(0, 10), Number(at.slice(11, 13)), 500, "/work/repo-a"];
+}
+
 function inProcessHook(env, input) {
   const hook = spawn(process.execPath, [ROUTER], { env });
   const exited = new Promise((resolve) => hook.once("exit", resolve));
   hook.stdin.end(JSON.stringify(input));
   return exited;
 }
+
+const idle = (dataDir, port, org) => () =>
+  readLastRun(scopeState(dataDir, port, org)) !== undefined &&
+  !existsSync(`${scopeState(dataDir, port, org)}.lock`);
+
+test("only a SessionStart that begins a session with no usage yet claims it", () => {
+  const home = fixtureHome();
+  const cfg = loadConfig({ ...pluginEnv(home, path.join(home, "data"), 9), ...withKey(KEY_A) });
+  const claim = (input) => claimNewSession(cfg, input);
+  assert.equal(claim(startOf(home, "repo-a", S1)), false);
+  assert.equal(claim(startOf(home, "repo-c", S5, "resume")), false);
+  assert.equal(claim(startOf(home, "repo-c", S5, "compact")), false);
+  assert.equal(claim({ ...startOf(home, "repo-c", S5), transcript_path: "" }), false);
+  assert.equal(
+    claim({ ...startOf(home, "repo-c", S5), transcript_path: transcriptOf(home, "repo-a", S1) }),
+    false
+  );
+  assert.equal(claim(stopOf(home, "repo-c", S5)), false);
+  assert.equal(claim(startOf(home, "repo-c", S5)), true);
+  assert.equal(claim(startOf(home, "repo-c", S5)), false);
+  assert.equal(claim(startOf(home, "repo-d", S6, "clear")), true);
+});
+
+test("in-process hooks own a new session from its SessionStart, and a resumed old session uploads only after --assign", async () => {
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  mkdirSync(dataDir, { recursive: true });
+  // The daemon exits on startup when profiles is a file, so the hook runs in-process.
+  writeFileSync(path.join(dataDir, "profiles"), "not a directory");
+  const { server, port, ...backend } = await fakeBackend();
+  try {
+    const recent = recentOldTurn(home);
+    const asB = { ...pluginEnv(home, dataDir, port), ...withKey(KEY_B) };
+    assert.equal(await inProcessHook(asB, startOf(home, "repo-a", S1, "resume")), 0);
+    assert.equal(await inProcessHook(asB, stopOf(home, "repo-a", S1)), 0);
+    const asA = { ...pluginEnv(home, dataDir, port), ...withKey(KEY_A) };
+    assert.equal(await inProcessHook(asA, startOf(home, "repo-c", S5)), 0);
+    const row = writeTurn(home, "repo-c", S5, 61);
+    assert.equal(await inProcessHook(asA, stopOf(home, "repo-c", S5)), 0);
+    await until(idle(dataDir, port, "org-b"), "org-b's pass");
+    await until(() => backend.posts.length > 0 && idle(dataDir, port, "org-a")(), "org-a's pass");
+    assert.equal(existsSync(path.join(dataDir, "daemon.sock")), false);
+    assert.deepEqual(rowsBy(backend, KEY_B), []);
+    assert.deepEqual(rowsBy(backend, KEY_A), [row]);
+
+    await ok(
+      cliAgainst(home, port, withKey(KEY_A), ["--assign", transcriptOf(home, "repo-a", S1)])
+    );
+    assert.equal(await inProcessHook(asA, stopOf(home, "repo-c", S5)), 0);
+    const posted = () => rowsBy(backend, KEY_A).some((r) => r[0] === S1 && r[3] === 500);
+    await until(posted, "the assigned session's recent hour");
+    assert.deepEqual(
+      rowsBy(backend, KEY_A).filter((r) => r[1] === recent[1] && r[0] === S1),
+      [recent]
+    );
+    assert.deepEqual(rowsBy(backend, KEY_B), []);
+  } finally {
+    server.close();
+  }
+});
+
+test("through the daemon, each project's new session uploads under its own key, and a resumed old session under none", async () => {
+  const home = fixtureHome();
+  const dataDir = path.join(home, "data");
+  mkdirSync(dataDir, { recursive: true });
+  const { server, port, ...backend } = await fakeBackend();
+  const env = pluginEnv(home, dataDir, port);
+  const daemon = spawn(process.execPath, [DAEMON], { stdio: "ignore", env, cwd: dataDir });
+  const hook = (input, key) =>
+    dispatchViaDaemon({
+      event: input.hook_event_name,
+      input,
+      config: loadConfig({ ...env, ...withKey(key) }),
+    });
+  try {
+    await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
+    recentOldTurn(home);
+    await hook(startOf(home, "repo-a", S1, "resume"), KEY_B);
+    await hook(startOf(home, "repo-c", S5), KEY_A);
+    await hook(startOf(home, "repo-d", S6), KEY_B);
+    const rowC = writeTurn(home, "repo-c", S5, 61);
+    const rowD = writeTurn(home, "repo-d", S6, 81);
+    await hook(stopOf(home, "repo-a", S1), KEY_B);
+    await hook(stopOf(home, "repo-c", S5), KEY_A);
+    await hook(stopOf(home, "repo-d", S6), KEY_B);
+    await until(() => backend.posts.length >= 2, "both new sessions' rows");
+    await until(idle(dataDir, port, "org-a"), "org-a's pass");
+    await until(idle(dataDir, port, "org-b"), "org-b's pass");
+    assert.deepEqual(rowsBy(backend, KEY_A), [rowC]);
+    assert.deepEqual(rowsBy(backend, KEY_B), [rowD]);
+    assert.equal(backend.posts.length, 2);
+  } finally {
+    daemon.kill("SIGTERM");
+    server.close();
+  }
+});
+
+test("a new session claimed once its key's organization is known is uploaded by that organization's next key", async () => {
+  const backend = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    await assigned(home, backend.port, KEY_A);
+    const env = { ...pluginEnv(home, path.join(home, "data"), backend.port), ...withKey(KEY_A) };
+    assert.equal(claimNewSession(loadConfig(env), startOf(home, "repo-c", S5)), true);
+    assert.equal(ownerOf(home, S5).org, "org-a");
+    const row = writeTurn(home, "repo-c", S5, 61);
+
+    await ok(cliAgainst(home, backend.port, withKey(KEY_A2)));
+    assert.deepEqual(
+      rowsBy(backend, KEY_A2).filter(([id]) => id === S5),
+      [row]
+    );
+  } finally {
+    backend.server.close();
+  }
+});
