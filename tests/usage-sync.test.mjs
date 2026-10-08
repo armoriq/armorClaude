@@ -895,3 +895,37 @@ test("a daemon started while the usage sync was off syncs once the calling sessi
     assert.equal(posts.length, 3);
   });
 });
+
+function forkHome(withOriginal) {
+  const home = mkdtempSync(path.join(tmpdir(), "ac-usage-fork-"));
+  const original = [
+    assistant("o1", "2026-09-20T09:00:00Z", 100),
+    assistant("o2", "2026-09-20T09:05:00Z", 200),
+  ];
+  writeTree(path.join(projectsOf(home), "-work-repo-a"), {
+    ...(withOriginal ? { [`${S1}.jsonl`]: original.map((l) => ({ ...l, sessionId: S1 })) } : {}),
+    [`${S2}.jsonl`]: [
+      { ...original[0], sessionId: S1, forkedFrom: { sessionId: S1 } },
+      { ...original[1], sessionId: S1 },
+      { ...assistant("f1", "2026-09-20T09:10:00Z", 7), sessionId: S2 },
+    ],
+  });
+  return home;
+}
+
+test("a fork whose original transcript is gone posts only the lines it wrote", async () => {
+  const home = forkHome(false);
+  const { rows } = await run(home, await loadSyncState(path.join(home, "none.json")));
+  assert.deepEqual(summary(rows), [[S2, "2026-09-20", 9, 7]]);
+});
+
+test("a fork's copied lines never stop its original from counting them", async () => {
+  const home = forkHome(true);
+  const state = await loadSyncState(path.join(home, "none.json"));
+  assert.deepEqual(summary((await run(home, state)).rows), [
+    [S1, "2026-09-20", 9, 300],
+    [S2, "2026-09-20", 9, 7],
+  ]);
+  append(home, `${S1}.jsonl`, { ...assistant("o3", "2026-09-20T09:20:00Z", 1), sessionId: S1 });
+  assert.deepEqual(summary((await run(home, state)).rows), [[S1, "2026-09-20", 9, 301]]);
+});

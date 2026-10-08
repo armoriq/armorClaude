@@ -1,4 +1,4 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { readdir, stat as fsStat } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -21,6 +21,35 @@ async function walkJsonl(dir) {
   return out;
 }
 
+const isCopied = (obj, sessionId) =>
+  Boolean(obj.forkedFrom) || (typeof obj.sessionId === "string" && obj.sessionId !== sessionId);
+
+/**
+ * Message keys (`<message id>:<request id>`, the key summarizeSessionUsageByHour
+ * dedupes on) of the lines a session's main transcript copied from another one.
+ */
+export function copiedMessageKeys(file, sessionId) {
+  let raw;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch {
+    return [];
+  }
+  const keys = [];
+  for (const line of raw.split("\n")) {
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const id = obj?.message?.id;
+    if (typeof id === "string" && isCopied(obj, sessionId))
+      keys.push(`${id}:${obj.requestId ?? ""}`);
+  }
+  return keys;
+}
+
 // Copied lines keep their original timestamps, so a fork and its original start
 // at the same instant. Skip lines marked as copied or stamped with another
 // session's id and take the first line the session wrote itself.
@@ -39,9 +68,7 @@ async function firstOwnTimestampMs(file, sessionId) {
       const ms = typeof obj?.timestamp === "string" ? Date.parse(obj.timestamp) : NaN;
       if (Number.isNaN(ms)) continue;
       if (first === Infinity) first = ms;
-      const copied =
-        obj.forkedFrom || (typeof obj.sessionId === "string" && obj.sessionId !== sessionId);
-      if (!copied) return ms;
+      if (!isCopied(obj, sessionId)) return ms;
     }
   } catch {
     // Unreadable: keep whatever was found; path order breaks the tie.
