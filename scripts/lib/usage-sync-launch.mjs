@@ -36,17 +36,27 @@ export function userStatePath(dataDir, { backend, product, userId }) {
   return path.join(syncBasePath(dataDir), `${id}.json`);
 }
 
-/** True when another user's sync state in this data dir was written after this one's. */
-export function switchedUser(statePath) {
+/**
+ * The UTC hours to skip because another user synced from this data dir after
+ * this user's last sync: strictly after this user's last sync hour ("" when
+ * they never synced here) and strictly before `now`'s hour. Null when nobody did.
+ */
+export function switchWindow(statePath, now = new Date()) {
   const mtime = (file) => statSync(file).mtimeMs;
   try {
-    const own = existsSync(statePath) ? mtime(statePath) : -Infinity;
+    const own = existsSync(statePath) ? mtime(statePath) : null;
     const dir = path.dirname(statePath);
-    return readdirSync(dir).some(
-      (f) => f.endsWith(".json") && f !== path.basename(statePath) && mtime(path.join(dir, f)) > own
+    const switched = readdirSync(dir).some(
+      (f) =>
+        f.endsWith(".json") &&
+        f !== path.basename(statePath) &&
+        mtime(path.join(dir, f)) >= (own ?? -Infinity)
     );
+    if (!switched) return null;
+    const hour = (ms) => new Date(ms).toISOString().slice(0, 13);
+    return { after: own === null ? "" : hour(own), before: hour(now.getTime()) };
   } catch {
-    return false;
+    return null;
   }
 }
 

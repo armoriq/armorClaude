@@ -10,6 +10,7 @@ import {
   readdirSync,
   readFileSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -1066,24 +1067,69 @@ test("after a user switch, B uploads from its login on and A's state is untouche
   }
 });
 
-test("switching back, A uploads from its return on, not the hours in between", async () => {
+test("switching back, A skips only the hours another user had the device", async () => {
   const { server, posts, postedBy, port } = await fakeBackend();
   try {
     const home = fixtureHome();
+    const dataDir = path.join(home, "data");
     const rowsOf = (user) => posts.filter((_, i) => postedBy[i] === userOf(user));
     login(home, port, "ak_test_user_a");
     assert.equal((await cliAgainst(home, port, asLoggedIn)).status, 0);
-    await new Promise((r) => setTimeout(r, 20));
+    const lastSyncA = new Date(Date.now() - 5 * 3_600_000);
+    utimesSync(userState(dataDir, port, "ak_test_user_a"), lastSyncA, lastSyncA);
     login(home, port, "ak_test_user_b");
     assert.equal((await cliAgainst(home, port, asLoggedIn)).status, 0);
 
-    const between = isoIn(-3 * 3_600_000);
-    append(home, `${S2}.jsonl`, assistant("b2", between, 5));
+    const beforeSwitch = isoIn(-6 * 3_600_000);
+    const whileB = isoIn(-3 * 3_600_000);
+    const afterReturn = isoIn(60_000);
+    append(home, `${S2}.jsonl`, assistant("a-late", beforeSwitch, 4));
+    append(home, `${S2}.jsonl`, assistant("b-mid", whileB, 5));
     login(home, port, "ak_test_user_a");
     const back = await cliAgainst(home, port, asLoggedIn);
     assert.equal(back.status, 0, back.stderr);
-    assert.equal(rowsOf("ak_test_user_a").length, 3);
-    assert.match(back.stderr, /uploading from .* UTC on/);
+    const hoursOfA = rowsOf("ak_test_user_a")
+      .slice(3)
+      .map((r) => [r.usageDate, r.usageHour]);
+    assert.deepEqual(hoursOfA, [hourOf(beforeSwitch)]);
+    assert.match(back.stderr, /since .* UTC, skipping the hours in between/);
+
+    append(home, `${S2}.jsonl`, assistant("a-new", afterReturn, 6));
+    const next = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(next.status, 0, next.stderr);
+    const last = rowsOf("ak_test_user_a").at(-1);
+    assert.deepEqual([last.usageDate, last.usageHour], hourOf(afterReturn));
+  } finally {
+    server.close();
+  }
+});
+
+test("switching back, A still posts its own rows that failed before the switch", async () => {
+  let down = true;
+  const { server, posts, postedBy, port } = await fakeBackend(() =>
+    down ? [503, {}] : [200, { ok: true }]
+  );
+  try {
+    const home = fixtureHome();
+    login(home, port, "ak_test_user_a");
+    const failed = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(failed.status, 1, failed.stderr);
+    down = false;
+    login(home, port, "ak_test_user_b");
+    assert.equal((await cliAgainst(home, port, asLoggedIn)).status, 0);
+
+    const before = posts.length;
+    login(home, port, "ak_test_user_a");
+    const back = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(back.status, 0, back.stderr);
+    const posted = posts
+      .slice(before)
+      .filter((_, i) => postedBy[before + i] === userOf("ak_test_user_a"));
+    assert.deepEqual(summary(posted), [
+      [S1, "2026-09-20", 9, 133],
+      [S1, "2026-09-21", 9, 1000],
+      [S2, "2026-09-21", 10, 7],
+    ]);
   } finally {
     server.close();
   }

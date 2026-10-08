@@ -23,15 +23,18 @@ class RecordingSet extends Set {
   }
 }
 
-/** `since` ("YYYY-MM-DDTHH", UTC): hours before it are recorded but never posted. */
-export async function loadSyncState(statePath, { since } = {}) {
+/**
+ * `skip` adds a window of UTC hours ("YYYY-MM-DDTHH", both bounds exclusive)
+ * whose rows are recorded but never posted.
+ */
+export async function loadSyncState(statePath, { skip } = {}) {
   const raw = await readJson(statePath, null);
   const valid = raw?.version === STATE_VERSION && raw.sessions && typeof raw.sessions === "object";
   const state = valid ? raw : { version: STATE_VERSION, sessions: {} };
-  return since ? { ...state, since } : state;
+  const windows = state.skip ?? [];
+  const known = windows.some((w) => w.after === skip?.after && w.before === skip?.before);
+  return skip && !known ? { ...state, skip: [...windows, skip] } : state;
 }
-
-export const currentHour = (now = new Date()) => now.toISOString().slice(0, 13);
 
 async function sessionFiles(mainPath) {
   const files = {};
@@ -91,7 +94,8 @@ function changedHours(usage, prevHours = {}) {
   return { hours, rows };
 }
 
-const dueRows = (rows, since) => (since ? rows.filter((row) => hourKey(row) >= since) : rows);
+const skipped = (hour, windows) => windows.some((w) => hour > w.after && hour < w.before);
+const dueRows = (rows, windows = []) => rows.filter((row) => !skipped(hourKey(row), windows));
 
 function countFailure(failures, failure) {
   const key = `${failure.status ?? ""} ${failure.reason}`;
@@ -199,7 +203,7 @@ export async function syncUsage({
     const prev = state.sessions[file];
     const armored = Boolean(prev?.armored) || isArmored(sessionId);
     const { hours, rows } = changedHours(usage, prev?.hours);
-    const due = dueRows(rows, state.since);
+    const due = dueRows(rows, state.skip);
     const session = { sessionId, repo: usage.repo, armored };
     const { ok, unreachable } = await postRows(post, due, session, report, failures);
     if (unreachable) {
