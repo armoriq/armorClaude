@@ -70,8 +70,9 @@ function childEnv(config) {
 
 /**
  * Start scripts/usage-sync.mjs as a detached process with this config's
- * credentials and data dir, and return without waiting for it. Its stderr goes to usage-sync.log in the data
- * dir. Starts nothing while a live sync for the same key holds its lock.
+ * credentials and data dir, and return without waiting for it. Its stderr
+ * goes to usage-sync.log in the data dir. Starts nothing while a live sync
+ * for the same key holds its lock.
  * Returns false when the config disables the usage sync (no API key,
  * observability off, or `disable_usage_sync` set) or the process could not be
  * started.

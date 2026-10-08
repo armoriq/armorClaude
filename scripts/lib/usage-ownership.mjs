@@ -5,8 +5,6 @@ import path from "node:path";
 import { buildAuthHeaders, postJson } from "./common.mjs";
 import { ensurePrivateDirSync, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
 
-const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
 const digest = (text) => createHash("sha256").update(text).digest("hex").slice(0, 32);
 
 export const backendOrigin = (config) => new URL(config.backendEndpoint).origin;
@@ -15,8 +13,8 @@ export const backendOrigin = (config) => new URL(config.backendEndpoint).origin;
 export const keyIdOf = (config) => digest(`${backendOrigin(config)}\n${config.apiKey}`);
 
 const usageSyncDir = (dataDir) => path.join(dataDir, "usage-sync");
-const ownerPath = (dataDir, sessionId) =>
-  path.join(usageSyncDir(dataDir), "owners", `${sessionId}.json`);
+const ownerPath = (dataDir, transcript) =>
+  path.join(usageSyncDir(dataDir), "owners", `${digest(path.resolve(transcript))}.json`);
 
 export const keyBase = (dataDir, keyId) => path.join(usageSyncDir(dataDir), "keys", keyId);
 
@@ -71,13 +69,11 @@ const listDir = (dir) =>
 
 async function readClaims(dataDir) {
   const dir = path.join(usageSyncDir(dataDir), "owners");
-  const names = await listDir(dir);
   const claims = new Map();
-  for (const name of names) {
-    const sessionId = name.replace(/\.json$/, "");
-    if (!SESSION_ID.test(sessionId)) continue;
+  for (const name of await listDir(dir)) {
     const claim = await readJson(path.join(dir, name), null);
-    if (typeof claim?.backend === "string") claims.set(sessionId, claim);
+    if (typeof claim?.backend !== "string" || typeof claim.file !== "string") continue;
+    if (ownerPath(dataDir, claim.file) === path.join(dir, name)) claims.set(claim.file, claim);
   }
   return claims;
 }
@@ -93,35 +89,38 @@ async function knownOrgs(dataDir) {
   return orgs;
 }
 
-export async function ownedSessions(config, scope, { pin = true } = {}) {
+/** Main transcripts (resolved paths) whose claims belong to the scope's organization. */
+export async function ownedTranscripts(config, scope, { pin = true } = {}) {
   const orgs = await knownOrgs(config.dataDir);
   const owned = new Set();
-  for (const [sessionId, claim] of await readClaims(config.dataDir)) {
+  for (const [transcript, claim] of await readClaims(config.dataDir)) {
     if (claim.backend !== scope.backend) continue;
     const orgId = claim.org ?? orgs.get(claim.key);
     if (orgId !== scope.orgId) continue;
     if (pin && !claim.org)
-      await writeJson(ownerPath(config.dataDir, sessionId), { ...claim, org: orgId });
-    owned.add(sessionId);
+      await writeJson(ownerPath(config.dataDir, transcript), { ...claim, org: orgId });
+    owned.add(transcript);
   }
   return owned;
 }
 
-export async function assignSessions(config, scope, sessionIds) {
+export async function assignTranscripts(config, scope, transcripts) {
   const orgs = await knownOrgs(config.dataDir);
   const claims = await readClaims(config.dataDir);
   const result = { assigned: [], refused: [] };
-  for (const sessionId of sessionIds) {
-    const done = await assignOne(config, scope, sessionId, claims.get(sessionId), orgs);
-    result[done ? "assigned" : "refused"].push(sessionId);
+  for (const transcript of transcripts.map((t) => path.resolve(t))) {
+    const done = await assignOne(config, scope, transcript, claims.get(transcript), orgs);
+    result[done ? "assigned" : "refused"].push(transcript);
   }
   return result;
 }
 
-async function assignOne(config, scope, sessionId, claim, orgs) {
-  const file = ownerPath(config.dataDir, sessionId);
-  if (!claim)
-    return createClaim(file, { backend: scope.backend, key: scope.keyId, org: scope.orgId });
+async function assignOne(config, scope, transcript, claim, orgs) {
+  const file = ownerPath(config.dataDir, transcript);
+  if (!claim) {
+    const owner = { file: transcript, backend: scope.backend, key: scope.keyId, org: scope.orgId };
+    return createClaim(file, owner);
+  }
   const orgId = claim.org ?? orgs.get(claim.key);
   if (claim.backend !== scope.backend || orgId !== scope.orgId) return false;
   if (!claim.org) await writeJson(file, { ...claim, org: orgId });
