@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { rename } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ensurePrivateDir, writePrivateFile } from "./fs-store.mjs";
+import { ensurePrivateDir, PRIVATE_FILE_MODE, writePrivateFile } from "./fs-store.mjs";
+import { forgetJournaled } from "./obs-journal.mjs";
 import {
   claimable,
   claimRecord,
   dropExpired,
   listRecords,
+  processGone,
   readClaimed,
   removeRecord,
 } from "./obs-records.mjs";
@@ -57,8 +59,10 @@ export async function spooledJournal(dataDir, binding) {
   const batches = await Promise.all(
     placed.map((entry) => readClaimed(dir, { claimed: entry.name }))
   );
-  return new Set(batches.flatMap((batch) => (Array.isArray(batch?.journal) ? batch.journal : [])));
+  return new Set(batches.flatMap(journalOf));
 }
+
+const journalOf = (batch) => (Array.isArray(batch?.journal) ? batch.journal : []);
 
 export async function writeSpoolBatch(dataDir, batch) {
   if (!BINDING.test(batch?.binding)) throw new Error("a spooled batch needs its runtime's binding");
@@ -130,6 +134,7 @@ export async function shipSpool(dataDir, binding, runtime, { limit = SHIP_LIMIT,
     };
   }
   const batches = await Promise.all(claimed.map((entry) => readClaimed(dir, entry)));
+  await forgetJournaled(dataDir, batches.flatMap(journalOf));
   const results = await runtime.exportSpooled(batches);
   const round = { skip: skipped, answered: results.some((result) => !KEPT.has(result.status)) };
   const settled = await Promise.all(
@@ -144,4 +149,31 @@ export async function shipSpool(dataDir, binding, runtime, { limit = SHIP_LIMIT,
     more,
     nextDueAt: earliest([nextDueAt, ...settled.map((outcome) => outcome.dueAt)]),
   };
+}
+
+const shipperLock = (dataDir, binding) =>
+  path.join(dataDir, `obs-shipper-${binding.slice(0, 32)}.pid`);
+
+const lockOwner = async (lock) => Number(await readFile(lock, "utf8").catch(() => NaN));
+
+export async function shipperRunning(dataDir, binding) {
+  const pid = await lockOwner(shipperLock(dataDir, binding));
+  return Number.isInteger(pid) && pid > 0 && !processGone(pid);
+}
+
+export async function claimShipper(dataDir, binding) {
+  const lock = shipperLock(dataDir, binding);
+  if (await shipperRunning(dataDir, binding)) return false;
+  await unlink(lock).catch(() => undefined);
+  try {
+    await writeFile(lock, String(process.pid), { flag: "wx", mode: PRIVATE_FILE_MODE });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function releaseShipper(dataDir, binding) {
+  const lock = shipperLock(dataDir, binding);
+  if ((await lockOwner(lock)) === process.pid) await unlink(lock).catch(() => undefined);
 }
