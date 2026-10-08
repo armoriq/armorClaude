@@ -21,7 +21,10 @@ import {
   settledEvents,
 } from "./obs-journal.mjs";
 import {
+  claimShipper,
+  releaseShipper,
   SPOOL_MAX_TRIES,
+  shipperRunning,
   shipRetryDelayMs,
   shipSpool,
   spooledJournal,
@@ -33,7 +36,10 @@ const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
 const HOOK_LEASE_WAIT_MS = 1_500;
 const REPLAY_SESSIONS = 16;
+const SHIPPER_IDLE_MS = 60_000;
+const SHIPPER_POLL_MS = 1_000;
 const LEASE_FETCHER = fileURLToPath(new URL("../obs-lease-fetch.mjs", import.meta.url));
+const SPOOL_SHIPPER = fileURLToPath(new URL("../obs-spool-ship.mjs", import.meta.url));
 
 const sessions = new Map();
 const queues = new Map();
@@ -44,6 +50,7 @@ let shipping = false;
 let testHooks = null;
 let releasingAll = null;
 let journaledHere = false;
+let spooledHere = null;
 
 async function safeObsAsync(fn) {
   try {
@@ -103,6 +110,7 @@ function spoolSink(config, entry) {
         throw err;
       }
       if (dropped) logObs(config, `spool over 8 MiB: dropped its ${dropped} oldest batch(es)`);
+      if (!shipping) spooledHere = entry.binding;
       for (const call of calls) entry.written.add(call);
       await forgetLanded(entry);
       if (shipping) afterSpoolWrite(config, entry);
@@ -327,20 +335,64 @@ async function awaitHookLease(entry, config) {
   if (!answered) await safeObsAsync(async () => fetchLeaseInBackground(config));
 }
 
-function fetchLeaseInBackground({ dataDir, observabilityEndpoint, apiKey }) {
-  const child = spawn(process.execPath, [LEASE_FETCHER], {
+function runInBackground(script, input) {
+  const child = spawn(process.execPath, [script], {
     detached: true,
     stdio: ["pipe", "ignore", "ignore"],
   });
   child.on("error", () => undefined);
   child.stdin.on("error", () => undefined);
-  child.stdin.end(JSON.stringify({ dataDir, observabilityEndpoint, apiKey }));
+  child.stdin.end(JSON.stringify(input));
   child.unref();
+}
+
+function fetchLeaseInBackground({ dataDir, observabilityEndpoint, apiKey }) {
+  runInBackground(LEASE_FETCHER, { dataDir, observabilityEndpoint, apiKey });
 }
 
 export async function obsFetchLease(config) {
   const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
   await safeObsAsync(() => runtime.refreshPolicy());
+}
+
+async function shipSpoolInBackground(config, binding) {
+  if (await shipperRunning(config.dataDir, binding)) return;
+  const { dataDir, observabilityEndpoint, apiKey, observabilityProduct } = config;
+  runInBackground(SPOOL_SHIPPER, { dataDir, observabilityEndpoint, apiKey, observabilityProduct });
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function shipUntilIdle(shipper) {
+  let shippedAt = Date.now();
+  while (Date.now() - shippedAt < SHIPPER_IDLE_MS) {
+    const round = await shipRound(shipper);
+    if (backOff(shipper, round)) {
+      shipper.failures += 1;
+      await sleep(shipRetryDelayMs(shipper.failures));
+      continue;
+    }
+    if (round.settled > 0) [shipper.failures, shippedAt] = [0, Date.now()];
+    if (!round.more || round.settled === 0) await sleep(SHIPPER_POLL_MS);
+  }
+}
+
+export async function obsShipSpool(config) {
+  const runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config));
+  const shipper = {
+    config,
+    dataDir: config.dataDir,
+    binding: runtime.spoolBinding,
+    runtime,
+    skip: new Set(),
+    failures: 0,
+  };
+  if (await claimShipper(shipper.dataDir, shipper.binding)) {
+    await shipUntilIdle(shipper);
+    await releaseShipper(shipper.dataDir, shipper.binding);
+    await shipRound(shipper);
+  }
+  await safeObsAsync(() => runtime.close());
 }
 
 export const __openSessionsForTests = () => sessions.size;
@@ -354,6 +406,7 @@ export function __resetObsForTests() {
   shipping = false;
   releasingAll = null;
   journaledHere = false;
+  spooledHere = null;
 }
 
 export function __setOtelTestHooksForTests(hooks) {
@@ -748,5 +801,8 @@ export async function obsFlush(sessionId, config) {
   if (entry) await releaseSession(entry);
   await journalLostRecords(config);
   if (journaledHere && !shipping) await capJournal({ config });
+  if (spooledHere && !shipping)
+    await safeObsAsync(() => shipSpoolInBackground(config, spooledHere));
   journaledHere = false;
+  spooledHere = null;
 }

@@ -1,11 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { OBS_RECORD_MAX_AGE_MS } from "../scripts/lib/obs-ages.mjs";
 import {
+  claimShipper,
+  releaseShipper,
   SPOOL_MAX_TRIES,
+  shipperRunning,
   shipRetryDelayMs,
   shipSpool,
   spooledJournal,
@@ -239,4 +242,24 @@ test("only placed batches name journal entries, and an unreadable one names none
   place(dataDir, entryName(now, 2, OTHER, 5), batch(["other-key.json"]));
   const named = await spooledJournal(dataDir, BINDING);
   assert.deepEqual([...named].sort(), ["claimed.json", "placed.json"]);
+});
+
+test("one shipper per key holds the lock, a dead one's lock is taken over, and each releases only its own (#209)", async () => {
+  const dataDir = tempDataDir();
+  const lock = path.join(dataDir, `obs-shipper-${BINDING.slice(0, 32)}.pid`);
+  assert.equal(await shipperRunning(dataDir, BINDING), false);
+  assert.equal(await claimShipper(dataDir, BINDING), true);
+  assert.equal(statSync(lock).mode & 0o777, 0o600);
+  assert.equal(await shipperRunning(dataDir, BINDING), true);
+  assert.equal(await claimShipper(dataDir, BINDING), false, "a live shipper keeps its lock");
+  assert.equal(await claimShipper(dataDir, OTHER), true, "another key ships on its own");
+
+  writeFileSync(lock, deadPid());
+  assert.equal(await shipperRunning(dataDir, BINDING), false);
+  await releaseShipper(dataDir, BINDING);
+  assert.ok(readdirSync(dataDir).includes(path.basename(lock)), "not this process's lock");
+  assert.equal(await claimShipper(dataDir, BINDING), true, "a dead shipper's lock is taken");
+  await releaseShipper(dataDir, BINDING);
+  assert.equal(await shipperRunning(dataDir, BINDING), false);
+  assert.ok(!readdirSync(dataDir).includes(path.basename(lock)));
 });

@@ -254,6 +254,9 @@ function dataFiles(dataDir, name = "obs-spool") {
   return existsSync(dir) ? readdirSync(dir) : [];
 }
 
+const shipSpoolInBackground = (dataDir) =>
+  waitFor(() => dataFiles(dataDir).length === 0, 15_000, "the detached shipper to ship the spool");
+
 async function shipSpoolWithDaemon(env, dataDir) {
   await rm(path.join(dataDir, "profiles"), { force: true, recursive: true });
   const daemon = startDaemon(env, dataDir);
@@ -267,7 +270,7 @@ async function shipSpoolWithDaemon(env, dataDir) {
   }
 }
 
-test("a session run entirely on the fallback is one trace under one root that ends completed (#167, #178)", async () => {
+test("a session run entirely on the fallback ships without a daemon as one trace under one root that ends completed (#167, #178, #209)", async () => {
   const backend = await startBackend();
   try {
     const home = await tempDir("aq-home-");
@@ -276,9 +279,8 @@ test("a session run entirely on the fallback is one trace under one root that en
     const env = pluginEnv(home, dataDir, backend.url);
     const session_id = randomUUID();
     await runSession(env, session_id);
+    await shipSpoolInBackground(dataDir);
     assert.ok(!existsSync(path.join(dataDir, "daemon.sock")), "no daemon served these hooks");
-    assert.equal(backend.exportTimes.length, 0, "no hook process exported");
-    await shipSpoolWithDaemon(env, dataDir);
 
     const traces = new Set(backend.exports.map((s) => s.traceId));
     assert.equal(traces.size, 1, "one trace for the session");
@@ -590,7 +592,7 @@ test("the daemon's SessionEnd export lands although it takes longer than 1.5 s (
   }
 });
 
-test("fallback hooks spool their spans without waiting on a 2.5 s export, and a later daemon ships them (#193)", async () => {
+test("fallback hooks spool their spans without waiting on a 2.5 s export, and a detached shipper ships them (#193, #209)", async () => {
   const backend = await startBackend({ exportDelayMs: 2_500 });
   try {
     const home = await tempDir("aq-home-");
@@ -605,13 +607,11 @@ test("fallback hooks spool their spans without waiting on a 2.5 s export, and a 
       assert.equal(code, 0, hook_event_name);
       assert.ok(Date.now() - started < 1_000, `${hook_event_name} took ${Date.now() - started} ms`);
     }
-    assert.equal(backend.exportTimes.length, 0, "no hook process exported");
-    const files = dataFiles(dataDir);
-    assert.ok(files.length > 0, "the hooks spooled their spans");
-    for (const file of files) {
+    for (const file of dataFiles(dataDir)) {
       assert.equal(statSync(path.join(dataDir, "obs-spool", file)).mode & 0o777, 0o600);
     }
-    await shipSpoolWithDaemon(env, dataDir);
+    await shipSpoolInBackground(dataDir);
+    assert.ok(!existsSync(path.join(dataDir, "daemon.sock")), "no daemon served these hooks");
     assert.deepEqual(
       storedSpans(backend.delivered)
         .map((s) => s.name)

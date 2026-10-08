@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { rename } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { ensurePrivateDir, writePrivateFile } from "./fs-store.mjs";
+import { ensurePrivateDir, PRIVATE_FILE_MODE, writePrivateFile } from "./fs-store.mjs";
 import {
   claimable,
   claimRecord,
   dropExpired,
   listRecords,
+  processGone,
   readClaimed,
   removeRecord,
 } from "./obs-records.mjs";
@@ -144,4 +145,31 @@ export async function shipSpool(dataDir, binding, runtime, { limit = SHIP_LIMIT,
     more,
     nextDueAt: earliest([nextDueAt, ...settled.map((outcome) => outcome.dueAt)]),
   };
+}
+
+const shipperLock = (dataDir, binding) =>
+  path.join(dataDir, `obs-shipper-${binding.slice(0, 32)}.pid`);
+
+const lockOwner = async (lock) => Number(await readFile(lock, "utf8").catch(() => NaN));
+
+export async function shipperRunning(dataDir, binding) {
+  const pid = await lockOwner(shipperLock(dataDir, binding));
+  return Number.isInteger(pid) && pid > 0 && !processGone(pid);
+}
+
+export async function claimShipper(dataDir, binding) {
+  const lock = shipperLock(dataDir, binding);
+  if (await shipperRunning(dataDir, binding)) return false;
+  await unlink(lock).catch(() => undefined);
+  try {
+    await writeFile(lock, String(process.pid), { flag: "wx", mode: PRIVATE_FILE_MODE });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function releaseShipper(dataDir, binding) {
+  const lock = shipperLock(dataDir, binding);
+  if ((await lockOwner(lock)) === process.pid) await unlink(lock).catch(() => undefined);
 }
