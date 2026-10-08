@@ -1015,7 +1015,27 @@ function stateFiles(home) {
   return files;
 }
 
-test("each logged-in user syncs from their own state and leaves the other's untouched", async () => {
+const hourOf = (iso) => [iso.slice(0, 10), Number(iso.slice(11, 13))];
+const isoIn = (ms) => new Date(Date.now() + ms).toISOString();
+
+test("a fresh install uploads every earlier session-hour", async () => {
+  const { server, posts, port } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    login(home, port, "ak_test_user_a");
+    const a = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(a.status, 0, a.stderr);
+    assert.deepEqual(summary(posts), [
+      [S1, "2026-09-20", 9, 133],
+      [S1, "2026-09-21", 9, 1000],
+      [S2, "2026-09-21", 10, 7],
+    ]);
+  } finally {
+    server.close();
+  }
+});
+
+test("after a user switch, B uploads from its login on and A's state is untouched", async () => {
   const { server, posts, postedBy, port } = await fakeBackend();
   try {
     const home = fixtureHome();
@@ -1030,16 +1050,40 @@ test("each logged-in user syncs from their own state and leaves the other's unto
     login(home, port, "ak_test_user_b");
     const b = await cliAgainst(home, port, asLoggedIn);
     assert.equal(b.status, 0, b.stderr);
-    assert.match(b.stderr, /2 changed, 2 read; posted 3 session-hour\(s\)/);
-    assert.deepEqual(summary(rowsOf("ak_test_user_b")), summary(rowsOf("ak_test_user_a")));
+    assert.equal(rowsOf("ak_test_user_b").length, 0);
+    assert.match(b.stderr, /uploading from \d{4}-\d{2}-\d{2}T\d{2}:00 UTC on/);
     const afterB = stateFiles(home);
     for (const [file, text] of Object.entries(afterA)) assert.equal(afterB[file], text, file);
     assert.equal(Object.keys(afterB).length, Object.keys(afterA).length + 1);
 
+    const at = isoIn(60_000);
+    append(home, `${S2}.jsonl`, assistant("b1", at, 11));
+    const b2 = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(b2.status, 0, b2.stderr);
+    assert.deepEqual(summary(rowsOf("ak_test_user_b")), [[S2, ...hourOf(at), 11]]);
+  } finally {
+    server.close();
+  }
+});
+
+test("switching back, A uploads from its return on, not the hours in between", async () => {
+  const { server, posts, postedBy, port } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    const rowsOf = (user) => posts.filter((_, i) => postedBy[i] === userOf(user));
     login(home, port, "ak_test_user_a");
-    const again = await cliAgainst(home, port, asLoggedIn);
-    assert.equal(again.status, 0, again.stderr);
-    assert.match(again.stderr, /0 changed, 0 read; posted 0 session-hour\(s\)/);
+    assert.equal((await cliAgainst(home, port, asLoggedIn)).status, 0);
+    await new Promise((r) => setTimeout(r, 20));
+    login(home, port, "ak_test_user_b");
+    assert.equal((await cliAgainst(home, port, asLoggedIn)).status, 0);
+
+    const between = isoIn(-3 * 3_600_000);
+    append(home, `${S2}.jsonl`, assistant("b2", between, 5));
+    login(home, port, "ak_test_user_a");
+    const back = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(back.status, 0, back.stderr);
+    assert.equal(rowsOf("ak_test_user_a").length, 3);
+    assert.match(back.stderr, /uploading from .* UTC on/);
   } finally {
     server.close();
   }
@@ -1085,7 +1129,7 @@ test("a sync running as one user leaves a pass requested with another user's key
     await until(() => posts.length === 1, "user A's first post");
 
     writeTree(path.join(projectsOf(home), "-work-repo-a"), {
-      [`${S4}.jsonl`]: [assistant("n1", "2026-09-22T08:00:00Z", 42)],
+      [`${S4}.jsonl`]: [assistant("n1", isoIn(60_000), 42)],
     });
     login(home, port, "ak_test_user_b");
     const asB = loadConfig({

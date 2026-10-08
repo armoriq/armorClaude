@@ -23,12 +23,13 @@ import { deviceIdentity } from "./lib/device.mjs";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, writeJson } from "./lib/fs-store.mjs";
 import { getSdkClient } from "./lib/intent.mjs";
 import { loadRuntimeState } from "./lib/runtime-state.mjs";
-import { loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
+import { currentHour, loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
 import {
   isAlive,
   keyFingerprint,
   requestedAt,
   requestedFor,
+  switchedUser,
   syncBasePath,
   syncPaths,
   userStatePath,
@@ -97,12 +98,16 @@ async function ownStatePath(config) {
 async function chooseStatePath(config) {
   if (stateIdx >= 0) return { statePath: path.resolve(argv[stateIdx + 1]), fixed: true };
   if (DRY) return { statePath: path.join(config.dataDir, "usage-sync-dry-run.json"), fixed: true };
-  return { statePath: await ownStatePath(config), fixed: false };
+  const statePath = await ownStatePath(config);
+  if (!statePath || !switchedUser(statePath)) return { statePath, fixed: false };
+  const since = currentHour();
+  log(`another user synced from this data dir since, uploading from ${since}:00 UTC on`);
+  return { statePath, fixed: false, since };
 }
 
-async function syncPass({ config, statePath, deadline }) {
+async function syncPass({ config, statePath, since, deadline }) {
   await ensurePrivateDir(path.dirname(statePath));
-  const state = await loadSyncState(statePath);
+  const state = await loadSyncState(statePath, { since });
   const runtime = await loadRuntimeState(config.runtimeFile);
   const { deviceId, deviceName } = deviceIdentity();
   const toBody = (row) => ({ product: config.productSlug, deviceId, deviceName, ...row });
@@ -141,7 +146,7 @@ async function syncPass({ config, statePath, deadline }) {
   if (report.failed) process.exitCode = 1;
 }
 
-async function runPasses({ config, statePath, paths, deadline }) {
+async function runPasses({ config, statePath, since, paths, deadline }) {
   const mine = keyFingerprint(config.apiKey);
   let passStart = -Infinity;
   // A Stop can touch the request marker after the last pass began but see
@@ -156,7 +161,7 @@ async function runPasses({ config, statePath, paths, deadline }) {
       do {
         await debounce(paths.request, deadline);
         passStart = Date.now();
-        await syncPass({ config, statePath, deadline });
+        await syncPass({ config, statePath, since, deadline });
       } while (requestedFor(paths.request, mine) >= passStart && Date.now() < deadline);
     } finally {
       await release();
@@ -178,7 +183,7 @@ async function main() {
     log("usage sync is off (observability disabled or disable_usage_sync set), nothing synced");
     return;
   }
-  const { statePath, fixed } = await chooseStatePath(config);
+  const { statePath, fixed, since } = await chooseStatePath(config);
   if (!statePath) {
     process.exitCode = 1;
     return;
@@ -191,7 +196,7 @@ async function main() {
   }, HARD_STOP_MS);
   hardStop.unref();
   try {
-    await runPasses({ config, statePath, paths, deadline });
+    await runPasses({ config, statePath, since, paths, deadline });
   } finally {
     clearTimeout(hardStop);
   }

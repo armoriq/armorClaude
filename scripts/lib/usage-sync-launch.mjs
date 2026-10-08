@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensurePrivateDirSync, openPrivateSync, writePrivateFileSync } from "./fs-store.mjs";
@@ -34,6 +34,20 @@ export function userStatePath(dataDir, { backend, product, userId }) {
     .digest("hex")
     .slice(0, 32);
   return path.join(syncBasePath(dataDir), `${id}.json`);
+}
+
+/** True when another user's sync state in this data dir was written after this one's. */
+export function switchedUser(statePath) {
+  const mtime = (file) => statSync(file).mtimeMs;
+  try {
+    const own = existsSync(statePath) ? mtime(statePath) : -Infinity;
+    const dir = path.dirname(statePath);
+    return readdirSync(dir).some(
+      (f) => f.endsWith(".json") && f !== path.basename(statePath) && mtime(path.join(dir, f)) > own
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function isAlive(pid) {

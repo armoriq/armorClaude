@@ -23,13 +23,15 @@ class RecordingSet extends Set {
   }
 }
 
-export async function loadSyncState(statePath) {
+/** `since` ("YYYY-MM-DDTHH", UTC): hours before it are recorded but never posted. */
+export async function loadSyncState(statePath, { since } = {}) {
   const raw = await readJson(statePath, null);
-  if (raw?.version === STATE_VERSION && raw.sessions && typeof raw.sessions === "object") {
-    return raw;
-  }
-  return { version: STATE_VERSION, sessions: {} };
+  const valid = raw?.version === STATE_VERSION && raw.sessions && typeof raw.sessions === "object";
+  const state = valid ? raw : { version: STATE_VERSION, sessions: {} };
+  return since ? { ...state, since } : state;
 }
+
+export const currentHour = (now = new Date()) => now.toISOString().slice(0, 13);
 
 async function sessionFiles(mainPath) {
   const files = {};
@@ -88,6 +90,8 @@ function changedHours(usage, prevHours = {}) {
   }
   return { hours, rows };
 }
+
+const dueRows = (rows, since) => (since ? rows.filter((row) => hourKey(row) >= since) : rows);
 
 function countFailure(failures, failure) {
   const key = `${failure.status ?? ""} ${failure.reason}`;
@@ -195,8 +199,9 @@ export async function syncUsage({
     const prev = state.sessions[file];
     const armored = Boolean(prev?.armored) || isArmored(sessionId);
     const { hours, rows } = changedHours(usage, prev?.hours);
+    const due = dueRows(rows, state.since);
     const session = { sessionId, repo: usage.repo, armored };
-    const { ok, unreachable } = await postRows(post, rows, session, report, failures);
+    const { ok, unreachable } = await postRows(post, due, session, report, failures);
     if (unreachable) {
       report.left = changed.length - i;
       break;
