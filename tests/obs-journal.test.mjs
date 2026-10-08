@@ -121,18 +121,19 @@ test("the backlog of one key adopts dead processes' events in order and prunes o
   assert.equal(left.length, 8);
 });
 
-test("an event whose span landed in a written batch is settled although a later write failed (#194)", () => {
+test("an event whose span landed in a written batch is settled although a later write failed (#194, #208)", () => {
   const pending = [
     { file: "landed", failures: 0, call: "policy:toolu_01A" },
     { file: "lost", failures: 0, call: "tool:toolu_01A" },
+    { file: "command", failures: 0, call: "command:00000000-0000-4000-8000-000000000001" },
     { file: "no-call", failures: 0, call: null },
     { file: "after-failure", failures: 1, call: null },
   ];
-  const written = new Set(["policy:toolu_01A"]);
+  const written = new Set(["policy:toolu_01A", "command:00000000-0000-4000-8000-000000000001"]);
   const settled = settledEvents(pending, { sinkFailures: 1, written });
   assert.deepEqual(
     settled.map((item) => item.file),
-    ["landed", "after-failure"]
+    ["landed", "command", "after-failure"]
   );
 });
 

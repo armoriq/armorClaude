@@ -249,6 +249,8 @@ const rootsByEnd = (exports) =>
     .filter((s) => s.name === "armoriq.agent.run")
     .sort((a, b) => (a.endTimeUnixNano < b.endTimeUnixNano ? -1 : 1));
 
+const readyName = (file) => file.replace(/\.claim-\d+$/, "");
+
 function dataFiles(dataDir, name = "obs-spool") {
   const dir = path.join(dataDir, name);
   return existsSync(dir) ? readdirSync(dir) : [];
@@ -1038,43 +1040,32 @@ test("an unwritable spool keeps the journal and says so in daemon.log, and the e
   }
 });
 
-test("a daemon SIGKILLed when a replay writes its first batch stores each replayed slash command once (#208)", async () => {
-  const backend = await startBackend();
+test("the spool batch that carries a slash command's span names the command's journal entry (#208)", async () => {
+  const backend = await startBackend({ holdExports: true });
   const home = await tempDir("aq-home-");
-  const dataDir = await tempDir("aq-commandkill-");
-  const env = pluginEnv(home, dataDir, backend.url);
-  const runtime = new armoriqSdk.ArmorIQTelemetryRuntime({
-    backendEndpoint: backend.url,
-    apiKey: API_KEY,
-    sdkVersion: "test",
-  });
-  const binding = runtime.spoolBinding;
-  await runtime.close();
-  const sessionId = randomUUID();
-  const at = Date.now() - 60_000;
-  const dead = deadPid();
-  const command = { expansion_type: "slash_command", command_name: "review" };
-  for (let i = 0; i < 600; i++) {
-    const input = { session_id: sessionId, hook_event_name: "UserPromptExpansion", ...command };
-    const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
-    placeFile(
-      path.join(dataDir, "obs-journal"),
-      `${at + i}-${i}-${binding}-${id}.json.claim-${dead}`,
-      JSON.stringify({ event: "UserPromptExpansion", at: at + i, id, input })
-    );
-  }
-  const killed = startDaemon(env, dataDir);
+  const dataDir = await tempDir("aq-command-");
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
   try {
-    const batches = () => dataFiles(dataDir).filter((file) => !file.includes(".tmp."));
-    await waitFor(() => batches().length > 0, 20_000, "the first replayed batch");
-    process.kill(killed.child.pid, "SIGKILL");
-    await killed.exited;
-    await shipSpoolWithDaemon(env, dataDir);
-    const commands = storedSpans(backend.delivered).filter((s) => s.name === "command.execute");
-    assert.ok(commands.length >= 600, `${commands.length} of 600 commands stored`);
-    assert.ok(commands.length <= 605, `${commands.length - 600} commands stored twice`);
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    const journaled = () => new Set(dataFiles(dataDir, "obs-journal").map(readyName));
+    await daemonHook(daemon.socketPath, sessionId, "SessionStart");
+    const before = journaled();
+    const command = { expansion_type: "slash_command", command_name: "review" };
+    await daemonHook(daemon.socketPath, sessionId, "UserPromptExpansion", command);
+    const [entry] = [...journaled()].filter((name) => !before.has(name));
+    await daemonHook(daemon.socketPath, sessionId, "Stop");
+    const spool = path.join(dataDir, "obs-spool");
+    const placed = () => dataFiles(dataDir).filter((file) => !file.includes(".tmp."));
+    await waitFor(() => placed().length > 0, 10_000, "the Stop batch");
+    const listed = placed().flatMap(
+      (file) => JSON.parse(readFileSync(path.join(spool, file), "utf8")).journal
+    );
+    assert.ok(entry, "the command was journaled");
+    assert.deepEqual(listed, [entry]);
   } finally {
-    killIfRunning(killed.child);
+    killIfRunning(daemon.child);
+    backend.dropHeldExports();
     await backend.close();
   }
 });

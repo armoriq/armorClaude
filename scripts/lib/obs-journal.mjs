@@ -61,21 +61,20 @@ export async function journalEvent(file, { event, input, output, at, id }) {
   return file;
 }
 
+const toolUseId = ({ input }) => input?.tool_use_id;
 const CALL_KINDS = {
-  PreToolUse: "policy",
-  PostToolUse: "tool",
-  PostToolUseFailure: "tool",
-  UserPromptExpansion: "command",
+  PreToolUse: ["policy", toolUseId],
+  PostToolUse: ["tool", toolUseId],
+  PostToolUseFailure: ["tool", toolUseId],
+  UserPromptExpansion: ["command", (record) => record.id],
 };
 const SPAN_KINDS = new Set(["policy", "command"]);
 
-const callId = ({ event, input, id }) =>
-  event === "UserPromptExpansion" ? id : input?.tool_use_id;
-
 export function eventCall(record) {
+  if (!Object.hasOwn(CALL_KINDS, record.event)) return null;
+  const [kind, callId] = CALL_KINDS[record.event];
   const id = callId(record);
-  if (!Object.hasOwn(CALL_KINDS, record.event) || typeof id !== "string") return null;
-  return `${CALL_KINDS[record.event]}:${id}`;
+  return typeof id === "string" ? `${kind}:${id}` : null;
 }
 
 function spanCall({ attributes }) {
