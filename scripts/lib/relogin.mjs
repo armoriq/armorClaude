@@ -1,11 +1,8 @@
-import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
-import { access, rm } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import path from "node:path";
-import { writePrivateFile } from "./fs-store.mjs";
+import { writePrivateFileSync } from "./fs-store.mjs";
 import { getSession, loadRuntimeState, saveRuntimeState, upsertSession } from "./runtime-state.mjs";
-
-const { isReloginRequired } = armoriqSdk;
 
 export const RELOGIN_NOTICE =
   "ArmorIQ: sign in again to keep sending armorclaude data. Run: armoriq login --product armorclaude --force";
@@ -15,9 +12,12 @@ function markerFile({ dataDir, observabilityEndpoint, apiKey }) {
   return path.join(dataDir, `relogin-required-${binding.slice(0, 16)}`);
 }
 
-export async function noteTelemetryAnswer(config, status, body) {
-  if (isReloginRequired(status, body)) await writePrivateFile(markerFile(config), "");
-  else if (status < 400) await rm(markerFile(config), { force: true });
+export function markReloginRequired(config) {
+  writePrivateFileSync(markerFile(config), "");
+}
+
+export function noteTokenUsageResult(config, result) {
+  if (result?.reloginRequired) markReloginRequired(config);
 }
 
 async function reloginRequired(config) {

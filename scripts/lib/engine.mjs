@@ -41,6 +41,7 @@ import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
 import { NOT_SIGNED_IN } from "./config.mjs";
+import { noteTokenUsageResult } from "./relogin.mjs";
 import { readJson, writePrivateFile } from "./fs-store.mjs";
 import { stat, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -422,6 +423,7 @@ async function reportTokenUsage(input, config, session, sessionId) {
           ...device,
           armored: true,
         });
+        noteTokenUsageResult(config, result);
         if (!result?.ok) allOk = false;
         debugLog(
           config,

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,7 @@ import {
 const { loadProfile } = armoriqSdk;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
+const backfill = path.join(repoRoot, "scripts", "backfill.mjs");
 const golden = JSON.parse(readFileSync(GOLDEN_CREDENTIALS, "utf8")).profiles;
 const LOGIN_KEY = "ak_live_loginprofile00000000000000";
 const RELOGIN_NOTICE =
@@ -107,35 +108,44 @@ const RELOGIN_BODY = {
   reason: "not_personal_workspace",
   message: "This API key can't send tool data. Run: armoriq login --product armorclaude --force",
 };
+const FORBIDDEN_BODY = { statusCode: 403, error: "Forbidden", message: "nope" };
 
-const GRANTED_LEASE = {
-  captureMode: "metadata",
-  contentCaptureAllowed: false,
-  revision: 1,
-  expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+const GRANTED = {
+  lease: {
+    captureMode: "metadata",
+    contentCaptureAllowed: false,
+    revision: 1,
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  },
+  traces: null,
+  tokenUsage: { recorded: 1 },
+};
+const ROUTES = {
+  "/observability/policy/lease": "lease",
+  "/v1/traces": "traces",
+  "/dashboard/token-usage": "tokenUsage",
 };
 
-async function startLeaseBackend(leaseBody) {
-  const keys = [];
+async function startBackend(refusals) {
+  const calls = [];
   const server = createServer((req, res) => {
     req.resume();
     req.on("end", () => {
-      if (req.url === "/observability/policy/lease") {
-        const key = req.headers["x-api-key"];
-        keys.push(key);
-        const body = key === LOGIN_KEY ? leaseBody : GRANTED_LEASE;
-        res.writeHead(body.statusCode ?? 200, { "content-type": "application/json" });
-        res.end(JSON.stringify(body));
-        return;
-      }
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end("{}");
+      const route = ROUTES[req.url];
+      const key = req.headers["x-api-key"];
+      if (route) calls.push({ route, key });
+      const refused = route && key === LOGIN_KEY ? refusals[route] : undefined;
+      const body = refused ?? (route ? GRANTED[route] : {});
+      res.writeHead(refused ? refused.statusCode : route ? 200 : 404, {
+        "content-type": "application/json",
+      });
+      res.end(body === null ? "" : JSON.stringify(body));
     });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
     url: `http://127.0.0.1:${server.address().port}`,
-    keys,
+    calls,
     close: () =>
       new Promise((resolve) => {
         server.closeAllConnections();
@@ -158,18 +168,23 @@ function hookEnv(home, dataDir, backendUrl) {
   };
 }
 
-function runHook(env, payload) {
+function runScript(script, env, stdin) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [hookRouter], { env, stdio: ["pipe", "pipe", "ignore"] });
+    const child = spawn(process.execPath, [script], { env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
+    let stderr = "";
     child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
     child.on("error", reject);
-    child.on("exit", (code) => {
-      const lines = stdout.trim().split("\n").filter(Boolean);
-      resolve({ code, output: lines.length ? JSON.parse(lines.at(-1)) : null });
-    });
-    child.stdin.end(JSON.stringify(payload));
+    child.on("exit", (code) => resolve({ code, stdout, stderr }));
+    child.stdin.end(stdin);
   });
+}
+
+async function runHook(env, payload) {
+  const { code, stdout } = await runScript(hookRouter, env, JSON.stringify(payload));
+  const lines = stdout.trim().split("\n").filter(Boolean);
+  return { code, output: lines.length ? JSON.parse(lines.at(-1)) : null };
 }
 
 async function waitFor(check, timeoutMs, what) {
@@ -202,13 +217,38 @@ async function stopDaemon(dataDir) {
   );
 }
 
-async function notices(env, sessionId, events) {
+function writeTranscript(home, sessionId) {
+  const dir = path.join(home, ".claude", "projects", "-work-project-a");
+  mkdirSync(dir, { recursive: true });
+  const line = {
+    type: "assistant",
+    timestamp: "2026-10-08T10:00:00.000Z",
+    cwd: "/work/project-a",
+    sessionId,
+    message: {
+      id: `m-${sessionId}`,
+      model: "claude-opus-4",
+      usage: {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+    },
+  };
+  const file = path.join(dir, `${sessionId}.jsonl`);
+  writeFileSync(file, `${JSON.stringify(line)}\n`);
+  return file;
+}
+
+async function notices(run, sessionId, events) {
   const shown = [];
   for (const hook_event_name of events) {
-    const { code, output } = await runHook(env, {
+    const { code, output } = await runHook(run.env, {
       session_id: sessionId,
       hook_event_name,
       prompt: "list the files",
+      transcript_path: run.transcript,
     });
     assert.equal(code, 0, hook_event_name);
     shown.push(output?.systemMessage?.includes(RELOGIN_NOTICE) ?? false);
@@ -216,47 +256,78 @@ async function notices(env, sessionId, events) {
   return shown;
 }
 
-async function withRefusingBackend({ daemon, leaseBody }, fn) {
-  const backend = await startLeaseBackend(leaseBody);
+async function withBackend({ daemon, refusals }, fn) {
+  const backend = await startBackend(refusals);
   const home = writeLoginProfiles(tempHome(), [{ backend: backend.url, apiKey: LOGIN_KEY }]);
   const dataDir = tempHome();
   if (!daemon) writeFileSync(path.join(dataDir, "profiles"), "not a directory");
+  const run = {
+    env: hookEnv(home, dataDir, backend.url),
+    home,
+    dataDir,
+    backend,
+    transcript: writeTranscript(home, "s-first"),
+  };
   try {
-    return await fn({ env: hookEnv(home, dataDir, backend.url), home, dataDir, backend });
+    return await fn(run);
   } finally {
     if (daemon) await stopDaemon(dataDir);
     await backend.close();
   }
 }
 
-for (const daemon of [false, true]) {
-  const via = daemon ? "through the daemon" : "without the daemon";
-  test(`a 403 relogin_required on the policy lease prints the sign-in line once per session, ${via}`, async () => {
-    await withRefusingBackend({ daemon, leaseBody: RELOGIN_BODY }, async (run) => {
-      await notices(run.env, "s-first", ["SessionStart"]);
-      await waitFor(() => refusalMarked(run.dataDir), 15_000, "the refused lease");
-      assert.deepEqual([...new Set(run.backend.keys)], [LOGIN_KEY]);
-      const first = await notices(run.env, "s-first", ["UserPromptSubmit", "Stop", "Stop"]);
-      assert.deepEqual(first, [true, false, false]);
-      const second = await notices(run.env, "s-second", ["SessionStart", "Stop"]);
-      assert.deepEqual(second, [true, false]);
+const REFUSALS = {
+  "the policy lease": { lease: RELOGIN_BODY },
+  "the span export": { traces: RELOGIN_BODY },
+  "token usage": { tokenUsage: RELOGIN_BODY },
+};
 
-      writeLoginProfiles(run.home, [
-        { backend: run.backend.url, apiKey: "ak_live_newloginafterforce0000000" },
-      ]);
-      const relogged = await notices(run.env, "s-third", ["SessionStart", "Stop"]);
-      assert.deepEqual(relogged, [false, false], "a new login's key carries no old refusal");
+for (const [what, refusals] of Object.entries(REFUSALS)) {
+  for (const daemon of [false, true]) {
+    const via = daemon ? "through the daemon" : "without the daemon";
+    test(`a 403 relogin_required on ${what} prints the sign-in line once per session, ${via}`, async () => {
+      await withBackend({ daemon, refusals }, async (run) => {
+        const first = await notices(run, "s-first", ["SessionStart", "UserPromptSubmit", "Stop"]);
+        await waitFor(() => refusalMarked(run.dataDir), 30_000, `the refusal on ${what}`);
+        const [route] = Object.keys(refusals);
+        assert.ok(run.backend.calls.some((c) => c.route === route && c.key === LOGIN_KEY));
+        first.push(...(await notices(run, "s-first", ["Stop", "Stop"])));
+        assert.equal(first.filter(Boolean).length, 1, `shown once in s-first: ${first}`);
+        assert.deepEqual(await notices(run, "s-second", ["SessionStart", "Stop"]), [true, false]);
+
+        writeLoginProfiles(run.home, [
+          { backend: run.backend.url, apiKey: "ak_live_newloginafterforce0000000" },
+        ]);
+        const relogged = await notices(run, "s-third", ["SessionStart", "Stop"]);
+        assert.deepEqual(relogged, [false, false], "a new login's key carries no old refusal");
+      });
     });
-  });
+  }
 }
 
-test("a 403 with another error does not print the sign-in line", async () => {
-  const forbidden = { statusCode: 403, error: "Forbidden", message: "nope" };
-  await withRefusingBackend({ daemon: false, leaseBody: forbidden }, async (run) => {
+test("a history sync refused with relogin_required prints the line once and stops", async () => {
+  await withBackend({ daemon: false, refusals: { tokenUsage: RELOGIN_BODY } }, async (run) => {
+    writeTranscript(run.home, "s-other");
+    const { code, stderr } = await runScript(backfill, run.env, "");
+    assert.equal(code, 1);
+    assert.equal(stderr.split(RELOGIN_NOTICE).length - 1, 1, stderr);
+    assert.equal(run.backend.calls.filter((c) => c.route === "tokenUsage").length, 1);
+    assert.ok(refusalMarked(run.dataDir));
+    assert.deepEqual(await notices(run, "s-after-sync", ["SessionStart", "Stop"]), [true, false]);
+  });
+});
+
+test("a 403 with another error on the lease, the span export or token usage prints nothing", async () => {
+  const refusals = { lease: FORBIDDEN_BODY, traces: FORBIDDEN_BODY, tokenUsage: FORBIDDEN_BODY };
+  await withBackend({ daemon: false, refusals }, async (run) => {
     const id = randomUUID();
-    await notices(run.env, id, ["SessionStart"]);
-    await waitFor(() => run.backend.keys.length > 0, 15_000, "the lease request");
-    assert.deepEqual(await notices(run.env, id, ["UserPromptSubmit", "Stop"]), [false, false]);
+    const shown = await notices(run, id, ["SessionStart", "UserPromptSubmit", "Stop", "Stop"]);
+    const sync = await runScript(backfill, run.env, "");
+    assert.ok(!sync.stderr.includes(RELOGIN_NOTICE), sync.stderr);
+    shown.push(...(await notices(run, id, ["Stop"])));
+    assert.deepEqual(shown, [false, false, false, false, false]);
+    assert.ok(run.backend.calls.some((c) => c.route === "lease"));
+    assert.ok(run.backend.calls.some((c) => c.route === "tokenUsage"));
     assert.equal(refusalMarked(run.dataDir), false);
   });
 });

@@ -31,9 +31,9 @@ import {
   writeSpoolBatch,
 } from "./obs-spool.mjs";
 import { claimRootStart, markRootEnded, rootEndedAt } from "./obs-root-marker.mjs";
-import { noteTelemetryAnswer } from "./relogin.mjs";
+import { markReloginRequired } from "./relogin.mjs";
 
-const { ArmorIQTelemetryRuntime, OtelSession, parsePolicyLease } = armoriqSdk;
+const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
 const HOOK_LEASE_WAIT_MS = 1_500;
 const REPLAY_SESSIONS = 16;
@@ -123,18 +123,8 @@ const leaseStoreFor = (config) =>
   obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey);
 
 function dataDirOptions(config, entry, leaseStore = leaseStoreFor(config)) {
-  return entry ? { leaseStore, spanSink: spoolSink(config, entry) } : { leaseStore };
-}
-
-async function fetchPolicyLease(config, signal) {
-  const response = await fetch(`${config.observabilityEndpoint}/observability/policy/lease`, {
-    headers: { "X-API-Key": config.apiKey },
-    signal,
-  });
-  const body = await response.json().catch(() => null);
-  if (config.dataDir) await noteTelemetryAnswer(config, response.status, body);
-  if (!response.ok) throw new Error(`policy lease rejected (${response.status})`);
-  return parsePolicyLease(body);
+  const options = { leaseStore, onReloginRequired: () => markReloginRequired(config) };
+  return entry ? { ...options, spanSink: spoolSink(config, entry) } : options;
 }
 
 function runtimeOptionsFor(config, entry, leaseStore) {
@@ -144,9 +134,9 @@ function runtimeOptionsFor(config, entry, leaseStore) {
     apiKey: config.apiKey,
     sdkVersion,
     options: { serviceName: config.observabilityProduct || "armorclaude" },
-    leaseFetcher: testHooks?.leaseFetcher ?? ((signal) => fetchPolicyLease(config, signal)),
   };
   if (config.dataDir) Object.assign(runtimeOptions, dataDirOptions(config, entry, leaseStore));
+  if (testHooks?.leaseFetcher) runtimeOptions.leaseFetcher = testHooks.leaseFetcher;
   if (testHooks?.tracerProvider) {
     runtimeOptions.options = {
       ...runtimeOptions.options,
