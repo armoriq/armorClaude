@@ -141,8 +141,10 @@ export async function keyOwner(config) {
       config.timeoutMs || 8000
     );
     const userId = res.data?.userId;
-    if (res.ok && typeof userId === "string" && userId) return { ok: true, userId };
-    return { ok: false, reason: `validate-key returned ${res.status}` };
+    if (!res.ok) return { ok: false, reason: `validate-key returned ${res.status}` };
+    if (typeof userId !== "string" || !userId)
+      return { ok: false, reason: "validate-key returned no userId" };
+    return { ok: true, userId };
   } catch (err) {
     return { ok: false, reason: String(err?.message || err) };
   }

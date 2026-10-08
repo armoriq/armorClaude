@@ -26,7 +26,9 @@ import { loadRuntimeState } from "./lib/runtime-state.mjs";
 import { loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
 import {
   isAlive,
+  keyFingerprint,
   requestedAt,
+  requestedFor,
   syncBasePath,
   syncPaths,
   userStatePath,
@@ -92,12 +94,14 @@ async function ownStatePath(config) {
   });
 }
 
-async function syncPass({ config, fixedStatePath, deadline }) {
-  const statePath = fixedStatePath ?? (await ownStatePath(config));
-  if (!statePath) {
-    process.exitCode = 1;
-    return;
-  }
+async function chooseStatePath(config) {
+  if (stateIdx >= 0) return { statePath: path.resolve(argv[stateIdx + 1]), fixed: true };
+  if (DRY) return { statePath: path.join(config.dataDir, "usage-sync-dry-run.json"), fixed: true };
+  return { statePath: await ownStatePath(config), fixed: false };
+}
+
+async function syncPass({ config, statePath, deadline }) {
+  await ensurePrivateDir(path.dirname(statePath));
   const state = await loadSyncState(statePath);
   const runtime = await loadRuntimeState(config.runtimeFile);
   const { deviceId, deviceName } = deviceIdentity();
@@ -137,6 +141,33 @@ async function syncPass({ config, fixedStatePath, deadline }) {
   if (report.failed) process.exitCode = 1;
 }
 
+async function runPasses({ config, statePath, paths, deadline }) {
+  const mine = keyFingerprint(config.apiKey);
+  let passStart = -Infinity;
+  // A Stop can touch the request marker after the last pass began but see
+  // the lock still held, so the marker is checked again once it is released.
+  while (Date.now() < deadline) {
+    const release = await acquireLock(paths.lock);
+    if (!release) {
+      if (passStart === -Infinity) log("another sync holds the lock, skipping");
+      return;
+    }
+    try {
+      do {
+        await debounce(paths.request, deadline);
+        passStart = Date.now();
+        await syncPass({ config, statePath, deadline });
+      } while (requestedFor(paths.request, mine) >= passStart && Date.now() < deadline);
+    } finally {
+      await release();
+    }
+    if (requestedFor(paths.request, mine) < passStart) {
+      if (requestedAt(paths.request) >= passStart) log("a pass was requested for another API key");
+      return;
+    }
+  }
+}
+
 async function main() {
   const config = loadConfig(process.env);
   if (!DRY && !config.apiKey) {
@@ -147,13 +178,12 @@ async function main() {
     log("usage sync is off (observability disabled or disable_usage_sync set), nothing synced");
     return;
   }
-  const fixedStatePath =
-    stateIdx >= 0
-      ? path.resolve(argv[stateIdx + 1])
-      : DRY
-        ? path.join(config.dataDir, "usage-sync-dry-run.json")
-        : null;
-  const paths = syncPaths(fixedStatePath ?? syncBasePath(config.dataDir));
+  const { statePath, fixed } = await chooseStatePath(config);
+  if (!statePath) {
+    process.exitCode = 1;
+    return;
+  }
+  const paths = syncPaths(fixed ? statePath : syncBasePath(config.dataDir));
   const deadline = Date.now() + BUDGET_MS;
   const hardStop = setTimeout(() => {
     log(`still running after ${HARD_STOP_MS}ms, exiting`);
@@ -161,26 +191,7 @@ async function main() {
   }, HARD_STOP_MS);
   hardStop.unref();
   try {
-    let passStart = -Infinity;
-    // A Stop can touch the request marker after the last pass began but see
-    // the lock still held, so the marker is checked again once it is released.
-    while (Date.now() < deadline) {
-      const release = await acquireLock(paths.lock);
-      if (!release) {
-        if (passStart === -Infinity) log("another sync holds the lock, skipping");
-        return;
-      }
-      try {
-        do {
-          await debounce(paths.request, deadline);
-          passStart = Date.now();
-          await syncPass({ config, fixedStatePath, deadline });
-        } while (requestedAt(paths.request) >= passStart && Date.now() < deadline);
-      } finally {
-        await release();
-      }
-      if (requestedAt(paths.request) < passStart) return;
-    }
+    await runPasses({ config, statePath, paths, deadline });
   } finally {
     clearTimeout(hardStop);
   }

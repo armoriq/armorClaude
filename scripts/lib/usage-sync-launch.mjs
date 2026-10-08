@@ -10,7 +10,8 @@ const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", 
 
 /**
  * The lock a running sync holds and the request marker a Stop touches to ask
- * for another pass. One pair per data dir, whichever user's key is in use.
+ * for another pass. Hooks and the daemon use the data dir's pair, whichever
+ * user's key is in use; the marker holds the requesting key's fingerprint.
  */
 export function syncPaths(base) {
   return { lock: `${base}.lock`, request: `${base}.request` };
@@ -20,9 +21,16 @@ export function syncBasePath(dataDir) {
   return path.join(dataDir, "usage-sync");
 }
 
+export function keyFingerprint(apiKey) {
+  return createHash("sha256")
+    .update(apiKey ?? "")
+    .digest("hex")
+    .slice(0, 16);
+}
+
 export function userStatePath(dataDir, { backend, product, userId }) {
   const id = createHash("sha256")
-    .update(JSON.stringify([backend, product, userId]))
+    .update(JSON.stringify([backend.replace(/\/+$/, ""), product, userId]))
     .digest("hex")
     .slice(0, 32);
   return path.join(syncBasePath(dataDir), `${id}.json`);
@@ -53,6 +61,16 @@ export function requestedAt(requestPath) {
   } catch {
     return 0;
   }
+}
+
+/** requestedAt, or 0 when the latest request came from another key. */
+export function requestedFor(requestPath, fingerprint) {
+  try {
+    if (readFileSync(requestPath, "utf8").trim() !== fingerprint) return 0;
+  } catch {
+    return 0;
+  }
+  return requestedAt(requestPath);
 }
 
 function logSize(logPath) {
@@ -122,7 +140,10 @@ export function launchUsageSync(config) {
 export function requestUsageSync(config) {
   if (!config?.usageSyncEnabled) return false;
   try {
-    writePrivateFileSync(syncPaths(syncBasePath(config.dataDir)).request, String(Date.now()));
+    writePrivateFileSync(
+      syncPaths(syncBasePath(config.dataDir)).request,
+      keyFingerprint(config.apiKey)
+    );
   } catch (err) {
     process.stderr.write(`[armorclaude] usage sync request failed: ${err?.message ?? err}\n`);
     return false;

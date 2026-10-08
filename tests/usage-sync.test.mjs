@@ -49,6 +49,7 @@ const ROUTER = path.join(path.dirname(DAEMON), "hook-router.mjs");
 const S1 = "aaaaaaaa-0000-4000-8000-000000000001";
 const S2 = "aaaaaaaa-0000-4000-8000-000000000002";
 const S3 = "aaaaaaaa-0000-4000-8000-000000000003";
+const S4 = "aaaaaaaa-0000-4000-8000-000000000004";
 
 const assistant = (id, timestamp, input, model = "claude-opus") => ({
   type: "assistant",
@@ -537,13 +538,15 @@ function fakeBackend(answer = () => [200, { ok: true }]) {
       if (req.method === "POST" && req.url === "/iap/validate-key") {
         [status, reply] = key?.startsWith("ak_test_unknown")
           ? [401, {}]
-          : [200, { userId: userOf(key) }];
+          : [200, key?.startsWith("ak_test_nouser") ? {} : { userId: userOf(key) }];
       } else if (req.method === "POST" && req.url === "/dashboard/token-usage") {
         posts.push(JSON.parse(body));
         postedBy.push(userOf(key));
-        const answered = answer(posts.at(-1));
-        if (!answered) return req.socket.destroy();
-        [status, reply] = answered;
+        return Promise.resolve(answer(posts.at(-1))).then((answered) => {
+          if (!answered) return req.socket.destroy();
+          res.writeHead(answered[0], { "content-type": "application/json" });
+          res.end(JSON.stringify(answered[1]));
+        });
       }
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(reply));
@@ -704,6 +707,7 @@ test("the sync's log, request marker and state are owner-only, and 0644 ones are
     const mode = (file) => statSync(file).mode & 0o777;
     for (const file of files) assert.equal(mode(file), 0o600, file);
     assert.equal(mode(dataDir), 0o700);
+    assert.equal(mode(path.dirname(statePath)), 0o700);
   } finally {
     server.close();
   }
@@ -1007,7 +1011,7 @@ function stateFiles(home) {
         files[path.relative(home, full)] = readFileSync(full, "utf8");
     }
   };
-  walk(path.join(home, "data"));
+  if (existsSync(path.join(home, "data"))) walk(path.join(home, "data"));
   return files;
 }
 
@@ -1044,17 +1048,71 @@ test("each logged-in user syncs from their own state and leaves the other's unto
 test("a key whose user the backend cannot resolve syncs nothing and writes no state", async () => {
   const { server, posts, port } = await fakeBackend();
   try {
-    const home = fixtureHome();
-    login(home, port, "ak_test_unknown_key");
-    const res = await cliAgainst(home, port, asLoggedIn);
-    assert.equal(res.status, 1);
-    assert.match(
-      res.stderr,
-      /could not resolve the API key's user \(validate-key returned 401\), nothing synced/
-    );
+    for (const [key, reason] of [
+      ["ak_test_unknown_key", "validate-key returned 401"],
+      ["ak_test_nouser_key", "validate-key returned no userId"],
+    ]) {
+      const home = fixtureHome();
+      login(home, port, key);
+      const res = await cliAgainst(home, port, asLoggedIn);
+      assert.equal(res.status, 1, key);
+      assert.ok(
+        res.stderr.includes(`could not resolve the API key's user (${reason}), nothing synced`),
+        res.stderr
+      );
+      assert.deepEqual(stateFiles(home), {}, key);
+    }
     assert.equal(posts.length, 0);
-    assert.deepEqual(stateFiles(home), {});
   } finally {
     server.close();
   }
+});
+
+test("a sync running as one user leaves a pass requested with another user's key to that key", async () => {
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const { server, posts, postedBy, port } = await fakeBackend(async () => {
+    if (posts.length === 1) await gate;
+    return [200, { ok: true }];
+  });
+  try {
+    const home = fixtureHome();
+    const dataDir = path.join(home, "data");
+    const postedAs = (key, sessionId) =>
+      posts.some((row, i) => row.sessionId === sessionId && postedBy[i] === userOf(key));
+    login(home, port, "ak_test_user_a");
+    const a = cliAgainst(home, port, asLoggedIn);
+    await until(() => posts.length === 1, "user A's first post");
+
+    writeTree(path.join(projectsOf(home), "-work-repo-a"), {
+      [`${S4}.jsonl`]: [assistant("n1", "2026-09-22T08:00:00Z", 42)],
+    });
+    login(home, port, "ak_test_user_b");
+    const asB = loadConfig({
+      ...pluginEnv(home, dataDir, port),
+      CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_user_b",
+    });
+    assert.equal(requestUsageSync(asB), true);
+    release();
+
+    const aRes = await a;
+    assert.equal(aRes.status, 0, aRes.stderr);
+    assert.equal(postedAs("ak_test_user_a", S4), false);
+    assert.match(aRes.stderr, /a pass was requested for another API key/);
+
+    const b = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(b.status, 0, b.stderr);
+    assert.equal(postedAs("ak_test_user_b", S4), true);
+  } finally {
+    release();
+    server.close();
+  }
+});
+
+test("a backend URL with a trailing slash keys the same state", () => {
+  const who = { product: "armorclaude", userId: "user-1" };
+  assert.equal(
+    userStatePath("/data", { ...who, backend: "http://127.0.0.1:9/" }),
+    userStatePath("/data", { ...who, backend: "http://127.0.0.1:9" })
+  );
 });
