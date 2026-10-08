@@ -19,7 +19,7 @@ import {
   obsRetryBacklog,
   obsServeAsDaemon,
 } from "../scripts/lib/observability.mjs";
-import { batchCalls, eventCall } from "../scripts/lib/obs-journal.mjs";
+import { batchCalls, eventCall, journalName } from "../scripts/lib/obs-journal.mjs";
 import { shipSpool, writeSpoolBatch } from "../scripts/lib/obs-spool.mjs";
 import { deadPid, placeFile } from "./helpers/obs-files.mjs";
 
@@ -1038,6 +1038,98 @@ test("an unwritable spool keeps the journal and says so in daemon.log, and the e
   }
 });
 
+test("the spool batch that carries a slash command's span names the command's journal entry (#208)", async () => {
+  const backend = await startBackend({ holdExports: true });
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-command-");
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  try {
+    await waitFor(() => existsSync(daemon.socketPath), 20_000, "the daemon socket");
+    const sessionId = randomUUID();
+    const journaled = () => new Set(dataFiles(dataDir, "obs-journal").map(journalName));
+    await daemonHook(daemon.socketPath, sessionId, "SessionStart");
+    const before = journaled();
+    const command = { expansion_type: "slash_command", command_name: "review" };
+    await daemonHook(daemon.socketPath, sessionId, "UserPromptExpansion", command);
+    const [entry] = [...journaled()].filter((name) => !before.has(name));
+    assert.ok(entry, "the command was journaled");
+    await daemonHook(daemon.socketPath, sessionId, "Stop");
+    const spool = path.join(dataDir, "obs-spool");
+    const journalList = (file) => {
+      try {
+        return JSON.parse(readFileSync(path.join(spool, file), "utf8")).journal;
+      } catch {
+        return [];
+      }
+    };
+    let listed = [];
+    const named = () => {
+      listed = dataFiles(dataDir)
+        .filter((file) => !file.includes(".tmp."))
+        .flatMap(journalList);
+      return listed.includes(entry);
+    };
+    await waitFor(named, 10_000, "a batch that names the command's journal entry");
+    assert.deepEqual(listed, [entry]);
+  } finally {
+    killIfRunning(daemon.child);
+    backend.dropHeldExports();
+    await backend.close();
+  }
+});
+
+test("replayed hook events keep their own time, and a tool span lasts the duration_ms Claude Code reported (#221)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-times-");
+  const runtime = new armoriqSdk.ArmorIQTelemetryRuntime({
+    backendEndpoint: backend.url,
+    apiKey: API_KEY,
+    sdkVersion: "test",
+  });
+  const binding = runtime.spoolBinding;
+  await runtime.close();
+  const session_id = randomUUID();
+  const t0 = Date.now() - 3_600_000;
+  const dead = deadPid();
+  const bash = { tool_name: "Bash", tool_use_id: "toolu_01Time" };
+  const command = { expansion_type: "slash_command", command_name: "review" };
+  const events = [
+    ["SessionStart", 0, {}],
+    ["UserPromptExpansion", 500, command, randomUUID()],
+    ["PreToolUse", 1_000, bash],
+    ["PostToolUse", 3_000, { ...bash, duration_ms: 1_200 }],
+    ["Stop", 4_000, {}],
+  ];
+  events.forEach(([event, offset, fields, id], i) => {
+    const at = t0 + offset;
+    const input = { session_id, hook_event_name: event, ...fields };
+    placeFile(
+      path.join(dataDir, "obs-journal"),
+      `${at}-${i}-${binding}-${randomUUID()}.json.claim-${dead}`,
+      JSON.stringify({ event, at, id, input })
+    );
+  });
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  try {
+    const span = (name) => backend.delivered.find((s) => s.name === name);
+    const names = ["command.execute", "armoriq.policy.evaluate", "armoriq.tool"];
+    await waitFor(() => names.every(span), 20_000, "the replayed spans");
+    const ns = (offset) => BigInt(t0 + offset) * 1_000_000n;
+    const [commandSpan, policy, tool] = names.map(span);
+    assert.equal(commandSpan.endTimeUnixNano, ns(500));
+    assert.equal(policy.endTimeUnixNano, ns(1_000));
+    assert.equal(tool.startTimeUnixNano, ns(1_800));
+    assert.equal(tool.endTimeUnixNano, ns(3_000));
+    for (const s of [commandSpan, policy, tool]) {
+      assert.equal(s.attributes["armoriq.timing.provenance"], "reported", s.name);
+    }
+  } finally {
+    killIfRunning(daemon.child);
+    await backend.close();
+  }
+});
+
 test("a replacement daemon serves hooks and ships what the old daemon spooled at shutdown (#190, #194)", async () => {
   const backend = await startBackend({ exportDelayMs: 9_000 });
   const home = await tempDir("aq-home-");
@@ -1485,7 +1577,7 @@ test("a deny-with-hint exports the rule's code and keeps the prompt and tool inp
   }
 });
 
-test("a hook event and the span it records share one call key, so a settled journal knows what landed (#194)", async () => {
+test("a hook event and the span it records share one call key, so a settled journal knows what landed (#194, #208)", async () => {
   const batches = [];
   const runtime = new ArmorIQTelemetryRuntime({
     backendEndpoint: "http://127.0.0.1:9",
@@ -1511,14 +1603,18 @@ test("a hook event and the span it records share one call key, so a settled jour
     const input = { tool_use_id: id };
     events.push({ event: "PreToolUse", input }, { event: "PostToolUse", input });
   }
+  const id = randomUUID();
+  await session.recordOperation({ category: "command", toolName: "review", callId: id });
+  events.push({ event: "UserPromptExpansion", input: { tool_use_id: "toolu_01Call" }, id });
   events.push({ event: "PostToolUseFailure", input: { tool_use_id: "toolu_01None" } });
   await session.close({ status: "ok" });
 
   const landed = new Set(batches.flatMap(batchCalls));
   assert.deepEqual(
     events.map((record) => landed.has(eventCall(record))),
-    [true, true, true, true, false]
+    [true, true, true, true, true, false]
   );
+  assert.equal(eventCall({ event: "UserPromptExpansion", input: {} }), null);
   assert.equal(eventCall({ event: "SessionStart", input: { tool_use_id: "toolu_01Call" } }), null);
 });
 
