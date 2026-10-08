@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { sessionTranscriptPaths, summarizeSessionUsageByHour } from "@armoriq/sdk-dev";
 import { readJson } from "./fs-store.mjs";
-import { classifyTranscripts } from "./transcripts.mjs";
+import { classifyTranscripts, copiedMessageKeys } from "./transcripts.mjs";
 
 const STATE_VERSION = 2;
 
@@ -11,6 +11,15 @@ class RecordingSet extends Set {
   add(key) {
     if (!this.has(key)) this.added.push(key);
     return super.add(key);
+  }
+  withSkipped(keys, fn) {
+    const fresh = keys.filter((key) => !this.has(key));
+    for (const key of fresh) super.add(key);
+    try {
+      return fn();
+    } finally {
+      for (const key of fresh) this.delete(key);
+    }
   }
 }
 
@@ -146,7 +155,8 @@ export async function syncUsage({
     seen.added = [];
     let usage;
     try {
-      usage = summarizeSessionUsageByHour(file, { seen });
+      const copied = copiedMessageKeys(file, sessionId);
+      usage = seen.withSkipped(copied, () => summarizeSessionUsageByHour(file, { seen }));
     } catch (err) {
       report.failed++;
       countFailure(failures, { sessionId, reason: `could not read: ${err?.message ?? err}` });
