@@ -96,6 +96,35 @@ function countFailure(failures, failure) {
   else failures.set(key, { ...failure, count: 1 });
 }
 
+function rowFailure(sessionId, row, result) {
+  return {
+    sessionId,
+    usageDate: row.usageDate,
+    usageHour: row.usageHour,
+    ...(result?.status ? { status: result.status } : {}),
+    ...(result?.unreachable ? { unreachable: true } : {}),
+    reason: result?.reason ?? "no reason given",
+  };
+}
+
+async function postRows(post, rows, session, report, failures) {
+  let ok = true;
+  for (const row of rows) {
+    const { usageDate, usageHour, entries } = row;
+    const result = await post({ ...session, usageDate, usageHour, entries });
+    if (result?.ok) {
+      report.sessionHours++;
+      report.tokens += row.tokens;
+      continue;
+    }
+    ok = false;
+    report.failed++;
+    countFailure(failures, rowFailure(session.sessionId, row, result));
+    if (result?.unreachable) return { ok, unreachable: true };
+  }
+  return { ok, unreachable: false };
+}
+
 /**
  * Post the session-hours that changed since the last run, reading only sessions
  * whose main or subagent transcripts changed size or mtime.
@@ -166,35 +195,8 @@ export async function syncUsage({
     const prev = state.sessions[file];
     const armored = Boolean(prev?.armored) || isArmored(sessionId);
     const { hours, rows } = changedHours(usage, prev?.hours);
-    let ok = true;
-    let unreachable = false;
-    for (const row of rows) {
-      const result = await post({
-        sessionId,
-        usageDate: row.usageDate,
-        usageHour: row.usageHour,
-        repo: usage.repo,
-        entries: row.entries,
-        armored,
-      });
-      if (result?.ok) {
-        report.sessionHours++;
-        report.tokens += row.tokens;
-        continue;
-      }
-      ok = false;
-      report.failed++;
-      unreachable = Boolean(result?.unreachable);
-      countFailure(failures, {
-        sessionId,
-        usageDate: row.usageDate,
-        usageHour: row.usageHour,
-        ...(result?.status ? { status: result.status } : {}),
-        ...(unreachable ? { unreachable } : {}),
-        reason: result?.reason ?? "no reason given",
-      });
-      if (unreachable) break;
-    }
+    const session = { sessionId, repo: usage.repo, armored };
+    const { ok, unreachable } = await postRows(post, rows, session, report, failures);
     if (unreachable) {
       report.left = changed.length - i;
       break;
