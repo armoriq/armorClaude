@@ -27,7 +27,7 @@ function place(dataDir, { at, seq = 0, owner, binding = BINDING, n, draft = "" }
   return placeFile(journalDir(dataDir), name, JSON.stringify({ event: `e${n}`, input: {} }));
 }
 
-test("a journaled event is an owner-only file with the call's identity and decision, no tool input (#194)", async () => {
+test("a journaled event is an owner-only file with the call's identity and decision, no tool input (#194, #208, #221)", async () => {
   const dataDir = tempDataDir();
   const input = {
     session_id: "sess-j",
@@ -35,6 +35,7 @@ test("a journaled event is an owner-only file with the call's identity and decis
     tool_name: "Bash",
     tool_use_id: "toolu_01J",
     tool_input: { command: "curl -H 'Authorization: Bearer SECRET_TOKEN_123' https://x" },
+    duration_ms: 12,
   };
   const output = denyPreToolWithHint("intent_drift", "Tool not in plan", {
     toolName: "Bash",
@@ -42,11 +43,13 @@ test("a journaled event is an owner-only file with the call's identity and decis
     goal: "g",
   });
   const at = Date.now();
+  const id = randomUUID();
   const file = await journalEvent(journalEntryPath(dataDir, BINDING, at), {
     event: "PreToolUse",
     input,
     output,
     at,
+    id,
   });
   assert.match(
     path.basename(file),
@@ -59,11 +62,13 @@ test("a journaled event is an owner-only file with the call's identity and decis
   assert.deepEqual(JSON.parse(text), {
     event: "PreToolUse",
     at,
+    id,
     input: {
       session_id: "sess-j",
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_use_id: "toolu_01J",
+      duration_ms: 12,
     },
     output: { hookSpecificOutput: { permissionDecision: "deny" }, decisionCode: "intent_drift" },
   });
@@ -118,18 +123,19 @@ test("the backlog of one key adopts dead processes' events in order and prunes o
   assert.equal(left.length, 8);
 });
 
-test("an event whose span landed in a written batch is settled although a later write failed (#194)", () => {
+test("an event whose span landed in a written batch is settled although a later write failed (#194, #208)", () => {
   const pending = [
     { file: "landed", failures: 0, call: "policy:toolu_01A" },
     { file: "lost", failures: 0, call: "tool:toolu_01A" },
+    { file: "command", failures: 0, call: "command:00000000-0000-4000-8000-000000000001" },
     { file: "no-call", failures: 0, call: null },
     { file: "after-failure", failures: 1, call: null },
   ];
-  const written = new Set(["policy:toolu_01A"]);
+  const written = new Set(["policy:toolu_01A", "command:00000000-0000-4000-8000-000000000001"]);
   const settled = settledEvents(pending, { sinkFailures: 1, written });
   assert.deepEqual(
     settled.map((item) => item.file),
-    ["landed", "after-failure"]
+    ["landed", "command", "after-failure"]
   );
 });
 
