@@ -1035,6 +1035,7 @@ const S4 = "bbbbbbbb-0000-4000-8000-000000000004";
 const S5 = "cccccccc-0000-4000-8000-000000000005";
 const S6 = "dddddddd-0000-4000-8000-000000000006";
 const S7 = "eeeeeeee-0000-4000-8000-000000000007";
+const S8 = "ffffffff-0000-4000-8000-000000000008";
 
 function addProject(home, repo, sessionId, lines) {
   writeTree(path.join(projectsOf(home), `-work-${repo}`), {
@@ -1288,6 +1289,13 @@ test("only a SessionStart that begins a session with no usage yet claims it", ()
     [`${S7}/subagents/agent-e.jsonl`]: [assistant("e1", "2026-09-23T07:00:00Z", 300)],
   });
   assert.equal(claim(startOf(home, "repo-e", S7)), false);
+  const dotdot = path.join(projectsOf(home), "-work-missing", "..", "-work-repo-a", `${S1}.jsonl`);
+  assert.equal(claim({ ...startOf(home, "repo-a", S1), transcript_path: dotdot }), false);
+  const payload = { usage: { input_tokens: 400, output_tokens: 0 }, model: "gpt-5", id: "p1" };
+  writeTree(path.join(projectsOf(home), "-work-repo-f"), {
+    [`${S8}.jsonl`]: [{ type: "assistant", timestamp: "2026-09-23T07:00:00Z", payload }],
+  });
+  assert.equal(claim(startOf(home, "repo-f", S8)), false);
   assert.equal(claim(startOf(home, "repo-c", S5)), true);
   assert.equal(claim(startOf(home, "repo-c", S5)), false);
   assert.equal(claim(startOf(home, "repo-d", S6, "clear")), true);

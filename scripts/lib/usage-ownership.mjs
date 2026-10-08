@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { sessionTranscriptPaths } from "@armoriq/sdk-dev";
+import { summarizeSessionUsageByHour } from "@armoriq/sdk-dev";
 import { buildAuthHeaders, postJson } from "./common.mjs";
 import { ensurePrivateDirSync, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
 
@@ -46,29 +46,11 @@ function cachedOrg(dataDir, keyId) {
   }
 }
 
-function fileHasUsage(file) {
-  let raw;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch (err) {
-    return err?.code !== "ENOENT";
-  }
-  return raw.split("\n").some((line) => {
-    try {
-      const obj = JSON.parse(line);
-      return Boolean(obj?.message?.usage ?? obj?.usage);
-    } catch {
-      return false;
-    }
-  });
-}
-
 const isNewSession = ({ session_id: id, source, transcript_path: file } = {}) =>
   SESSION_ID.test(String(id)) &&
   (source === "startup" || source === "clear") &&
   typeof file === "string" &&
-  path.basename(file) === `${id}.jsonl` &&
-  !sessionTranscriptPaths(file).some(fileHasUsage);
+  path.basename(file) === `${id}.jsonl`;
 
 /**
  * Give the transcript of a session this SessionStart begins, with no usage in
@@ -78,10 +60,11 @@ const isNewSession = ({ session_id: id, source, transcript_path: file } = {}) =>
  */
 export function claimNewSession(config, input) {
   if (!config?.usageSyncEnabled || !isNewSession(input)) return false;
-  const key = keyIdOf(config);
   const file = path.resolve(input.transcript_path);
+  const key = keyIdOf(config);
   const claim = { file, backend: backendOrigin(config), key, ...cachedOrg(config.dataDir, key) };
   try {
+    if (summarizeSessionUsageByHour(file).hours.length > 0) return false;
     return createClaim(ownerPath(config.dataDir, file), claim);
   } catch (err) {
     process.stderr.write(`[armorclaude] usage owner claim failed: ${err?.message ?? err}\n`);
