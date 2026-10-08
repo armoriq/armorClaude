@@ -20,6 +20,7 @@ const INPUT_FIELDS = [
   "tool_use_id",
   "expansion_type",
   "command_name",
+  "duration_ms",
 ];
 let sequence = 0;
 

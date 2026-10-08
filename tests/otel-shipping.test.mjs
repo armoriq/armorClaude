@@ -1070,6 +1070,58 @@ test("the spool batch that carries a slash command's span names the command's jo
   }
 });
 
+test("replayed hook events keep their own time, and a tool span lasts the duration_ms Claude Code reported (#221)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-times-");
+  const runtime = new armoriqSdk.ArmorIQTelemetryRuntime({
+    backendEndpoint: backend.url,
+    apiKey: API_KEY,
+    sdkVersion: "test",
+  });
+  const binding = runtime.spoolBinding;
+  await runtime.close();
+  const session_id = randomUUID();
+  const t0 = Date.now() - 3_600_000;
+  const dead = deadPid();
+  const bash = { tool_name: "Bash", tool_use_id: "toolu_01Time" };
+  const command = { expansion_type: "slash_command", command_name: "review" };
+  const events = [
+    ["SessionStart", 0, {}],
+    ["UserPromptExpansion", 500, command, randomUUID()],
+    ["PreToolUse", 1_000, bash],
+    ["PostToolUse", 3_000, { ...bash, duration_ms: 1_200 }],
+    ["Stop", 4_000, {}],
+  ];
+  events.forEach(([event, offset, fields, id], i) => {
+    const at = t0 + offset;
+    const input = { session_id, hook_event_name: event, ...fields };
+    placeFile(
+      path.join(dataDir, "obs-journal"),
+      `${at}-${i}-${binding}-${randomUUID()}.json.claim-${dead}`,
+      JSON.stringify({ event, at, id, input })
+    );
+  });
+  const daemon = startDaemon(pluginEnv(home, dataDir, backend.url), dataDir);
+  try {
+    const span = (name) => backend.delivered.find((s) => s.name === name);
+    const names = ["command.execute", "armoriq.policy.evaluate", "armoriq.tool"];
+    await waitFor(() => names.every(span), 20_000, "the replayed spans");
+    const ns = (offset) => BigInt(t0 + offset) * 1_000_000n;
+    const [commandSpan, policy, tool] = names.map(span);
+    assert.equal(commandSpan.endTimeUnixNano, ns(500));
+    assert.equal(policy.endTimeUnixNano, ns(1_000));
+    assert.equal(tool.startTimeUnixNano, ns(1_800));
+    assert.equal(tool.endTimeUnixNano, ns(3_000));
+    for (const s of [commandSpan, policy, tool]) {
+      assert.equal(s.attributes["armoriq.timing.provenance"], "reported", s.name);
+    }
+  } finally {
+    killIfRunning(daemon.child);
+    await backend.close();
+  }
+});
+
 test("a replacement daemon serves hooks and ships what the old daemon spooled at shutdown (#190, #194)", async () => {
   const backend = await startBackend({ exportDelayMs: 9_000 });
   const home = await tempDir("aq-home-");

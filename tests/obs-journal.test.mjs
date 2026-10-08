@@ -27,7 +27,7 @@ function place(dataDir, { at, seq = 0, owner, binding = BINDING, n, draft = "" }
   return placeFile(journalDir(dataDir), name, JSON.stringify({ event: `e${n}`, input: {} }));
 }
 
-test("a journaled event is an owner-only file with the call's identity and decision, no tool input (#194, #208)", async () => {
+test("a journaled event is an owner-only file with the call's identity and decision, no tool input (#194, #208, #221)", async () => {
   const dataDir = tempDataDir();
   const input = {
     session_id: "sess-j",
@@ -35,6 +35,7 @@ test("a journaled event is an owner-only file with the call's identity and decis
     tool_name: "Bash",
     tool_use_id: "toolu_01J",
     tool_input: { command: "curl -H 'Authorization: Bearer SECRET_TOKEN_123' https://x" },
+    duration_ms: 12,
   };
   const output = denyPreToolWithHint("intent_drift", "Tool not in plan", {
     toolName: "Bash",
@@ -67,6 +68,7 @@ test("a journaled event is an owner-only file with the call's identity and decis
       hook_event_name: "PreToolUse",
       tool_name: "Bash",
       tool_use_id: "toolu_01J",
+      duration_ms: 12,
     },
     output: { hookSpecificOutput: { permissionDecision: "deny" }, decisionCode: "intent_drift" },
   });

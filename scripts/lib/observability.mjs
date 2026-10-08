@@ -377,22 +377,27 @@ function toolCall(input, config) {
   return { toolName, toolCallId, arguments: sanitizeParams(input.tool_input, config.sanitize) };
 }
 
-async function obsCheck(entry, config, { input, output }) {
+const eventTime = (at) => ({ endTime: new Date(at) });
+
+async function obsCheck(entry, config, { input, output, at }) {
   const code = output?.[DECISION_CODE];
-  await entry.session.recordPolicy(toolCall(input, config), {
-    decision: classifyDecision(output),
-    ...(code ? { policyReasonCode: code } : {}),
-  });
+  await entry.session.recordPolicy(
+    toolCall(input, config),
+    { decision: classifyDecision(output), ...(code ? { policyReasonCode: code } : {}) },
+    eventTime(at)
+  );
 }
 
-async function obsReport(entry, config, { input }, outcome) {
+async function obsReport(entry, config, { input, at }, outcome) {
   const call = toolCall(input, config);
   await entry.session.recordTool(
     { ...call, operation: { category: operationCategory(call.toolName) } },
     {
       outcome,
+      durationMs: input.duration_ms,
       result: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
-    }
+    },
+    eventTime(at)
   );
 }
 
@@ -417,13 +422,16 @@ function expandedSlashCommand(input) {
 }
 
 // The SDK accepts only tool names that start alphanumeric.
-async function obsSlashCommand(entry, command, callId) {
-  await entry.session.recordOperation({
-    category: "command",
-    name: "command.execute",
-    toolName: command.replace(/^\//, ""),
-    callId,
-  });
+async function obsSlashCommand(entry, command, { id, at }) {
+  await entry.session.recordOperation(
+    {
+      category: "command",
+      name: "command.execute",
+      toolName: command.replace(/^\//, ""),
+      callId: id,
+    },
+    eventTime(at)
+  );
 }
 
 function connectedInput(config) {
@@ -718,7 +726,7 @@ async function applyEvent(entry, record, config) {
   switch (record.event) {
     case "UserPromptExpansion": {
       const slash = expandedSlashCommand(record.input);
-      if (slash) await obsSlashCommand(entry, slash, record.id);
+      if (slash) await obsSlashCommand(entry, slash, record);
       break;
     }
     case "PreToolUse":
