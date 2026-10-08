@@ -1,7 +1,14 @@
+import armoriqSdk from "@armoriq/sdk-dev";
 import { homedir } from "node:os";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean } from "./common.mjs";
+
+const { loadProfile } = armoriqSdk;
+
+const PRODUCT = "armorclaude";
+
+export const NOT_SIGNED_IN = `ArmorIQ: not signed in. Run: armoriq login --product ${PRODUCT}`;
 
 /**
  * Read a config value from CLAUDE_PLUGIN_OPTION_* (injected by Claude Code
@@ -12,19 +19,6 @@ function pluginOpt(env, pluginKey, legacyKey) {
   if (pluginVal) return pluginVal;
   if (legacyKey) return env[legacyKey]?.trim() || "";
   return "";
-}
-
-const PRODUCT = "armorclaude";
-
-function trimSlashes(url) {
-  return typeof url === "string" ? url.replace(/\/+$/, "") : "";
-}
-
-function savedLoginScope(creds) {
-  return {
-    product: typeof creds?.product === "string" ? creds.product : "",
-    backend: trimSlashes(creds?.backend),
-  };
 }
 
 function normalizeArmoriqEnv(value) {
@@ -40,7 +34,9 @@ function normalizeArmoriqEnv(value) {
 /**
  * armorClaude config — main branch (production).
  *
- *   userConfig (plugin UI)  → api_key only
+ *   API key and org         → the armorclaude profile `armoriq login` saved
+ *                             for this backend, nothing else
+ *   userConfig (plugin UI)  → default_template, disable_observability
  *   env vars                → paths + debug
  *   everything else         → hardcoded to the tested-good default
  *
@@ -87,12 +83,11 @@ export function loadConfig(env = process.env) {
         : "https://iap-staging.armoriq.ai";
   const useProduction = activeEnv === "production";
 
-  // ── userConfig fields. UI primary, legacy env fallback. ──
-  let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
+  const profile = loadProfile({ backend: backendEndpoint, product: PRODUCT });
+  let apiKey = profile?.apiKey ?? "";
+  const orgId = profile?.orgId ?? "";
   // Optional default policy template applied (staged for confirm) on first run.
   const defaultTemplate = pluginOpt(env, "DEFAULT_TEMPLATE");
-  let orgId = env.ARMORIQ_ORG_ID?.trim() || "";
-  let ignoredSavedCredential = null;
 
   // Observability is ON by default. Users can opt out via the
   // `disable_observability` plugin option or the ARMORIQ_OBSERVABILITY_DISABLED
@@ -101,20 +96,6 @@ export function loadConfig(env = process.env) {
     pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORIQ_OBSERVABILITY_DISABLED"),
     false
   );
-  try {
-    const creds = JSON.parse(
-      readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
-    );
-    const scope = savedLoginScope(creds);
-    if (scope.product === PRODUCT && scope.backend === trimSlashes(backendEndpoint)) {
-      if (!apiKey && typeof creds?.apiKey === "string") apiKey = creds.apiKey;
-      if (!orgId && typeof creds?.orgId === "string") orgId = creds.orgId;
-    } else if (typeof creds?.apiKey === "string") {
-      ignoredSavedCredential = scope;
-    }
-  } catch {
-    // no credentials file — local-only mode
-  }
 
   // A key is only usable if it matches the @armoriq/sdk key format
   // (ak_test_/ak_live_/ak_claw_). Anything else — empty, or a stale/old-format
@@ -153,8 +134,8 @@ export function loadConfig(env = process.env) {
     observabilityEndpoint: backendEndpoint,
     observabilityProduct: "armorclaude",
 
-    // userConfig-driven credential (see effectiveApiKey above: a bad-format key
-    // is dropped, and local mock substitutes an SDK-accepted placeholder).
+    // The login profile's key (see effectiveApiKey above: a bad-format key is
+    // dropped, and local mock substitutes an SDK-accepted placeholder).
     apiKey: effectiveApiKey,
     orgId,
     auditEnabled: Boolean(effectiveApiKey),
@@ -171,7 +152,6 @@ export function loadConfig(env = process.env) {
     // Drives the SessionStart setup banner.
     unconfigured: !connected,
     hadUnusableKey,
-    ignoredSavedCredential,
     auditWal: true,
     autoReanchor: true,
     autoRevokeOnEnd: true,

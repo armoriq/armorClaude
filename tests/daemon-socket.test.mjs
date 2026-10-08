@@ -14,6 +14,7 @@ import {
   prepareSocketDir,
 } from "../scripts/lib/daemon-socket.mjs";
 import { pingDaemon } from "../scripts/lib/daemon-client.mjs";
+import { tempHome } from "./helpers/login-profile.mjs";
 
 const daemonScript = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -53,8 +54,7 @@ test("a daemon whose data dir is too long for sun_path still serves, on the shor
     ARMORCLAUDE_DATA_DIR: dataDir,
     ARMORCLAUDE_RUNTIME_FILE: path.join(dataDir, "runtime.json"),
     ARMORCLAUDE_POLICY_FILE: path.join(dataDir, "policy.json"),
-    ARMORIQ_API_KEY: "",
-    CLAUDE_PLUGIN_OPTION_API_KEY: "invalid-test-key",
+    HOME: tempHome(),
   };
   const child = spawn(process.execPath, [daemonScript], { env, stdio: "ignore", cwd: dataDir });
   const exited = new Promise((resolve) => child.once("exit", resolve));

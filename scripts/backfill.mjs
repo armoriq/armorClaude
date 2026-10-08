@@ -71,9 +71,7 @@ async function post(config, body) {
 async function main() {
   const config = loadConfig(process.env);
   if (!config.apiKey) {
-    console.error(
-      "[backfill] no API key. Set ARMORIQ_API_KEY or ~/.armoriq/credentials.json first."
-    );
+    console.error("[backfill] not signed in. Run: armoriq login --product armorclaude");
     process.exit(1);
   }
   console.error(
