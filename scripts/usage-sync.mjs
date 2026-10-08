@@ -24,13 +24,13 @@ import { ensurePrivateDir, PRIVATE_FILE_MODE, writeJson } from "./lib/fs-store.m
 import { confirmHistory, historyRequest, startHistory } from "./lib/history-request.mjs";
 import { getSdkClient } from "./lib/intent.mjs";
 import { loadRuntimeState } from "./lib/runtime-state.mjs";
-import { currentHour, loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
+import { loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
 import {
   isAlive,
   keyFingerprint,
   requestedAt,
   requestedFor,
-  switchedUser,
+  switchWindow,
   syncBasePath,
   syncPaths,
   userStatePath,
@@ -102,15 +102,19 @@ async function chooseStatePath(config) {
   const statePath = await ownStatePath(config);
   const history = statePath && (await historyRequest(config, deviceIdentity().deviceId, log));
   if (history) return { statePath, fixed: false, history };
-  if (!statePath || !switchedUser(statePath)) return { statePath, fixed: false };
-  const since = currentHour();
-  log(`another user synced from this data dir since, uploading from ${since}:00 UTC on`);
-  return { statePath, fixed: false, since };
+  const skip = statePath && switchWindow(statePath);
+  if (!skip) return { statePath, fixed: false };
+  log(
+    skip.after
+      ? `another user synced from this data dir since ${skip.after}:00 UTC, skipping the hours in between`
+      : `another user synced from this data dir, uploading from ${skip.before}:00 UTC on`
+  );
+  return { statePath, fixed: false, skip };
 }
 
-async function syncPass({ config, statePath, since, history, deadline }) {
+async function syncPass({ config, statePath, skip, history, deadline }) {
   await ensurePrivateDir(path.dirname(statePath));
-  const state = await loadSyncState(statePath, { since });
+  const state = await loadSyncState(statePath, { skip });
   if (startHistory(state, history))
     log("the dashboard asked for this device's earlier history, uploading all of it");
   const runtime = await loadRuntimeState(config.runtimeFile);
@@ -152,7 +156,7 @@ async function syncPass({ config, statePath, since, history, deadline }) {
   if (report.failed) process.exitCode = 1;
 }
 
-async function runPasses({ config, statePath, since, history, paths, deadline }) {
+async function runPasses({ config, statePath, skip, history, paths, deadline }) {
   const mine = keyFingerprint(config.apiKey);
   let passStart = -Infinity;
   // A Stop can touch the request marker after the last pass began but see
@@ -167,7 +171,7 @@ async function runPasses({ config, statePath, since, history, paths, deadline })
       do {
         await debounce(paths.request, deadline);
         passStart = Date.now();
-        await syncPass({ config, statePath, since, history, deadline });
+        await syncPass({ config, statePath, skip, history, deadline });
       } while (requestedFor(paths.request, mine) >= passStart && Date.now() < deadline);
     } finally {
       await release();
@@ -189,7 +193,7 @@ async function main() {
     log("usage sync is off (observability disabled or disable_usage_sync set), nothing synced");
     return;
   }
-  const { statePath, fixed, since, history } = await chooseStatePath(config);
+  const { statePath, fixed, skip, history } = await chooseStatePath(config);
   if (!statePath) {
     process.exitCode = 1;
     return;
@@ -202,7 +206,7 @@ async function main() {
   }, HARD_STOP_MS);
   hardStop.unref();
   try {
-    await runPasses({ config, statePath, since, history, paths, deadline });
+    await runPasses({ config, statePath, skip, history, paths, deadline });
   } finally {
     clearTimeout(hardStop);
   }
