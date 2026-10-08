@@ -244,6 +244,31 @@ test("only placed batches name journal entries, and an unreadable one names none
   assert.deepEqual([...named].sort(), ["claimed.json", "placed.json"]);
 });
 
+test("shipping a batch first deletes the journal entries it names, so no later replay records them again (#209)", async () => {
+  const dataDir = tempDataDir();
+  const now = Date.now();
+  const journal = path.join(dataDir, "obs-journal");
+  const ready = (n) => `${now - 10}-${n}-${BINDING}-${UUID.slice(0, -1)}${n}.json`;
+  placeFile(journal, `${ready(1)}.claim-${deadPid()}`);
+  placeFile(journal, ready(2));
+  placeFile(journal, ready(3));
+  const batch = JSON.stringify({
+    version: 1,
+    binding: BINDING,
+    spans: [],
+    journal: [ready(1), ready(2)],
+  });
+  place(dataDir, entryName(now, batch.length), batch);
+  let leftAtExport;
+  const runtime = fakeRuntime(() => {
+    leftAtExport ??= readdirSync(journal).sort();
+    return "acknowledged";
+  });
+  await shipSpool(dataDir, BINDING, runtime);
+  assert.deepEqual(leftAtExport, [ready(3)]);
+  assert.deepEqual(listed(dataDir), []);
+});
+
 test("one shipper per key holds the lock, a dead one's lock is taken over, and each releases only its own (#209)", async () => {
   const dataDir = tempDataDir();
   const lock = path.join(dataDir, `obs-shipper-${BINDING.slice(0, 32)}.pid`);

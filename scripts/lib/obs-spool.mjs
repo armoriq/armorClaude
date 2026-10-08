@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, writePrivateFile } from "./fs-store.mjs";
+import { forgetJournaled } from "./obs-journal.mjs";
 import {
   claimable,
   claimRecord,
@@ -58,8 +59,10 @@ export async function spooledJournal(dataDir, binding) {
   const batches = await Promise.all(
     placed.map((entry) => readClaimed(dir, { claimed: entry.name }))
   );
-  return new Set(batches.flatMap((batch) => (Array.isArray(batch?.journal) ? batch.journal : [])));
+  return new Set(batches.flatMap(journalOf));
 }
+
+const journalOf = (batch) => (Array.isArray(batch?.journal) ? batch.journal : []);
 
 export async function writeSpoolBatch(dataDir, batch) {
   if (!BINDING.test(batch?.binding)) throw new Error("a spooled batch needs its runtime's binding");
@@ -131,6 +134,7 @@ export async function shipSpool(dataDir, binding, runtime, { limit = SHIP_LIMIT,
     };
   }
   const batches = await Promise.all(claimed.map((entry) => readClaimed(dir, entry)));
+  await forgetJournaled(dataDir, batches.flatMap(journalOf));
   const results = await runtime.exportSpooled(batches);
   const round = { skip: skipped, answered: results.some((result) => !KEPT.has(result.status)) };
   const settled = await Promise.all(
