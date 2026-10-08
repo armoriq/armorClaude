@@ -54,22 +54,38 @@ const isNewSession = ({ session_id: id, source, transcript_path: file } = {}) =>
 
 const missing = (err) => err?.code === "ENOENT";
 
-function canReadSession(file) {
-  const subagents = path.join(path.dirname(file), path.basename(file, ".jsonl"), "subagents");
+const readableOrMissing = (file) => {
   try {
     accessSync(file, constants.R_OK);
+    return true;
   } catch (err) {
-    if (!missing(err)) return false;
+    return missing(err);
   }
+};
+
+const isWorkflowJournal = (root, file) => {
+  const parts = path.relative(root, file).split(path.sep);
+  return parts[0] === "workflows" && parts.at(-1) === "journal.jsonl";
+};
+
+function subagentsReadable(root, dir = root) {
+  let entries;
   try {
-    for (const entry of readdirSync(subagents, { recursive: true })) {
-      accessSync(path.join(subagents, entry), constants.R_OK);
-    }
+    entries = readdirSync(dir, { withFileTypes: true });
   } catch (err) {
-    if (!missing(err)) return false;
+    return missing(err);
   }
-  return true;
+  return entries.every((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return subagentsReadable(root, full);
+    if (!entry.name.endsWith(".jsonl") || isWorkflowJournal(root, full)) return true;
+    return readableOrMissing(full);
+  });
 }
+
+const canReadSession = (file) =>
+  readableOrMissing(file) &&
+  subagentsReadable(path.join(path.dirname(file), path.basename(file, ".jsonl"), "subagents"));
 
 /**
  * Give the transcript of a session this SessionStart begins, with no usage in

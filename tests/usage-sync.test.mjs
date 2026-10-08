@@ -9,7 +9,9 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -1036,6 +1038,7 @@ const S5 = "cccccccc-0000-4000-8000-000000000005";
 const S6 = "dddddddd-0000-4000-8000-000000000006";
 const S7 = "eeeeeeee-0000-4000-8000-000000000007";
 const S8 = "ffffffff-0000-4000-8000-000000000008";
+const S9 = "99999999-0000-4000-8000-000000000009";
 
 function addProject(home, repo, sessionId, lines) {
   writeTree(path.join(projectsOf(home), `-work-${repo}`), {
@@ -1304,6 +1307,18 @@ test("only a SessionStart that begins a session with no usage yet claims it", ()
   chmodSync(lockedDir, 0o000);
   assert.equal(claim(startOf(home, "repo-e", S7)), false);
   chmodSync(lockedDir, 0o700);
+  const looped = path.join(projectsOf(home), "-work-repo-g", S9, "subagents");
+  mkdirSync(looped, { recursive: true });
+  symlinkSync(".", path.join(looped, "a"));
+  symlinkSync(".", path.join(looped, "b"));
+  assert.equal(claim(startOf(home, "repo-g", S9)), true);
+  const dangling = path.join(projectsOf(home), "-work-repo-e", S7, "subagents");
+  symlinkSync(path.join(home, "nowhere.jsonl"), path.join(dangling, "000-dangling.jsonl"));
+  writeTree(dangling, { "zz.jsonl": [assistant("z1", "2026-09-23T07:00:00Z", 200)] });
+  chmodSync(path.join(dangling, "zz.jsonl"), 0o000);
+  rmSync(path.join(dangling, "agent-e.jsonl"));
+  assert.equal(claim(startOf(home, "repo-e", S7)), false);
+  chmodSync(path.join(dangling, "zz.jsonl"), 0o600);
   assert.equal(claim(startOf(home, "repo-c", S5)), true);
   assert.equal(claim(startOf(home, "repo-c", S5)), false);
   assert.equal(claim(startOf(home, "repo-d", S6, "clear")), true);
