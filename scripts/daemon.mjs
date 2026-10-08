@@ -56,7 +56,6 @@ import {
   obsServeAsDaemon,
 } from "./lib/observability.mjs";
 import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
-import { claimSession } from "./lib/usage-ownership.mjs";
 import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
@@ -378,12 +377,11 @@ async function dispatchHook(event, input, cfg) {
 
 // ---- Token usage sync ----------------------------------------------------
 let lastUsageSyncAt = 0;
-function syncUsageAfter(event, cfg, sessionId) {
+function syncUsageAfter(event, cfg) {
   if (event === "Stop") {
-    if (requestUsageSync(cfg, sessionId)) lastUsageSyncAt = Date.now();
+    if (requestUsageSync(cfg)) lastUsageSyncAt = Date.now();
     return;
   }
-  if (event === "SessionStart") claimSession(cfg, sessionId);
   if (Date.now() - lastUsageSyncAt < USAGE_SYNC_INTERVAL_MS) return;
   if (launchUsageSync(cfg)) lastUsageSyncAt = Date.now();
 }
@@ -498,7 +496,7 @@ async function handleLine(rawLine, socket) {
       );
       await journalHook(event, input, output, effectiveConfig);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
-      syncUsageAfter(event, effectiveConfig, sessionId);
+      syncUsageAfter(event, effectiveConfig);
       return;
     }
     default: {

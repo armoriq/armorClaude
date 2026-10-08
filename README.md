@@ -272,10 +272,9 @@ Turning off observability also stops the token usage sync.
 ### Which sessions the token usage sync uploads
 
 While observability is on, a background sync uploads token counts (per session, model and UTC hour,
-with the repo path and device name). It sends no prompts or transcript text. A session belongs to
-the organization of the API key its own hooks ran with, from that hour on, and never moves to
-another organization. Older sessions, and sessions that ran without ArmorClaude or with the sync
-off, upload only once assigned with the project's key set:
+with the repo path and device name). It sends no prompts or transcript text. A session uploads
+only once assigned to an organization, and never moves to another one. Assign a project's
+sessions with the project's key set:
 
 ```bash
 node scripts/usage-sync.mjs --assign ~/.claude/projects/<project directory or session .jsonl>

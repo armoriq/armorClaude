@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { buildAuthHeaders, postJson } from "./common.mjs";
 import { ensurePrivateDirSync, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
@@ -8,8 +8,6 @@ import { ensurePrivateDirSync, PRIVATE_FILE_MODE, readJson, writeJson } from "./
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const digest = (text) => createHash("sha256").update(text).digest("hex").slice(0, 32);
-
-export const hourOf = (ms) => new Date(ms).toISOString().slice(0, 13);
 
 export const backendOrigin = (config) => new URL(config.backendEndpoint).origin;
 
@@ -35,32 +33,6 @@ function createClaim(file, claim) {
   } catch (err) {
     if (err?.code === "EEXIST") return false;
     throw err;
-  }
-}
-
-function cachedOrg(dataDir, keyId) {
-  try {
-    const { orgId } = JSON.parse(readFileSync(`${keyBase(dataDir, keyId)}.json`, "utf8"));
-    return typeof orgId === "string" && orgId ? { org: orgId } : {};
-  } catch {
-    return {};
-  }
-}
-
-export function claimSession(config, sessionId, now = Date.now()) {
-  if (!config?.usageSyncEnabled || !SESSION_ID.test(String(sessionId))) return false;
-  const key = keyIdOf(config);
-  const claim = {
-    backend: backendOrigin(config),
-    key,
-    ...cachedOrg(config.dataDir, key),
-    since: hourOf(now),
-  };
-  try {
-    return createClaim(ownerPath(config.dataDir, sessionId), claim);
-  } catch (err) {
-    process.stderr.write(`[armorclaude] usage owner claim failed: ${err?.message ?? err}\n`);
-    return false;
   }
 }
 
@@ -123,14 +95,14 @@ async function knownOrgs(dataDir) {
 
 export async function ownedSessions(config, scope, { pin = true } = {}) {
   const orgs = await knownOrgs(config.dataDir);
-  const owned = new Map();
+  const owned = new Set();
   for (const [sessionId, claim] of await readClaims(config.dataDir)) {
     if (claim.backend !== scope.backend) continue;
     const orgId = claim.org ?? orgs.get(claim.key);
     if (orgId !== scope.orgId) continue;
     if (pin && !claim.org)
       await writeJson(ownerPath(config.dataDir, sessionId), { ...claim, org: orgId });
-    owned.set(sessionId, { since: claim.since ?? null });
+    owned.add(sessionId);
   }
   return owned;
 }
@@ -148,15 +120,10 @@ export async function assignSessions(config, scope, sessionIds) {
 
 async function assignOne(config, scope, sessionId, claim, orgs) {
   const file = ownerPath(config.dataDir, sessionId);
-  const owner = {
-    backend: scope.backend,
-    key: claim?.key ?? scope.keyId,
-    org: scope.orgId,
-    since: null,
-  };
-  if (!claim) return createClaim(file, owner);
+  if (!claim)
+    return createClaim(file, { backend: scope.backend, key: scope.keyId, org: scope.orgId });
   const orgId = claim.org ?? orgs.get(claim.key);
   if (claim.backend !== scope.backend || orgId !== scope.orgId) return false;
-  await writeJson(file, owner);
+  if (!claim.org) await writeJson(file, { ...claim, org: orgId });
   return true;
 }

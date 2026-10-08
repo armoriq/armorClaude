@@ -104,10 +104,10 @@ async function main() {
   if (output) {
     emitJson(output);
   }
-  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  if (event === "SessionStart") launchUsageSync(config, sessionId);
-  if (event === "Stop") requestUsageSync(config, sessionId);
+  if (event === "SessionStart") launchUsageSync(config);
+  if (event === "Stop") requestUsageSync(config);
 
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   await observeHook(event, input, output, config);
   await obsFlush(sessionId, config);
 }

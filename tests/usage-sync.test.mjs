@@ -31,12 +31,7 @@ import {
   launchUsageSync,
   requestUsageSync,
 } from "../scripts/lib/usage-sync-launch.mjs";
-import {
-  claimSession,
-  keyIdOf,
-  scopeIdOf,
-  scopeStatePath,
-} from "../scripts/lib/usage-ownership.mjs";
+import { scopeIdOf, scopeStatePath } from "../scripts/lib/usage-ownership.mjs";
 
 const SYNC = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -772,7 +767,6 @@ test("the launcher claims nothing, starts no sync and writes no request while th
     });
     assert.equal(requestUsageSync(cfg, S1), false, name);
     assert.equal(launchUsageSync(cfg, S1), false, name);
-    assert.equal(claimSession(cfg, S1), false, name);
     assert.equal(existsSync(path.join(dataDir, "usage-sync")), false, name);
     assert.equal(existsSync(path.join(dataDir, "usage-sync.log")), false, name);
   }
@@ -1015,14 +1009,12 @@ const STOP_KEY = "ak_test_usage_sync_stop";
 const KEY_A = "ak_test_usage_sync_org_a";
 const KEY_A2 = "ak_test_usage_sync_org_a_rotated";
 const KEY_B = "ak_test_usage_sync_org_b";
-const KEY_PENDING = "ak_test_usage_sync_org_a_unsynced";
 const ORG = "org-test";
 const ORGS = {
   [KEY]: ORG,
   [STOP_KEY]: ORG,
   [KEY_A]: "org-a",
   [KEY_A2]: "org-a",
-  [KEY_PENDING]: "org-a",
   [KEY_B]: "org-b",
 };
 
@@ -1033,8 +1025,6 @@ const settledAt = (statePath, after) => () =>
   readLastRun(statePath) !== after && !existsSync(`${statePath}.lock`);
 
 const S4 = "bbbbbbbb-0000-4000-8000-000000000004";
-const S5 = "cccccccc-0000-4000-8000-000000000005";
-const S6 = "dddddddd-0000-4000-8000-000000000006";
 
 function addProject(home, repo, sessionId, lines) {
   writeTree(path.join(projectsOf(home), `-work-${repo}`), {
@@ -1123,28 +1113,6 @@ test("a new key of the same organization continues its sessions without re-posti
   }
 });
 
-test("a claim whose key's organization is not known yet is not assigned elsewhere, and its own key pins it", async () => {
-  const { server, port, ...backend } = await fakeBackend();
-  try {
-    const home = fixtureHome();
-    const env = { ...pluginEnv(home, path.join(home, "data"), port), ...withKey(KEY_PENDING) };
-    assert.equal(claimSession(loadConfig(env), S1), true);
-
-    const taken = await assignProject(home, port, KEY_B);
-    assert.equal(taken.status, 1, taken.stderr);
-    assert.match(taken.stderr, new RegExp(`refused ${S1}`));
-    assert.equal(ownerOf(home, S1).org, undefined);
-    assert.equal(ownerOf(home, S2).org, "org-b");
-
-    await ok(cliAgainst(home, port, withKey(KEY_PENDING)));
-    assert.equal(ownerOf(home, S1).org, "org-a");
-    assert.equal(ownerOf(home, S1).key, keyIdOf(loadConfig(env)));
-    assert.deepEqual(rowsBy(backend, KEY_B), []);
-  } finally {
-    server.close();
-  }
-});
-
 test("concurrent syncs of two organizations each post their own rows, and a failing one retries without touching the other", async () => {
   let aFails = true;
   const { server, port, ...backend } = await fakeBackend((_, key) =>
@@ -1214,105 +1182,9 @@ test("an API key the backend rejects posts nothing and says why without the key"
   }
 });
 
-async function pastHourEdge() {
-  const msLeft = 3_600_000 - (Date.now() % 3_600_000);
-  if (msLeft < 30_000) await new Promise((r) => setTimeout(r, msLeft + 1000));
-}
-
-function liveProject(home, repo, sessionId, input) {
-  const now = new Date().toISOString();
-  addProject(home, repo, sessionId, [
-    assistant(`${repo}-old`, "2026-09-23T07:00:00Z", input),
-    assistant(`${repo}-now`, now, input + 1),
-  ]);
-  return { date: now.slice(0, 10), hour: Number(now.slice(11, 13)) };
-}
-
 function inProcessHook(env, input) {
   const hook = spawn(process.execPath, [ROUTER], { env });
   const exited = new Promise((resolve) => hook.once("exit", resolve));
   hook.stdin.end(JSON.stringify(input));
   return exited;
 }
-
-test("an in-process hook claims only its own session from the hook's hour, and --assign adds its earlier history", async () => {
-  await pastHourEdge();
-  const home = fixtureHome();
-  const dataDir = path.join(home, "data");
-  mkdirSync(dataDir, { recursive: true });
-  // The daemon exits on startup when profiles is a file, so the hook runs in-process.
-  writeFileSync(path.join(dataDir, "profiles"), "not a directory");
-  const { server, port, ...backend } = await fakeBackend();
-  const statePath = scopeState(dataDir, port, "org-a");
-  try {
-    const now = liveProject(home, "repo-c", S5, 60);
-    const env = { ...pluginEnv(home, dataDir, port), ...withKey(KEY_A) };
-    assert.equal(await inProcessHook(env, { hook_event_name: "SessionStart", session_id: S5 }), 0);
-    await until(settledAt(statePath, undefined), "the sync pass");
-    assert.equal(existsSync(path.join(dataDir, "daemon.sock")), false);
-    assert.deepEqual(rowsBy(backend, KEY_A), [[S5, now.date, now.hour, 61, "/work/repo-c"]]);
-
-    const transcript = path.join(projectsOf(home), "-work-repo-c", `${S5}.jsonl`);
-    await ok(cliAgainst(home, port, withKey(KEY_A), ["--assign", transcript]));
-    assert.equal((await cliAgainst(home, port, withKey(KEY_A))).status, 0);
-    assert.deepEqual(rowsBy(backend, KEY_A), [
-      [S5, "2026-09-23", 7, 60, "/work/repo-c"],
-      [S5, now.date, now.hour, 61, "/work/repo-c"],
-    ]);
-  } finally {
-    server.close();
-  }
-});
-
-test("through the daemon, each project's hooks claim and upload only their own session under their own key", async () => {
-  await pastHourEdge();
-  const home = fixtureHome();
-  const dataDir = path.join(home, "data");
-  mkdirSync(dataDir, { recursive: true });
-  const { server, port, ...backend } = await fakeBackend();
-  const nowC = liveProject(home, "repo-c", S5, 60);
-  const nowD = liveProject(home, "repo-d", S6, 80);
-  const env = pluginEnv(home, dataDir, port);
-  const daemon = spawn(process.execPath, [DAEMON], { stdio: "ignore", env, cwd: dataDir });
-  const hook = (event, sessionId, key) =>
-    dispatchViaDaemon({
-      event,
-      input: { hook_event_name: event, session_id: sessionId },
-      config: loadConfig({ ...env, ...withKey(key) }),
-    });
-  try {
-    await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
-    await hook("SessionStart", S5, KEY_A);
-    await hook("SessionStart", S6, KEY_B);
-    await hook("Stop", S5, KEY_A);
-    await hook("Stop", S6, KEY_B);
-    await until(settledAt(scopeState(dataDir, port, "org-a"), undefined), "org-a's pass");
-    await until(settledAt(scopeState(dataDir, port, "org-b"), undefined), "org-b's pass");
-    await until(() => backend.posts.length >= 2, "both sessions' rows");
-    assert.deepEqual(rowsBy(backend, KEY_A), [[S5, nowC.date, nowC.hour, 61, "/work/repo-c"]]);
-    assert.deepEqual(rowsBy(backend, KEY_B), [[S6, nowD.date, nowD.hour, 81, "/work/repo-d"]]);
-    assert.equal(backend.posts.length, 2);
-  } finally {
-    daemon.kill("SIGTERM");
-    server.close();
-  }
-});
-
-test("a hook claim made once its key's organization is known is uploaded by that organization's next key", async () => {
-  await pastHourEdge();
-  const backend = await fakeBackend();
-  try {
-    const home = fixtureHome();
-    await assigned(home, backend.port, KEY_A);
-    const now = liveProject(home, "repo-c", S5, 60);
-    const env = { ...pluginEnv(home, path.join(home, "data"), backend.port), ...withKey(KEY_A) };
-    assert.equal(claimSession(loadConfig(env), S5), true);
-    assert.equal(ownerOf(home, S5).org, "org-a");
-
-    await ok(cliAgainst(home, backend.port, withKey(KEY_A2)));
-    const s5 = rowsBy(backend, KEY_A2).filter(([id]) => id === S5);
-    assert.deepEqual(s5, [[S5, now.date, now.hour, 61, "/work/repo-c"]]);
-  } finally {
-    backend.server.close();
-  }
-});
