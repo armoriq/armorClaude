@@ -528,6 +528,7 @@ const userOf = (key) => `user-of-${key}`;
 function fakeBackend(answer = () => [200, { ok: true }]) {
   const posts = [];
   const postedBy = [];
+  const history = { requests: new Map(), done: [], failRead: false, failDone: false };
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
@@ -539,6 +540,16 @@ function fakeBackend(answer = () => [200, { ok: true }]) {
         [status, reply] = key?.startsWith("ak_test_unknown")
           ? [401, {}]
           : [200, key?.startsWith("ak_test_nouser") ? {} : { userId: userOf(key) }];
+      } else if (req.method === "GET" && req.url.startsWith("/api-keys/device-history-sync?")) {
+        [status, reply] = history.failRead
+          ? [500, {}]
+          : [200, { requestedAt: history.requests.get(userOf(key)) ?? null }];
+      } else if (req.method === "POST" && req.url === "/api-keys/device-history-sync/done") {
+        const done = { user: userOf(key), ...JSON.parse(body) };
+        history.done.push({ ...done, failed: history.failDone });
+        if (history.failDone) [status, reply] = [503, {}];
+        else if (history.requests.get(done.user) === done.requestedAt)
+          history.requests.delete(done.user);
       } else if (req.method === "POST" && req.url === "/dashboard/token-usage") {
         posts.push(JSON.parse(body));
         postedBy.push(userOf(key));
@@ -554,7 +565,7 @@ function fakeBackend(answer = () => [200, { ok: true }]) {
   });
   return new Promise((resolve) =>
     server.listen(0, "127.0.0.1", () =>
-      resolve({ server, posts, postedBy, port: server.address().port })
+      resolve({ server, posts, postedBy, history, port: server.address().port })
     )
   );
 }
@@ -1159,4 +1170,87 @@ test("a backend URL with a trailing slash keys the same state", () => {
     userStatePath("/data", { ...who, backend: "http://127.0.0.1:9/" }),
     userStatePath("/data", { ...who, backend: "http://127.0.0.1:9" })
   );
+});
+
+async function switchedToB(backend) {
+  const home = fixtureHome();
+  login(home, backend.port, "ak_test_user_a");
+  assert.equal((await cliAgainst(home, backend.port, asLoggedIn)).status, 0);
+  login(home, backend.port, "ak_test_user_b");
+  const b = await cliAgainst(home, backend.port, asLoggedIn);
+  assert.equal(b.status, 0, b.stderr);
+  return home;
+}
+
+test("a dashboard history request uploads the device's earlier history once, under that user", async () => {
+  const backend = await fakeBackend();
+  try {
+    const rowsOf = (user) => backend.posts.filter((_, i) => backend.postedBy[i] === userOf(user));
+    const home = await switchedToB(backend);
+    assert.equal(rowsOf("ak_test_user_b").length, 0);
+
+    const requestedAt = "2026-10-09T08:00:00.000Z";
+    backend.history.requests.set(userOf("ak_test_user_b"), requestedAt);
+    const full = await cliAgainst(home, backend.port, asLoggedIn);
+    assert.equal(full.status, 0, full.stderr);
+    assert.deepEqual(summary(rowsOf("ak_test_user_b")), summary(rowsOf("ak_test_user_a")));
+    assert.deepEqual(
+      backend.history.done.map(({ user, requestedAt: at, deviceId }) => [
+        user,
+        at,
+        typeof deviceId,
+      ]),
+      [[userOf("ak_test_user_b"), requestedAt, "string"]]
+    );
+
+    const after = await cliAgainst(home, backend.port, asLoggedIn);
+    assert.equal(after.status, 0, after.stderr);
+    assert.equal(rowsOf("ak_test_user_b").length, 3);
+    assert.equal(backend.history.done.length, 1);
+  } finally {
+    backend.server.close();
+  }
+});
+
+test("if confirming the history request fails, the next run confirms without uploading again", async () => {
+  const backend = await fakeBackend();
+  try {
+    const rowsOf = (user) => backend.posts.filter((_, i) => backend.postedBy[i] === userOf(user));
+    const home = await switchedToB(backend);
+    backend.history.requests.set(userOf("ak_test_user_b"), "2026-10-09T08:00:00.000Z");
+    backend.history.failDone = true;
+    const first = await cliAgainst(home, backend.port, asLoggedIn);
+    assert.equal(rowsOf("ak_test_user_b").length, 3);
+    assert.match(first.stderr, /could not confirm the dashboard's history request/);
+
+    backend.history.failDone = false;
+    const second = await cliAgainst(home, backend.port, asLoggedIn);
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(rowsOf("ak_test_user_b").length, 3);
+    assert.deepEqual(
+      backend.history.done.map((d) => d.failed),
+      [true, false]
+    );
+  } finally {
+    backend.server.close();
+  }
+});
+
+test("a history request that can't be read leaves the normal sync running", async () => {
+  const backend = await fakeBackend();
+  try {
+    backend.history.failRead = true;
+    const home = await switchedToB(backend);
+    const rowsOf = (user) => backend.posts.filter((_, i) => backend.postedBy[i] === userOf(user));
+    assert.equal(rowsOf("ak_test_user_a").length, 3);
+    assert.equal(rowsOf("ak_test_user_b").length, 0);
+    const again = await cliAgainst(home, backend.port, asLoggedIn);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(
+      again.stderr,
+      /could not read the dashboard's history request \(device-history-sync returned 500\), syncing as usual/
+    );
+  } finally {
+    backend.server.close();
+  }
 });

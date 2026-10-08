@@ -149,3 +149,43 @@ export async function keyOwner(config) {
     return { ok: false, reason: String(err?.message || err) };
   }
 }
+
+export async function pendingHistorySync(config, deviceId) {
+  if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.timeoutMs || 8000);
+  try {
+    const query = `?deviceId=${encodeURIComponent(deviceId)}`;
+    const res = await fetch(endpoint(config, `/api-keys/device-history-sync${query}`), {
+      headers: buildAuthHeaders(config),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return { ok: false, reason: `device-history-sync returned ${res.status}` };
+    return {
+      ok: true,
+      requestedAt: typeof data?.requestedAt === "string" ? data.requestedAt : null,
+    };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err) };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function completeHistorySync(config, deviceId, requestedAt) {
+  try {
+    const url = endpoint(config, "/api-keys/device-history-sync/done");
+    const res = await postJson(
+      url,
+      { deviceId, requestedAt },
+      buildAuthHeaders(config),
+      config.timeoutMs || 8000
+    );
+    return res.ok
+      ? { ok: true }
+      : { ok: false, reason: `device-history-sync/done returned ${res.status}` };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err) };
+  }
+}
