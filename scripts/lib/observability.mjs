@@ -2,7 +2,7 @@
 // root span; the backend merges copies that share a span id.
 import armoriqSdk from "@armoriq/sdk-dev";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 import { appendDaemonLog } from "./daemon-log.mjs";
@@ -417,11 +417,12 @@ function expandedSlashCommand(input) {
 }
 
 // The SDK accepts only tool names that start alphanumeric.
-async function obsSlashCommand(entry, command) {
+async function obsSlashCommand(entry, command, callId) {
   await entry.session.recordOperation({
     category: "command",
     name: "command.execute",
     toolName: command.replace(/^\//, ""),
+    callId,
   });
 }
 
@@ -521,7 +522,7 @@ function observe(event, input, output, config) {
   if (!isObsEnabled(config) || releasingAll) return UNOBSERVED;
   const sessionId = typeof input?.session_id === "string" ? input.session_id : "";
   if (!sessionId) return UNOBSERVED;
-  const record = { event, input, output, at: Date.now() };
+  const record = { event, input, output, at: Date.now(), id: randomUUID() };
   const key = sessionKey(config, sessionId);
   if (!shipping || !config.dataDir) {
     return { journaled: Promise.resolve(), recorded: enqueueEvent(key, record, config, null) };
@@ -717,7 +718,7 @@ async function applyEvent(entry, record, config) {
   switch (record.event) {
     case "UserPromptExpansion": {
       const slash = expandedSlashCommand(record.input);
-      if (slash) await obsSlashCommand(entry, slash);
+      if (slash) await obsSlashCommand(entry, slash, record.id);
       break;
     }
     case "PreToolUse":

@@ -27,7 +27,7 @@ function place(dataDir, { at, seq = 0, owner, binding = BINDING, n, draft = "" }
   return placeFile(journalDir(dataDir), name, JSON.stringify({ event: `e${n}`, input: {} }));
 }
 
-test("a journaled event is an owner-only file with the call's identity and decision, no tool input (#194)", async () => {
+test("a journaled event is an owner-only file with the call's identity and decision, no tool input (#194, #208)", async () => {
   const dataDir = tempDataDir();
   const input = {
     session_id: "sess-j",
@@ -42,11 +42,13 @@ test("a journaled event is an owner-only file with the call's identity and decis
     goal: "g",
   });
   const at = Date.now();
+  const id = randomUUID();
   const file = await journalEvent(journalEntryPath(dataDir, BINDING, at), {
     event: "PreToolUse",
     input,
     output,
     at,
+    id,
   });
   assert.match(
     path.basename(file),
@@ -59,6 +61,7 @@ test("a journaled event is an owner-only file with the call's identity and decis
   assert.deepEqual(JSON.parse(text), {
     event: "PreToolUse",
     at,
+    id,
     input: {
       session_id: "sess-j",
       hook_event_name: "PreToolUse",

@@ -1038,6 +1038,47 @@ test("an unwritable spool keeps the journal and says so in daemon.log, and the e
   }
 });
 
+test("a daemon SIGKILLed when a replay writes its first batch stores each replayed slash command once (#208)", async () => {
+  const backend = await startBackend();
+  const home = await tempDir("aq-home-");
+  const dataDir = await tempDir("aq-commandkill-");
+  const env = pluginEnv(home, dataDir, backend.url);
+  const runtime = new armoriqSdk.ArmorIQTelemetryRuntime({
+    backendEndpoint: backend.url,
+    apiKey: API_KEY,
+    sdkVersion: "test",
+  });
+  const binding = runtime.spoolBinding;
+  await runtime.close();
+  const sessionId = randomUUID();
+  const at = Date.now() - 60_000;
+  const dead = deadPid();
+  const command = { expansion_type: "slash_command", command_name: "review" };
+  for (let i = 0; i < 600; i++) {
+    const input = { session_id: sessionId, hook_event_name: "UserPromptExpansion", ...command };
+    const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+    placeFile(
+      path.join(dataDir, "obs-journal"),
+      `${at + i}-${i}-${binding}-${id}.json.claim-${dead}`,
+      JSON.stringify({ event: "UserPromptExpansion", at: at + i, id, input })
+    );
+  }
+  const killed = startDaemon(env, dataDir);
+  try {
+    const batches = () => dataFiles(dataDir).filter((file) => !file.includes(".tmp."));
+    await waitFor(() => batches().length > 0, 20_000, "the first replayed batch");
+    process.kill(killed.child.pid, "SIGKILL");
+    await killed.exited;
+    await shipSpoolWithDaemon(env, dataDir);
+    const commands = storedSpans(backend.delivered).filter((s) => s.name === "command.execute");
+    assert.ok(commands.length >= 600, `${commands.length} of 600 commands stored`);
+    assert.ok(commands.length <= 605, `${commands.length - 600} commands stored twice`);
+  } finally {
+    killIfRunning(killed.child);
+    await backend.close();
+  }
+});
+
 test("a replacement daemon serves hooks and ships what the old daemon spooled at shutdown (#190, #194)", async () => {
   const backend = await startBackend({ exportDelayMs: 9_000 });
   const home = await tempDir("aq-home-");
@@ -1485,7 +1526,7 @@ test("a deny-with-hint exports the rule's code and keeps the prompt and tool inp
   }
 });
 
-test("a hook event and the span it records share one call key, so a settled journal knows what landed (#194)", async () => {
+test("a hook event and the span it records share one call key, so a settled journal knows what landed (#194, #208)", async () => {
   const batches = [];
   const runtime = new ArmorIQTelemetryRuntime({
     backendEndpoint: "http://127.0.0.1:9",
@@ -1511,14 +1552,18 @@ test("a hook event and the span it records share one call key, so a settled jour
     const input = { tool_use_id: id };
     events.push({ event: "PreToolUse", input }, { event: "PostToolUse", input });
   }
+  const id = randomUUID();
+  await session.recordOperation({ category: "command", toolName: "review", callId: id });
+  events.push({ event: "UserPromptExpansion", input: { tool_use_id: "toolu_01Call" }, id });
   events.push({ event: "PostToolUseFailure", input: { tool_use_id: "toolu_01None" } });
   await session.close({ status: "ok" });
 
   const landed = new Set(batches.flatMap(batchCalls));
   assert.deepEqual(
     events.map((record) => landed.has(eventCall(record))),
-    [true, true, true, true, false]
+    [true, true, true, true, true, false]
   );
+  assert.equal(eventCall({ event: "UserPromptExpansion", input: {} }), null);
   assert.equal(eventCall({ event: "SessionStart", input: { tool_use_id: "toolu_01Call" } }), null);
 });
 
