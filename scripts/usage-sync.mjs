@@ -10,19 +10,27 @@
 // --dry-run : print each row instead of posting it. Needs no API key, ignores
 //             the observability and usage sync switches, and keeps its own
 //             state file, so it never changes what a real run posts.
-// --state   : state file to read and update.
+// --state   : state file to read and update. Without it, each API key's user
+//             keeps its own state per backend and product.
 
 import { homedir } from "node:os";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { keyOwner } from "./lib/backend-client.mjs";
 import { loadConfig } from "./lib/config.mjs";
 import { deviceIdentity } from "./lib/device.mjs";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, writeJson } from "./lib/fs-store.mjs";
 import { getSdkClient } from "./lib/intent.mjs";
 import { loadRuntimeState } from "./lib/runtime-state.mjs";
 import { loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
-import { defaultStatePath, isAlive, requestedAt, syncPaths } from "./lib/usage-sync-launch.mjs";
+import {
+  isAlive,
+  requestedAt,
+  syncBasePath,
+  syncPaths,
+  userStatePath,
+} from "./lib/usage-sync-launch.mjs";
 
 const BUDGET_MS = 90_000;
 const HARD_STOP_MS = BUDGET_MS + 30_000;
@@ -71,7 +79,25 @@ async function debounce(requestPath, deadline) {
   if (wait > 0) await sleep(wait);
 }
 
-async function syncPass({ config, statePath, deadline }) {
+async function ownStatePath(config) {
+  const owner = await keyOwner(config);
+  if (!owner.ok) {
+    log(`could not resolve the API key's user (${owner.reason}), nothing synced`);
+    return null;
+  }
+  return userStatePath(config.dataDir, {
+    backend: config.backendEndpoint,
+    product: config.productSlug,
+    userId: owner.userId,
+  });
+}
+
+async function syncPass({ config, fixedStatePath, deadline }) {
+  const statePath = fixedStatePath ?? (await ownStatePath(config));
+  if (!statePath) {
+    process.exitCode = 1;
+    return;
+  }
   const state = await loadSyncState(statePath);
   const runtime = await loadRuntimeState(config.runtimeFile);
   const { deviceId, deviceName } = deviceIdentity();
@@ -121,13 +147,13 @@ async function main() {
     log("usage sync is off (observability disabled or disable_usage_sync set), nothing synced");
     return;
   }
-  const statePath =
+  const fixedStatePath =
     stateIdx >= 0
       ? path.resolve(argv[stateIdx + 1])
       : DRY
         ? path.join(config.dataDir, "usage-sync-dry-run.json")
-        : defaultStatePath(config.dataDir);
-  const paths = syncPaths(statePath);
+        : null;
+  const paths = syncPaths(fixedStatePath ?? syncBasePath(config.dataDir));
   const deadline = Date.now() + BUDGET_MS;
   const hardStop = setTimeout(() => {
     log(`still running after ${HARD_STOP_MS}ms, exiting`);
@@ -148,7 +174,7 @@ async function main() {
         do {
           await debounce(paths.request, deadline);
           passStart = Date.now();
-          await syncPass({ config, statePath, deadline });
+          await syncPass({ config, fixedStatePath, deadline });
         } while (requestedAt(paths.request) >= passStart && Date.now() < deadline);
       } finally {
         await release();

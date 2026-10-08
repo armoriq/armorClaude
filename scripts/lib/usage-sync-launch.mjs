@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { closeSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,15 +9,23 @@ const LOG_MAX_BYTES = 1024 * 1024;
 const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "usage-sync.mjs");
 
 /**
- * The files next to a sync state file: the lock a running sync holds and
- * the request marker a Stop touches to ask for another pass.
+ * The lock a running sync holds and the request marker a Stop touches to ask
+ * for another pass. One pair per data dir, whichever user's key is in use.
  */
-export function syncPaths(statePath) {
-  return { lock: `${statePath}.lock`, request: `${statePath}.request` };
+export function syncPaths(base) {
+  return { lock: `${base}.lock`, request: `${base}.request` };
 }
 
-export function defaultStatePath(dataDir) {
-  return path.join(dataDir, "usage-sync-state.json");
+export function syncBasePath(dataDir) {
+  return path.join(dataDir, "usage-sync");
+}
+
+export function userStatePath(dataDir, { backend, product, userId }) {
+  const id = createHash("sha256")
+    .update(JSON.stringify([backend, product, userId]))
+    .digest("hex")
+    .slice(0, 32);
+  return path.join(syncBasePath(dataDir), `${id}.json`);
 }
 
 export function isAlive(pid) {
@@ -81,7 +90,7 @@ export function launchUsageSync(config) {
   if (!config?.usageSyncEnabled) return false;
   try {
     ensurePrivateDirSync(config.dataDir);
-    if (lockHeld(syncPaths(defaultStatePath(config.dataDir)).lock)) return true;
+    if (lockHeld(syncPaths(syncBasePath(config.dataDir)).lock)) return true;
     const logPath = path.join(config.dataDir, "usage-sync.log");
     const logFd = openPrivateSync(logPath, logSize(logPath) > LOG_MAX_BYTES ? "w" : "a");
     try {
@@ -113,7 +122,7 @@ export function launchUsageSync(config) {
 export function requestUsageSync(config) {
   if (!config?.usageSyncEnabled) return false;
   try {
-    writePrivateFileSync(syncPaths(defaultStatePath(config.dataDir)).request, String(Date.now()));
+    writePrivateFileSync(syncPaths(syncBasePath(config.dataDir)).request, String(Date.now()));
   } catch (err) {
     process.stderr.write(`[armorclaude] usage sync request failed: ${err?.message ?? err}\n`);
     return false;

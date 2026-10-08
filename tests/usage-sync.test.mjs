@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   statSync,
   writeFileSync,
@@ -25,7 +26,12 @@ import {
 import { classifyTranscripts } from "../scripts/lib/transcripts.mjs";
 import { writeJson } from "../scripts/lib/fs-store.mjs";
 import { loadSyncState, syncUsage } from "../scripts/lib/usage-sync.mjs";
-import { launchUsageSync, requestUsageSync } from "../scripts/lib/usage-sync-launch.mjs";
+import {
+  launchUsageSync,
+  requestUsageSync,
+  syncBasePath,
+  userStatePath,
+} from "../scripts/lib/usage-sync-launch.mjs";
 
 const SYNC = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -514,26 +520,48 @@ test("usage-sync without an API key posts nothing", () => {
   assert.match(res.stderr, /no API key, nothing synced/);
 });
 
+const keyOf = (req) =>
+  /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1] ?? req.headers["x-api-key"];
+const userOf = (key) => `user-of-${key}`;
+
 function fakeBackend(answer = () => [200, { ok: true }]) {
   const posts = [];
+  const postedBy = [];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       let status = 200;
       let reply = { ok: true };
-      if (req.method === "POST" && req.url === "/dashboard/token-usage") {
+      const key = keyOf(req);
+      if (req.method === "POST" && req.url === "/iap/validate-key") {
+        [status, reply] = key?.startsWith("ak_test_unknown")
+          ? [401, {}]
+          : [200, { userId: userOf(key) }];
+      } else if (req.method === "POST" && req.url === "/dashboard/token-usage") {
         posts.push(JSON.parse(body));
-        [status, reply] = answer(posts.at(-1));
+        postedBy.push(userOf(key));
+        const answered = answer(posts.at(-1));
+        if (!answered) return req.socket.destroy();
+        [status, reply] = answered;
       }
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(reply));
     });
   });
   return new Promise((resolve) =>
-    server.listen(0, "127.0.0.1", () => resolve({ server, posts, port: server.address().port }))
+    server.listen(0, "127.0.0.1", () =>
+      resolve({ server, posts, postedBy, port: server.address().port })
+    )
   );
 }
+
+const userState = (dataDir, port, key) =>
+  userStatePath(dataDir, {
+    backend: `http://127.0.0.1:${port}`,
+    product: "armorclaude",
+    userId: userOf(key),
+  });
 
 async function until(check, what, timeoutMs = 20_000) {
   const start = Date.now();
@@ -567,8 +595,8 @@ const pluginEnv = (home, dataDir, port) => ({
 test("a Stop through the daemon triggers the sync, the only writer of a forked session's rows", async () => {
   const home = fixtureHome();
   const dataDir = path.join(home, "data");
-  const statePath = path.join(dataDir, "usage-sync-state.json");
   const { server, posts, port } = await fakeBackend();
+  const statePath = userState(dataDir, port, "ak_test_usage_sync_stop");
   const env = pluginEnv(home, dataDir, port);
   mkdirSync(dataDir, { recursive: true });
   const runtimeFile = path.join(dataDir, "runtime.json");
@@ -590,7 +618,7 @@ test("a Stop through the daemon triggers the sync, the only writer of a forked s
         config,
       });
     const settled = (after) => () =>
-      readLastRun(statePath) !== after && !existsSync(`${statePath}.lock`);
+      readLastRun(statePath) !== after && !existsSync(`${syncBasePath(dataDir)}.lock`);
 
     await stop(S2);
     await until(settled(undefined), "the first sync pass");
@@ -625,17 +653,20 @@ test("a Stop through the daemon triggers the sync, the only writer of a forked s
 test("an in-process Stop, with no daemon reachable, triggers the sync", async () => {
   const home = fixtureHome();
   const dataDir = path.join(home, "data");
-  const statePath = path.join(dataDir, "usage-sync-state.json");
   mkdirSync(dataDir, { recursive: true });
   // The daemon exits on startup when profiles is a file, so the hook runs in-process.
   writeFileSync(path.join(dataDir, "profiles"), "not a directory");
   const { server, posts, port } = await fakeBackend();
+  const statePath = userState(dataDir, port, "ak_test_usage_sync_stop");
   try {
     const hook = spawn(process.execPath, [ROUTER], { env: pluginEnv(home, dataDir, port) });
     const exited = new Promise((resolve) => hook.once("exit", resolve));
     hook.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: S2 }));
     assert.equal(await exited, 0);
-    await until(() => readLastRun(statePath) && !existsSync(`${statePath}.lock`), "the sync pass");
+    await until(
+      () => readLastRun(statePath) && !existsSync(`${syncBasePath(dataDir)}.lock`),
+      "the sync pass"
+    );
     assert.equal(existsSync(path.join(dataDir, "daemon.sock")), false);
     assert.equal(posts.length, 3);
   } finally {
@@ -646,22 +677,29 @@ test("an in-process Stop, with no daemon reachable, triggers the sync", async ()
 test("the sync's log, request marker and state are owner-only, and 0644 ones are tightened", async () => {
   const home = fixtureHome();
   const dataDir = path.join(home, "data");
-  const statePath = path.join(dataDir, "usage-sync-state.json");
-  mkdirSync(dataDir, { recursive: true, mode: 0o755 });
+  const { server, posts, port } = await fakeBackend();
+  const statePath = userState(dataDir, port, "ak_test_usage_sync_stop");
+  mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o755 });
   chmodSync(dataDir, 0o755);
   writeFileSync(path.join(dataDir, "profiles"), "not a directory");
-  const files = [path.join(dataDir, "usage-sync.log"), `${statePath}.request`, statePath];
+  const files = [
+    path.join(dataDir, "usage-sync.log"),
+    `${syncBasePath(dataDir)}.request`,
+    statePath,
+  ];
   for (const file of files) {
     writeFileSync(file, file === statePath ? "{}" : "");
     chmodSync(file, 0o644);
   }
-  const { server, posts, port } = await fakeBackend();
   try {
     const hook = spawn(process.execPath, [ROUTER], { env: pluginEnv(home, dataDir, port) });
     const exited = new Promise((resolve) => hook.once("exit", resolve));
     hook.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: S2 }));
     assert.equal(await exited, 0);
-    await until(() => readLastRun(statePath) && !existsSync(`${statePath}.lock`), "the sync pass");
+    await until(
+      () => readLastRun(statePath) && !existsSync(`${syncBasePath(dataDir)}.lock`),
+      "the sync pass"
+    );
     assert.equal(posts.length, 3);
     const mode = (file) => statSync(file).mode & 0o777;
     for (const file of files) assert.equal(mode(file), 0o600, file);
@@ -715,7 +753,7 @@ test("the launcher starts no sync and writes no request while the usage sync is 
     });
     assert.equal(requestUsageSync(cfg), false, name);
     assert.equal(launchUsageSync(cfg), false, name);
-    assert.equal(existsSync(path.join(dataDir, "usage-sync-state.json.request")), false, name);
+    assert.equal(existsSync(`${syncBasePath(dataDir)}.request`), false, name);
     assert.equal(existsSync(path.join(dataDir, "usage-sync.log")), false, name);
   }
 });
@@ -748,7 +786,7 @@ test("usage-sync posts nothing while observability or the usage sync is off", as
       const res = await cliAgainst(home, port, toggles);
       assert.equal(res.status, 0, res.stderr);
       assert.match(res.stderr, /usage sync is off .*nothing synced/, name);
-      assert.equal(existsSync(path.join(home, "data", "usage-sync-state.json")), false, name);
+      assert.equal(existsSync(syncBasePath(path.join(home, "data"))), false, name);
     }
     assert.equal(posts.length, 0);
 
@@ -786,7 +824,7 @@ test("usage-sync logs a backend 400 once with its session-hour, status and messa
     );
     assert.equal(res.stderr.includes(KEY), false);
     const lastRun = JSON.parse(
-      readFileSync(path.join(home, "data", "usage-sync-state.json"), "utf8")
+      readFileSync(userState(path.join(home, "data"), port, KEY), "utf8")
     ).lastRun;
     assert.equal(lastRun.failed, 3);
     assert.deepEqual(
@@ -798,7 +836,7 @@ test("usage-sync logs a backend 400 once with its session-hour, status and messa
   }
 });
 
-test("usage-sync against a closed port stops after one row, exits 1 fast and keeps every row", async () => {
+test("usage-sync against a closed port resolves no user, exits 1 fast and writes no state", async () => {
   const closed = createServer();
   await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
   const deadPort = closed.address().port;
@@ -809,23 +847,37 @@ test("usage-sync against a closed port stops after one row, exits 1 fast and kee
   const elapsed = Date.now() - started;
   assert.equal(res.status, 1, res.stderr);
   assert.ok(elapsed < 10_000, `took ${elapsed}ms`);
-  const origin = `http://127.0.0.1:${deadPort}`;
-  const failedLines = res.stderr.split("\n").filter((l) => l.includes(" failed 1x"));
-  assert.equal(failedLines.length, 1, res.stderr);
-  assert.ok(failedLines[0].includes(`backend unreachable at ${origin}: `), res.stderr);
-  assert.match(
-    res.stderr,
-    /posted 0 session-hour\(s\) \(0 tokens\), 1 failed \(1x backend unreachable at /
-  );
-  assert.match(res.stderr, /2 left for the next run/);
-  const statePath = path.join(home, "data", "usage-sync-state.json");
-  assert.deepEqual(JSON.parse(readFileSync(statePath, "utf8")).sessions, {});
+  assert.match(res.stderr, /could not resolve the API key's user \(.+\), nothing synced/);
+  assert.equal(existsSync(syncBasePath(path.join(home, "data"))), false);
+});
 
-  const { server, posts, port } = await fakeBackend();
+test("a backend that drops token-usage requests stops the run after one row and keeps every row", async () => {
+  let drop = true;
+  const { server, posts, port } = await fakeBackend(() => (drop ? null : [200, { ok: true }]));
   try {
+    const home = fixtureHome();
+    const started = Date.now();
+    const res = await cliAgainst(home, port, {});
+    const elapsed = Date.now() - started;
+    assert.equal(res.status, 1, res.stderr);
+    assert.ok(elapsed < 10_000, `took ${elapsed}ms`);
+    const origin = `http://127.0.0.1:${port}`;
+    const failedLines = res.stderr.split("\n").filter((l) => l.includes(" failed 1x"));
+    assert.equal(failedLines.length, 1, res.stderr);
+    assert.ok(failedLines[0].includes(`backend unreachable at ${origin}: `), res.stderr);
+    assert.match(
+      res.stderr,
+      /posted 0 session-hour\(s\) \(0 tokens\), 1 failed \(1x backend unreachable at /
+    );
+    assert.match(res.stderr, /2 left for the next run/);
+    const statePath = userState(path.join(home, "data"), port, KEY);
+    assert.deepEqual(JSON.parse(readFileSync(statePath, "utf8")).sessions, {});
+
+    drop = false;
+    const dropped = posts.length;
     const next = await cliAgainst(home, port, {});
     assert.equal(next.status, 0, next.stderr);
-    assert.deepEqual(summary(posts), [
+    assert.deepEqual(summary(posts.slice(dropped)), [
       [S1, "2026-09-20", 9, 133],
       [S1, "2026-09-21", 9, 1000],
       [S2, "2026-09-21", 10, 7],
@@ -838,8 +890,9 @@ test("usage-sync against a closed port stops after one row, exits 1 fast and kee
 async function withDaemon(daemonToggles, fn) {
   const home = fixtureHome();
   const dataDir = path.join(home, "data");
-  const statePath = path.join(dataDir, "usage-sync-state.json");
   const { server, posts, port } = await fakeBackend();
+  const statePath = userState(dataDir, port, KEY);
+  const lockPath = `${syncBasePath(dataDir)}.lock`;
   const env = { ...pluginEnv(home, dataDir, port), CLAUDE_PLUGIN_OPTION_API_KEY: KEY };
   mkdirSync(dataDir, { recursive: true });
   const daemon = spawn(process.execPath, [DAEMON], {
@@ -858,13 +911,10 @@ async function withDaemon(daemonToggles, fn) {
       config: loadConfig({ ...env, ...toggles }),
     });
   const synced = () =>
-    until(
-      () => readLastRun(statePath) !== undefined && !existsSync(`${statePath}.lock`),
-      "a sync pass"
-    );
+    until(() => readLastRun(statePath) !== undefined && !existsSync(lockPath), "a sync pass");
   try {
     await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
-    await fn({ stop, synced, posts, statePath });
+    await fn({ stop, synced, posts, statePath, dataDir });
   } finally {
     daemon.kill("SIGTERM");
     server.close();
@@ -872,11 +922,11 @@ async function withDaemon(daemonToggles, fn) {
 }
 
 test("a Stop through the daemon starts no sync while the calling session turns it off", async () => {
-  await withDaemon({}, async ({ stop, synced, posts, statePath }) => {
+  await withDaemon({}, async ({ stop, synced, posts, statePath, dataDir }) => {
     for (const [name, toggles] of TOGGLES) {
       await stop(toggles);
-      assert.equal(existsSync(`${statePath}.request`), false, name);
-      assert.equal(existsSync(`${statePath}.lock`), false, name);
+      assert.equal(existsSync(`${syncBasePath(dataDir)}.request`), false, name);
+      assert.equal(existsSync(`${syncBasePath(dataDir)}.lock`), false, name);
     }
     await new Promise((r) => setTimeout(r, 3000));
     assert.equal(posts.length, 0);
@@ -928,4 +978,83 @@ test("a fork's copied lines never stop its original from counting them", async (
   ]);
   append(home, `${S1}.jsonl`, { ...assistant("o3", "2026-09-20T09:20:00Z", 1), sessionId: S1 });
   assert.deepEqual(summary((await run(home, state)).rows), [[S1, "2026-09-20", 9, 301]]);
+});
+
+function login(home, port, apiKey) {
+  assert.ok(home.startsWith(tmpdir()), home);
+  mkdirSync(path.join(home, ".armoriq"), { recursive: true });
+  writeFileSync(
+    path.join(home, ".armoriq", "credentials.json"),
+    JSON.stringify({
+      apiKey,
+      product: "armorclaude",
+      backend: `http://127.0.0.1:${port}`,
+      userId: userOf(apiKey),
+      orgId: "org-1",
+    })
+  );
+}
+
+const asLoggedIn = { CLAUDE_PLUGIN_OPTION_API_KEY: "" };
+
+function stateFiles(home) {
+  const files = {};
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(".json"))
+        files[path.relative(home, full)] = readFileSync(full, "utf8");
+    }
+  };
+  walk(path.join(home, "data"));
+  return files;
+}
+
+test("each logged-in user syncs from their own state and leaves the other's untouched", async () => {
+  const { server, posts, postedBy, port } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    const rowsOf = (user) => posts.filter((_, i) => postedBy[i] === userOf(user));
+
+    login(home, port, "ak_test_user_a");
+    const a = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(a.status, 0, a.stderr);
+    assert.equal(rowsOf("ak_test_user_a").length, 3);
+    const afterA = stateFiles(home);
+
+    login(home, port, "ak_test_user_b");
+    const b = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(b.status, 0, b.stderr);
+    assert.match(b.stderr, /2 changed, 2 read; posted 3 session-hour\(s\)/);
+    assert.deepEqual(summary(rowsOf("ak_test_user_b")), summary(rowsOf("ak_test_user_a")));
+    const afterB = stateFiles(home);
+    for (const [file, text] of Object.entries(afterA)) assert.equal(afterB[file], text, file);
+    assert.equal(Object.keys(afterB).length, Object.keys(afterA).length + 1);
+
+    login(home, port, "ak_test_user_a");
+    const again = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stderr, /0 changed, 0 read; posted 0 session-hour\(s\)/);
+  } finally {
+    server.close();
+  }
+});
+
+test("a key whose user the backend cannot resolve syncs nothing and writes no state", async () => {
+  const { server, posts, port } = await fakeBackend();
+  try {
+    const home = fixtureHome();
+    login(home, port, "ak_test_unknown_key");
+    const res = await cliAgainst(home, port, asLoggedIn);
+    assert.equal(res.status, 1);
+    assert.match(
+      res.stderr,
+      /could not resolve the API key's user \(validate-key returned 401\), nothing synced/
+    );
+    assert.equal(posts.length, 0);
+    assert.deepEqual(stateFiles(home), {});
+  } finally {
+    server.close();
+  }
 });
