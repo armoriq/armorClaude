@@ -121,6 +121,15 @@ async function adopt(dir, entry) {
 
 export const journalName = (file) => path.basename(file).replace(/\.claim-\d+$/, "");
 
+export async function forgetJournaled(dataDir, names) {
+  if (names.length === 0) return;
+  const dir = journalDir(dataDir);
+  const landed = new Set(names);
+  const entries = await listRecords(dir, journalFields);
+  const covered = entries.filter((entry) => landed.has(entry.ready));
+  await Promise.all(covered.map((entry) => removeRecord(dir, entry.name)));
+}
+
 export async function journalBacklog(dataDir, binding, busy, now = Date.now(), spooled = null) {
   const dir = journalDir(dataDir);
   const { live, dropped } = await pruneJournal(dataDir, now, busy);
