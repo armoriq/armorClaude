@@ -98,15 +98,45 @@ function countFailure(failures, failure) {
   else failures.set(key, { ...failure, count: 1 });
 }
 
+function rowFailure(sessionId, row, result) {
+  return {
+    sessionId,
+    usageDate: row.usageDate,
+    usageHour: row.usageHour,
+    ...(result?.status ? { status: result.status } : {}),
+    ...(result?.unreachable ? { unreachable: true } : {}),
+    reason: result?.reason ?? "no reason given",
+  };
+}
+
+async function postRows(post, rows, session, report, failures) {
+  let ok = true;
+  for (const row of rows) {
+    const { usageDate, usageHour, entries } = row;
+    const result = await post({ ...session, usageDate, usageHour, entries });
+    if (result?.ok) {
+      report.sessionHours++;
+      report.tokens += row.tokens;
+      continue;
+    }
+    ok = false;
+    report.failed++;
+    countFailure(failures, rowFailure(session.sessionId, row, result));
+    if (result?.unreachable) return { ok, unreachable: true };
+  }
+  return { ok, unreachable: false };
+}
+
 /**
  * Post the session-hours that changed since the last run, reading only sessions
  * whose main or subagent transcripts changed size or mtime, or that this scope
  * came to own. `owned` holds the session ids this scope may post; others are
- * read only for their message keys. Each session's entry in `state.sessions` keeps the message keys it counted. The run's seen set starts
- * with the keys of every session it does not read, so a changed fork still
- * skips history it copied from an unchanged original. A session's entry is
- * replaced only when all of its changed hours posted, so a failed hour is
- * retried on the next run. `state` is updated in place.
+ * read only for their message keys. Each session's entry in `state.sessions`
+ * keeps the message keys it counted. The run's seen set starts with the keys
+ * of every session it does not read, so a changed fork still skips history it
+ * copied from an unchanged original. A session's entry is replaced only when
+ * all of its changed hours posted, so a failed hour is retried on the next
+ * run. `state` is updated in place.
  */
 export async function syncUsage({
   projectsDir,
@@ -178,35 +208,8 @@ export async function syncUsage({
     const prev = state.sessions[file];
     const armored = Boolean(prev?.armored) || isArmored(sessionId);
     const { hours, rows } = changedHours(usage, postedHours(prev));
-    let ok = true;
-    let unreachable = false;
-    for (const row of rows) {
-      const result = await post({
-        sessionId,
-        usageDate: row.usageDate,
-        usageHour: row.usageHour,
-        repo: usage.repo,
-        entries: row.entries,
-        armored,
-      });
-      if (result?.ok) {
-        report.sessionHours++;
-        report.tokens += row.tokens;
-        continue;
-      }
-      ok = false;
-      report.failed++;
-      unreachable = Boolean(result?.unreachable);
-      countFailure(failures, {
-        sessionId,
-        usageDate: row.usageDate,
-        usageHour: row.usageHour,
-        ...(result?.status ? { status: result.status } : {}),
-        ...(unreachable ? { unreachable } : {}),
-        reason: result?.reason ?? "no reason given",
-      });
-      if (unreachable) break;
-    }
+    const session = { sessionId, repo: usage.repo, armored };
+    const { ok, unreachable } = await postRows(post, rows, session, report, failures);
     if (unreachable) {
       report.left = changed.length - i;
       break;
