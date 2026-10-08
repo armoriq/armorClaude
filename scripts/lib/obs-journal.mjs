@@ -20,6 +20,7 @@ const INPUT_FIELDS = [
   "tool_use_id",
   "expansion_type",
   "command_name",
+  "duration_ms",
 ];
 let sequence = 0;
 
@@ -47,11 +48,12 @@ export function journalEntryPath(dataDir, binding, at) {
   return path.join(journalDir(dataDir), name);
 }
 
-export async function journalEvent(file, { event, input, output, at }) {
+export async function journalEvent(file, { event, input, output, at, id }) {
   const fields = INPUT_FIELDS.filter((key) => Object.hasOwn(input, key));
   const record = {
     event,
     at,
+    id,
     input: Object.fromEntries(fields.map((key) => [key, input[key]])),
     output: decisionOnly(output),
   };
@@ -60,18 +62,27 @@ export async function journalEvent(file, { event, input, output, at }) {
   return file;
 }
 
-const CALL_KINDS = { PreToolUse: "policy", PostToolUse: "tool", PostToolUseFailure: "tool" };
+const toolUseId = ({ input }) => input?.tool_use_id;
+const CALL_KINDS = {
+  PreToolUse: ["policy", toolUseId],
+  PostToolUse: ["tool", toolUseId],
+  PostToolUseFailure: ["tool", toolUseId],
+  UserPromptExpansion: ["command", (record) => record.id],
+};
+const SPAN_KINDS = new Set(["policy", "command"]);
 
-export function eventCall({ event, input }) {
-  const id = input?.tool_use_id;
-  if (!Object.hasOwn(CALL_KINDS, event) || typeof id !== "string") return null;
-  return `${CALL_KINDS[event]}:${id}`;
+export function eventCall(record) {
+  if (!Object.hasOwn(CALL_KINDS, record.event)) return null;
+  const [kind, callId] = CALL_KINDS[record.event];
+  const id = callId(record);
+  return typeof id === "string" ? `${kind}:${id}` : null;
 }
 
 function spanCall({ attributes }) {
   const id = attributes["gen_ai.tool.call.id"];
   if (typeof id !== "string") return null;
-  return `${attributes["armoriq.operation.category"] === "policy" ? "policy" : "tool"}:${id}`;
+  const category = attributes["armoriq.operation.category"];
+  return `${SPAN_KINDS.has(category) ? category : "tool"}:${id}`;
 }
 
 export const batchCalls = (batch) => batch.spans.map(spanCall).filter(Boolean);
@@ -109,6 +120,15 @@ async function adopt(dir, entry) {
 }
 
 export const journalName = (file) => path.basename(file).replace(/\.claim-\d+$/, "");
+
+export async function forgetJournaled(dataDir, names) {
+  if (names.length === 0) return;
+  const dir = journalDir(dataDir);
+  const landed = new Set(names);
+  const entries = await listRecords(dir, journalFields);
+  const covered = entries.filter((entry) => landed.has(entry.ready));
+  await Promise.all(covered.map((entry) => removeRecord(dir, entry.name)));
+}
 
 export async function journalBacklog(dataDir, binding, busy, now = Date.now(), spooled = null) {
   const dir = journalDir(dataDir);

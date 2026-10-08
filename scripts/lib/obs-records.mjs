@@ -4,7 +4,7 @@ import { OBS_DRAFT_MAX_AGE_MS, OBS_RECORD_MAX_AGE_MS } from "./obs-ages.mjs";
 
 const NAME = /^((\d+)-.+?\.json)(?:\.claim-(\d+))?(\.tmp\..+)?$/;
 
-function processGone(pid) {
+export function processGone(pid) {
   try {
     process.kill(pid, 0);
     return false;
