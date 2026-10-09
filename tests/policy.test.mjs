@@ -888,7 +888,7 @@ function v1Policy(name, statements) {
   };
 }
 
-test("handleUserPromptSubmit suppresses the intent directive under an all-allow policy", async () => {
+test("handleUserPromptSubmit injects a capture-only intent directive under an all-allow policy (#294)", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { planningEnabled: true, intentRequired: true });
   await savePolicyState(config.policyFile, {
@@ -909,10 +909,10 @@ test("handleUserPromptSubmit suppresses the intent directive under an all-allow 
     config
   );
   const ctx = output?.hookSpecificOutput?.additionalContext || "";
-  assert.ok(
-    !ctx.includes("register_intent_plan"),
-    "no intent directive should be injected when the policy is all-allow (enforcement is off)"
-  );
+  assert.ok(ctx.includes("register_intent_plan"));
+  assert.match(ctx, /ArmorClaude intent capture is active/);
+  assert.match(ctx, /The current policy blocks none of them/);
+  assert.ok(!ctx.includes("will be blocked"));
 });
 
 test("handleUserPromptSubmit injects the intent directive when the policy enforces", async () => {
