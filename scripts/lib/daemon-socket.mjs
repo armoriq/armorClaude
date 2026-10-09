@@ -9,11 +9,14 @@ function shortSocketDir() {
   return path.join("/tmp", `armorclaude-${process.getuid()}`);
 }
 
-export function daemonSocketPath(dataDir) {
+const dataDirKey = (dataDir) =>
+  createHash("sha256").update(path.resolve(dataDir)).digest("hex").slice(0, 16);
+
+export function daemonSocketPath(dataDir, platform = process.platform) {
+  if (platform === "win32") return `\\\\.\\pipe\\armorclaude-${dataDirKey(dataDir)}`;
   const inDataDir = path.join(dataDir, "daemon.sock");
   if (Buffer.byteLength(inDataDir) <= MAX_SOCKET_PATH_BYTES) return inDataDir;
-  const key = createHash("sha256").update(path.resolve(dataDir)).digest("hex").slice(0, 16);
-  return path.join(shortSocketDir(), `${key}.sock`);
+  return path.join(shortSocketDir(), `${dataDirKey(dataDir)}.sock`);
 }
 
 function untrustedReason(dir) {
@@ -44,11 +47,13 @@ export function prepareSocketDir(dir) {
 }
 
 export function prepareDaemonSocketDir(socketPath) {
+  if (process.platform === "win32") return;
   const dir = path.dirname(socketPath);
   if (dir === shortSocketDir()) prepareSocketDir(dir);
 }
 
 export function assertTrustedSocketPath(socketPath) {
+  if (process.platform === "win32") return;
   const dir = path.dirname(socketPath);
   if (dir === shortSocketDir()) assertTrustedSocketDir(dir);
 }
