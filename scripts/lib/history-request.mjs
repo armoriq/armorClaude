@@ -8,11 +8,10 @@ export async function historyRequest(config, deviceId, log) {
   return null;
 }
 
-/** Clears this user's progress and skipped hours once per request, so every earlier session-hour posts again. */
+/** Clears this user's progress once per request, so every earlier session-hour posts again. */
 export function startHistory(state, requestedAt) {
   if (!requestedAt || state.history?.requestedAt === requestedAt) return false;
   state.sessions = {};
-  delete state.skip;
   state.history = { requestedAt };
   return true;
 }

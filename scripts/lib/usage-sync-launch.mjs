@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensurePrivateDirSync, openPrivateSync, writePrivateFileSync } from "./fs-store.mjs";
@@ -34,30 +34,6 @@ export function userStatePath(dataDir, { backend, product, userId }) {
     .digest("hex")
     .slice(0, 32);
   return path.join(syncBasePath(dataDir), `${id}.json`);
-}
-
-/**
- * The UTC hours to skip because another user synced from this data dir after
- * this user's last sync: strictly after this user's last sync hour ("" when
- * they never synced here) and strictly before `now`'s hour. Null when nobody did.
- */
-export function switchWindow(statePath, now = new Date()) {
-  const mtime = (file) => statSync(file).mtimeMs;
-  try {
-    const own = existsSync(statePath) ? mtime(statePath) : null;
-    const dir = path.dirname(statePath);
-    const switched = readdirSync(dir).some(
-      (f) =>
-        f.endsWith(".json") &&
-        f !== path.basename(statePath) &&
-        mtime(path.join(dir, f)) >= (own ?? -Infinity)
-    );
-    if (!switched) return null;
-    const hour = (ms) => new Date(ms).toISOString().slice(0, 13);
-    return { after: own === null ? "" : hour(own), before: hour(now.getTime()) };
-  } catch {
-    return null;
-  }
 }
 
 export function isAlive(pid) {
