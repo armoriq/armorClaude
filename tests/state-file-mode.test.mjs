@@ -6,6 +6,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, stat, writeFile } from "node:
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { tempHome } from "./helpers/login-profile.mjs";
 import { createAuditWal } from "../scripts/lib/audit-wal.mjs";
 import { handleSessionStart } from "../scripts/lib/engine.mjs";
 import {
@@ -190,11 +191,10 @@ test("the hook router makes an existing data dir 0700", async () => {
     stdio: ["pipe", "ignore", "ignore"],
     env: {
       PATH: process.env.PATH,
-      HOME: process.env.HOME,
+      HOME: tempHome(),
       NODE_OPTIONS: process.env.NODE_OPTIONS ?? "",
       ARMORCLAUDE_DATA_DIR: dataDir,
       ARMORIQ_ENV: "local",
-      ARMORIQ_API_KEY: "",
     },
   });
   try {
@@ -254,7 +254,7 @@ test("the daemon makes its data dir 0700 and its PID file 0600", async () => {
     cwd: dataDir,
     env: {
       PATH: process.env.PATH,
-      HOME: process.env.HOME,
+      HOME: tempHome(),
       NODE_OPTIONS: process.env.NODE_OPTIONS ?? "",
       ARMORCLAUDE_DATA_DIR: dataDir,
       ARMORCLAUDE_RUNTIME_FILE: path.join(dataDir, "runtime.json"),
@@ -262,8 +262,6 @@ test("the daemon makes its data dir 0700 and its PID file 0600", async () => {
       ARMORCLAUDE_DEBUG: "false",
       ARMORCLAUDE_USE_SDK_INTENT: "false",
       ARMORIQ_ENV: "local",
-      ARMORIQ_API_KEY: "",
-      CLAUDE_PLUGIN_OPTION_API_KEY: "invalid-test-key",
     },
   });
   try {
