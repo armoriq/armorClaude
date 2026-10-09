@@ -77,6 +77,7 @@ test("a history is valid only with consecutive sequences, canonical times that n
   assert.equal(validHistory(history([["2026-10-09T10:00:00Z", "A"]])), false);
   assert.equal(validHistory({ ...AB, events: [{ ...AB.events[0], sequence: 2 }] }), false);
   assert.equal(validHistory(history([[T("10:00"), ""]])), false);
+  assert.equal(validHistory({ id: "h-marker", origin: "unknown", events: [] }), false);
 });
 
 test("a fresh history gives the first user everything before their login, then each login its interval", () => {
