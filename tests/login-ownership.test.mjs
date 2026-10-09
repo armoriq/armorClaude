@@ -154,6 +154,25 @@ test("a replaced, truncated or rewritten history is a gap: old intervals hold un
   }
 });
 
+test("a second gap keeps the intervals the first gap proved", () => {
+  const first = anchorsOf(history([[T("09:00"), "A"]]), T("12:00"));
+  const second = observeHistory(
+    first,
+    history([[T("08:00"), "B"]], { id: "h-2", origin: "unknown" }),
+    T("14:00")
+  ).anchors;
+  const third = observeHistory(
+    second,
+    history([[T("15:00"), "B"]], { id: "h-3", origin: "unknown" }),
+    T("16:00")
+  ).anchors;
+  for (const anchors of [second, third]) {
+    assert.equal(ownerAt(anchors, ms(T("10:00"))), "A");
+    assert.equal(ownerAt(anchors, ms(T("13:00"))), null);
+  }
+  assert.equal(ownerAt(third, ms(T("15:30"))), "B");
+});
+
 test("a mid-hour login splits one session-hour by message time", async () => {
   const files = { [`${S1}.jsonl`]: [msg("a1", T("10:20"), 11), msg("b1", T("10:45"), 13)] };
   const a = anchorsOf(AB);
