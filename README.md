@@ -61,7 +61,7 @@ to stderr:
   it stays connected on subsequent runs without reinstalling.
 - **No API key is needed to start.** Until you sign in, the plugin runs in **local-only mode**
   (no data leaves your machine, see [Data & Privacy](#data--privacy)). Signing in with
-  `armoriq login --product armorclaude` adds backend audit, intent tokens, and CSRG proofs.
+  `armoriq-dev login --product armorclaude` adds backend audit, intent tokens, and CSRG proofs.
 
 If `claude mcp list` does not show `✓ Connected`, run the server directly from the plugin
 directory to surface the install/startup error:
@@ -120,7 +120,7 @@ armorClaude/
 
 ## Configuration
 
-ArmorClaude takes its ArmorIQ key and org only from `armoriq login --product armorclaude`,
+ArmorClaude takes its ArmorIQ key and org only from `armoriq-dev login --product armorclaude`,
 which saves them in `~/.armoriq/credentials.json` for the backend ArmorClaude calls. There is no
 key setting, and `ARMORIQ_API_KEY` is ignored.
 
