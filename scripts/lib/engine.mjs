@@ -355,7 +355,19 @@ function isPluginPlumbingTool(toolName) {
  *
  * Returns a short label ("daemon" | "wal" | "http") for debug logging.
  */
-async function emitAudit({ dto, config, iapService }) {
+async function emitAudit({ dto: row, config, iapService }) {
+  const { createAuditWal, fitAuditRow } = await import("./audit-wal.mjs");
+  let dto;
+  try {
+    dto = fitAuditRow(row);
+  } catch (err) {
+    const { appendDaemonLog } = await import("./daemon-log.mjs");
+    appendDaemonLog(
+      config.dataDir,
+      `[armorclaude] audit row rejected: ${err.message} pid=${process.pid} at=${new Date().toISOString()}`
+    );
+    return "rejected (too large)";
+  }
   if (config.daemonEnabled) {
     try {
       const { enqueueAuditViaDaemon } = await import("./daemon-client.mjs");
@@ -367,7 +379,6 @@ async function emitAudit({ dto, config, iapService }) {
   }
   if (config.auditWal) {
     try {
-      const { createAuditWal } = await import("./audit-wal.mjs");
       const wal = createAuditWal({ dataDir: config.dataDir });
       await wal.appendLine(dto);
       return "written (wal)";
@@ -436,6 +447,22 @@ async function reportTokenUsage(input, config, session, sessionId) {
     const msg = error instanceof Error ? error.message : String(error);
     debugLog(config, `[tokens] usage report failed (non-fatal): ${msg}`);
   }
+}
+
+function auditLink(config, sessionId, intentTokenRaw) {
+  let planId;
+  try {
+    planId = JSON.parse(intentTokenRaw).planId;
+  } catch {
+    planId = undefined;
+  }
+  return {
+    plan_id: planId,
+    session_id: sessionId,
+    user_id: config.userId,
+    agent_id: config.agentId,
+    client_id: config.mcpName || config.llmId,
+  };
 }
 
 /**
@@ -1482,21 +1509,11 @@ export async function handlePostToolUse(input, config) {
 
     let dto;
     if (intentTokenRaw) {
-      let token = intentTokenRaw;
-      // Extract JWT if embedded in JSON envelope
-      if (intentTokenRaw.startsWith("{")) {
-        try {
-          const parsed = JSON.parse(intentTokenRaw);
-          token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-        } catch {
-          /* use raw */
-        }
-      }
       // Compute the real step index from the registered plan so the backend's
       // updateExecutionProgress can advance plan status to 'completed'.
       const stepIdx = pickStepIndex(session.plan, toolName, inputs);
       dto = {
-        token,
+        ...auditLink(config, sessionId, intentTokenRaw),
         step_index: stepIdx,
         action: toolName,
         tool: toolName,
@@ -1569,20 +1586,11 @@ export async function handlePostToolUseFailure(input, config) {
 
     const intentTokenRaw = session.intentTokenRaw || "";
     if (!intentTokenRaw) return null;
-    let token = intentTokenRaw;
-    if (intentTokenRaw.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(intentTokenRaw);
-        token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch {
-        /* use raw */
-      }
-    }
 
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
     const stepIdx = pickStepIndex(session.plan, toolName, inputs);
     const dto = {
-      token,
+      ...auditLink(config, sessionId, intentTokenRaw),
       step_index: stepIdx,
       action: toolName,
       tool: toolName,
