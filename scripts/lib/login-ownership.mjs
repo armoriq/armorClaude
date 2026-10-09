@@ -3,6 +3,7 @@ import { readJson, writeJson } from "./fs-store.mjs";
 
 const canonical = (at) =>
   typeof at === "string" && !Number.isNaN(Date.parse(at)) && new Date(at).toISOString() === at;
+const RELOGIN = "Run: armoriq-dev login --product armorclaude --force";
 const sameEvent = (a, b) => a.sequence === b.sequence && a.at === b.at && a.userId === b.userId;
 
 export function validHistory(history) {
@@ -110,14 +111,13 @@ export const ownedOrUnassigned = (anchors, userId) => (t) => {
  */
 export async function loginOwnership({ config, userId, request, log }) {
   const history = config.loginHistory;
-  const last = history?.events?.at(-1);
-  const accepted =
-    validHistory(history) &&
-    last.userId === config.userId &&
-    last.at === config.loggedInAt &&
-    config.userId === userId;
-  if (!accepted) {
-    log("the login history doesn't match this key's owner, nothing synced");
+  if (!validHistory(history)) {
+    log(`this login has no usable login history, nothing synced. ${RELOGIN}`);
+    return null;
+  }
+  const last = history.events.at(-1);
+  if (last.userId !== config.userId || last.at !== config.loggedInAt || config.userId !== userId) {
+    log(`the latest login in the history isn't this key's owner, nothing synced. ${RELOGIN}`);
     return null;
   }
   const anchorsPath = path.join(config.dataDir, "usage-sync-login.json");

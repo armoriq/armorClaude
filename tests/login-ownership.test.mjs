@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  loginOwnership,
   observeHistory,
   ownedOrUnassigned,
   ownerAt,
@@ -403,3 +404,33 @@ for (const [origin, expected] of Object.entries(rollbackCases)) {
     );
   });
 }
+
+test("a refused login history logs its cause and the command that fixes it", async () => {
+  const UNUSABLE =
+    "this login has no usable login history, nothing synced. Run: armoriq-dev login --product armorclaude --force";
+  const NOT_OWNER =
+    "the latest login in the history isn't this key's owner, nothing synced. Run: armoriq-dev login --product armorclaude --force";
+  const h = history([[T("09:00"), "user-a"]]);
+  const config = {
+    loginHistory: h,
+    userId: "user-a",
+    loggedInAt: T("09:00"),
+    dataDir: mkdtempSync(path.join(tmpdir(), "ac-own-")),
+  };
+  const cases = [
+    [{ ...config, loginHistory: { ...h, events: [] } }, "user-a", UNUSABLE],
+    [{ ...config, userId: "user-b" }, "user-b", NOT_OWNER],
+    [{ ...config, loggedInAt: T("09:30") }, "user-a", NOT_OWNER],
+    [config, "user-b", NOT_OWNER],
+  ];
+  for (const [cfg, userId, expected] of cases) {
+    const logged = [];
+    const owned = await loginOwnership({ config: cfg, userId, log: (m) => logged.push(m) });
+    assert.equal(owned, null);
+    assert.deepEqual(logged, [expected]);
+  }
+  const logged = [];
+  const owned = await loginOwnership({ config, userId: "user-a", log: (m) => logged.push(m) });
+  assert.equal(typeof owned, "function");
+  assert.deepEqual(logged, []);
+});
