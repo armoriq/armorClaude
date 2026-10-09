@@ -9,18 +9,18 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "../scripts/lib/config.mjs";
 import { randomUUID } from "node:crypto";
 import armoriqSdk from "@armoriq/sdk-dev";
-import { loadConfigWithLogins, STAGING, withHome } from "./helpers/login-profile.mjs";
+import { loadConfig } from "../scripts/lib/config.mjs";
+import { STAGING, loadConfigWithLogins, withHome } from "./helpers/login-profile.mjs";
 import { dispatchViaDaemon } from "../scripts/lib/daemon-client.mjs";
 import {
   loadRuntimeState,
@@ -1003,7 +1003,7 @@ test("a fork's copied lines never stop its original from counting them", async (
   assert.deepEqual(summary((await run(home, state)).rows), [[S1, "2026-09-20", 9, 301]]);
 });
 
-function login(home, port, apiKey, at = new Date().toISOString()) {
+function login(home, port, apiKey, at = new Date().toISOString(), origin = "fresh") {
   assert.ok(home.startsWith(tmpdir()), home);
   const backend = `http://127.0.0.1:${port}`;
   const file = path.join(home, ".armoriq", "credentials.json");
@@ -1012,7 +1012,7 @@ function login(home, port, apiKey, at = new Date().toISOString()) {
     ? JSON.parse(readFileSync(file, "utf8"))
     : { version: 2, active: null, profiles: {}, historyOrigin: "fresh", loginHistory: {} };
   const name = armoriqSdk.profileName(backend, "armorclaude");
-  const history = doc.loginHistory[name] ?? { id: randomUUID(), origin: "fresh", events: [] };
+  const history = doc.loginHistory[name] ?? { id: randomUUID(), origin, events: [] };
   history.events.push({ sequence: history.events.length + 1, at, userId: userOf(apiKey) });
   doc.loginHistory[name] = history;
   doc.profiles[name] = {
@@ -1045,7 +1045,8 @@ function stateFiles(home) {
         files[path.relative(home, full)] = readFileSync(full, "utf8");
     }
   };
-  if (existsSync(path.join(home, "data"))) walk(path.join(home, "data"));
+  const states = path.join(home, "data", "usage-sync");
+  if (existsSync(states)) walk(states);
   return files;
 }
 
@@ -1085,7 +1086,6 @@ test("after a user switch, B uploads from its login on and A's state is untouche
     const b = await cliAgainst(home, port, asLoggedIn);
     assert.equal(b.status, 0, b.stderr);
     assert.equal(rowsOf("ak_test_user_b").length, 0);
-    assert.match(b.stderr, /uploading from \d{4}-\d{2}-\d{2}T\d{2}:00 UTC on/);
     const afterB = stateFiles(home);
     for (const [file, text] of Object.entries(afterA)) assert.equal(afterB[file], text, file);
     assert.equal(Object.keys(afterB).length, Object.keys(afterA).length + 1);
@@ -1100,33 +1100,29 @@ test("after a user switch, B uploads from its login on and A's state is untouche
   }
 });
 
-test("switching back, A skips only the hours another user had the device", async () => {
+test("switching back, A skips only the time another user was logged in", async () => {
   const { server, posts, postedBy, port } = await fakeBackend();
   try {
     const home = fixtureHome();
-    const dataDir = path.join(home, "data");
     const rowsOf = (user) => posts.filter((_, i) => postedBy[i] === userOf(user));
-    login(home, port, "ak_test_user_a");
+    login(home, port, "ak_test_user_a", isoIn(-6 * 3_600_000));
     assert.equal((await cliAgainst(home, port, asLoggedIn)).status, 0);
-    const lastSyncA = new Date(Date.now() - 5 * 3_600_000);
-    utimesSync(userState(dataDir, port, "ak_test_user_a"), lastSyncA, lastSyncA);
-    login(home, port, "ak_test_user_b");
+    login(home, port, "ak_test_user_b", isoIn(-4 * 3_600_000));
     assert.equal((await cliAgainst(home, port, asLoggedIn)).status, 0);
 
-    const beforeSwitch = isoIn(-6 * 3_600_000);
+    const whileA = isoIn(-5 * 3_600_000);
     const whileB = isoIn(-3 * 3_600_000);
-    const afterReturn = isoIn(60_000);
-    append(home, `${S2}.jsonl`, assistant("a-late", beforeSwitch, 4));
+    append(home, `${S2}.jsonl`, assistant("a-late", whileA, 4));
     append(home, `${S2}.jsonl`, assistant("b-mid", whileB, 5));
-    login(home, port, "ak_test_user_a");
+    login(home, port, "ak_test_user_a", isoIn(-1 * 3_600_000));
     const back = await cliAgainst(home, port, asLoggedIn);
     assert.equal(back.status, 0, back.stderr);
     const hoursOfA = rowsOf("ak_test_user_a")
       .slice(3)
       .map((r) => [r.usageDate, r.usageHour]);
-    assert.deepEqual(hoursOfA, [hourOf(beforeSwitch)]);
-    assert.match(back.stderr, /since .* UTC, skipping the hours in between/);
+    assert.deepEqual(hoursOfA, [hourOf(whileA)]);
 
+    const afterReturn = isoIn(60_000);
     append(home, `${S2}.jsonl`, assistant("a-new", afterReturn, 6));
     const next = await cliAgainst(home, port, asLoggedIn);
     assert.equal(next.status, 0, next.stderr);
@@ -1237,28 +1233,31 @@ test("a backend URL with a trailing slash keys the same state", () => {
   );
 });
 
-async function switchedToB(backend) {
+async function resetThenB(backend) {
   const home = fixtureHome();
-  login(home, backend.port, "ak_test_user_a");
+  login(home, backend.port, "ak_test_user_a", isoIn(-2 * 3_600_000));
   assert.equal((await cliAgainst(home, backend.port, asLoggedIn)).status, 0);
-  login(home, backend.port, "ak_test_user_b");
+  rmSync(path.join(home, ".armoriq", "credentials.json"));
+  const unassigned = isoIn(2 * 60_000);
+  append(home, `${S2}.jsonl`, assistant("u1", unassigned, 9));
+  login(home, backend.port, "ak_test_user_b", isoIn(5 * 60_000), "unknown");
   const b = await cliAgainst(home, backend.port, asLoggedIn);
   assert.equal(b.status, 0, b.stderr);
-  return home;
+  return { home, unassigned };
 }
 
-test("a dashboard history request uploads the device's earlier history once, under that user", async () => {
+test("a dashboard history request uploads the unassigned earlier history once, never another user's", async () => {
   const backend = await fakeBackend();
   try {
     const rowsOf = (user) => backend.posts.filter((_, i) => backend.postedBy[i] === userOf(user));
-    const home = await switchedToB(backend);
+    const { home, unassigned } = await resetThenB(backend);
     assert.equal(rowsOf("ak_test_user_b").length, 0);
 
     const requestedAt = "2026-10-09T08:00:00.000Z";
     backend.history.requests.set(userOf("ak_test_user_b"), requestedAt);
     const full = await cliAgainst(home, backend.port, asLoggedIn);
     assert.equal(full.status, 0, full.stderr);
-    assert.deepEqual(summary(rowsOf("ak_test_user_b")), summary(rowsOf("ak_test_user_a")));
+    assert.deepEqual(summary(rowsOf("ak_test_user_b")), [[S2, ...hourOf(unassigned), 9]]);
     assert.deepEqual(
       backend.history.done.map(({ user, requestedAt: at, deviceId }) => [
         user,
@@ -1270,7 +1269,8 @@ test("a dashboard history request uploads the device's earlier history once, und
 
     const after = await cliAgainst(home, backend.port, asLoggedIn);
     assert.equal(after.status, 0, after.stderr);
-    assert.equal(rowsOf("ak_test_user_b").length, 3);
+    assert.equal(rowsOf("ak_test_user_b").length, 1);
+    assert.equal(rowsOf("ak_test_user_a").length, 3);
     assert.equal(backend.history.done.length, 1);
   } finally {
     backend.server.close();
@@ -1281,17 +1281,17 @@ test("if confirming the history request fails, the next run confirms without upl
   const backend = await fakeBackend();
   try {
     const rowsOf = (user) => backend.posts.filter((_, i) => backend.postedBy[i] === userOf(user));
-    const home = await switchedToB(backend);
+    const { home } = await resetThenB(backend);
     backend.history.requests.set(userOf("ak_test_user_b"), "2026-10-09T08:00:00.000Z");
     backend.history.failDone = true;
     const first = await cliAgainst(home, backend.port, asLoggedIn);
-    assert.equal(rowsOf("ak_test_user_b").length, 3);
+    assert.equal(rowsOf("ak_test_user_b").length, 1);
     assert.match(first.stderr, /could not confirm the dashboard's history request/);
 
     backend.history.failDone = false;
     const second = await cliAgainst(home, backend.port, asLoggedIn);
     assert.equal(second.status, 0, second.stderr);
-    assert.equal(rowsOf("ak_test_user_b").length, 3);
+    assert.equal(rowsOf("ak_test_user_b").length, 1);
     assert.deepEqual(
       backend.history.done.map((d) => d.failed),
       [true, false]
@@ -1305,7 +1305,7 @@ test("a history request that can't be read leaves the normal sync running", asyn
   const backend = await fakeBackend();
   try {
     backend.history.failRead = true;
-    const home = await switchedToB(backend);
+    const { home } = await resetThenB(backend);
     const rowsOf = (user) => backend.posts.filter((_, i) => backend.postedBy[i] === userOf(user));
     assert.equal(rowsOf("ak_test_user_a").length, 3);
     assert.equal(rowsOf("ak_test_user_b").length, 0);
