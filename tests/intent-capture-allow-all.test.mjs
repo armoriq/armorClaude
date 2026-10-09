@@ -134,3 +134,23 @@ test("under an all-allow policy a malformed CSRG proof header does not block the
   });
   assert.equal(denied(output), false, JSON.stringify(output));
 });
+
+test("under an all-allow policy a failed token request is not retried until the next prompt (#294)", async (t) => {
+  const backend = await startBackend({
+    "POST /iap/sdk/token": () => [402, { message: "Payment required: upgrade to Pro" }],
+  });
+  const { hook } = await startHookSession(t, backend);
+  const tokenRequests = () => backend.requests.filter((r) => r.route === "POST /iap/sdk/token");
+  const bash = { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } };
+
+  await hook({ hook_event_name: "UserPromptSubmit", prompt: "list the files" });
+  assert.equal(denied(await hook(bash)), false);
+  const afterFirst = tokenRequests().length;
+  assert.ok(afterFirst > 0);
+  for (let i = 0; i < 2; i++) assert.equal(denied(await hook(bash)), false);
+  assert.equal(tokenRequests().length, afterFirst);
+
+  await hook({ hook_event_name: "UserPromptSubmit", prompt: "list them again" });
+  assert.equal(denied(await hook(bash)), false);
+  assert.ok(tokenRequests().length > afterFirst);
+});

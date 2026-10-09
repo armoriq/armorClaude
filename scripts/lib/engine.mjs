@@ -666,6 +666,7 @@ export async function handleUserPromptSubmit(input, config) {
   upsertSession(runtimeState, sessionId, {
     lastPrompt: prompt,
     lastPromptAt: nowEpochSeconds(),
+    intentRequestFailed: false,
   });
   // Refresh the active-session pointer: register_intent_plan (MCP) is typically
   // the next event, and it resolves the session id from here.
@@ -1167,7 +1168,7 @@ export async function handlePreToolUse(input, config) {
   }
 
   // If no token, try to acquire one.
-  if (!intentTokenRaw && config.apiKey) {
+  if (!intentTokenRaw && config.apiKey && !(allowAll && session.intentRequestFailed)) {
     try {
       const intentResponse = await requestIntent(config, {
         prompt: session.lastPrompt || `Use tool ${toolName}`,
@@ -1199,6 +1200,7 @@ export async function handlePreToolUse(input, config) {
           ? getSessionTokenUsedStepIndices(merged, intentTokenRaw)
           : undefined;
     } catch (error) {
+      if (allowAll) upsertSession(runtimeState, sessionId, { intentRequestFailed: true });
       const message = error instanceof Error ? error.message : String(error);
       // A billing/subscription 402 only means the REMOTE layer is unavailable —
       // it is NOT a policy decision. The configured policy is still enforced
