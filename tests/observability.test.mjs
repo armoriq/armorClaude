@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { loadConfig } from "../scripts/lib/config.mjs";
+import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
 import { denyPreToolWithHint } from "../scripts/lib/hook-output.mjs";
 import { JOURNAL_MAX_ENTRIES } from "../scripts/lib/obs-journal.mjs";
 import {
@@ -15,11 +15,10 @@ import {
 } from "@opentelemetry/sdk-trace-node";
 
 test("observabilityEnabled true when daemon on + api key present", () => {
-  const cfg = loadConfig({
-    ARMORIQ_ENV: "local",
-    ARMORIQ_BACKEND_URL: "http://localhost:8080",
-    ARMORIQ_API_KEY: "ak_live_test0000000000000000000000000000",
-  });
+  const cfg = loadConfigWithLogins(
+    [{ backend: "http://localhost:8080", apiKey: "ak_live_test0000000000000000000000000000" }],
+    { ARMORIQ_ENV: "local", ARMORIQ_BACKEND_URL: "http://localhost:8080" }
+  );
   assert.equal(cfg.observabilityEnabled, true);
   assert.equal(cfg.observabilityEndpoint, "http://localhost:8080");
   assert.equal(cfg.observabilityProduct, "armorclaude");

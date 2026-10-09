@@ -19,6 +19,7 @@ import { loadConfig } from "./lib/config.mjs";
 import { deviceIdentity } from "./lib/device.mjs";
 import { writeJson } from "./lib/fs-store.mjs";
 import { getSdkClient } from "./lib/intent.mjs";
+import { noteTokenUsageResult, RELOGIN_NOTICE } from "./lib/relogin.mjs";
 import { loadRuntimeState } from "./lib/runtime-state.mjs";
 import { loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
 import { defaultStatePath, isAlive, requestedAt, syncPaths } from "./lib/usage-sync-launch.mjs";
@@ -69,7 +70,11 @@ async function syncPass({ config, statePath, deadline }) {
         process.stdout.write(`${JSON.stringify(toBody(row))}\n`);
         return { ok: true };
       }
-    : (row) => client.recordTokenUsage(toBody(row));
+    : async (row) => {
+        const result = await client.recordTokenUsage(toBody(row));
+        noteTokenUsageResult(config, result);
+        return result;
+      };
   const started = Date.now();
   const report = await syncUsage({
     projectsDir: PROJECTS_DIR,
@@ -90,6 +95,7 @@ async function syncPass({ config, statePath, deadline }) {
       `(${report.tokens} tokens), ${report.failed} failed, ${report.left} left for the next run, ` +
       `${Date.now() - started}ms`
   );
+  if (report.reloginRequired) log(RELOGIN_NOTICE);
   if (report.failed) process.exitCode = 1;
 }
 

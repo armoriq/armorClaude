@@ -24,6 +24,8 @@ import { sessionTranscriptPaths, summarizeSessionUsageByHour } from "@armoriq/sd
 import { loadConfig } from "./lib/config.mjs";
 import { deviceIdentity } from "./lib/device.mjs";
 import { classifyTranscripts } from "./lib/transcripts.mjs";
+import { getSdkClient } from "./lib/intent.mjs";
+import { noteTokenUsageResult, RELOGIN_NOTICE } from "./lib/relogin.mjs";
 
 const argv = process.argv.slice(2);
 const args = new Set(argv);
@@ -37,13 +39,13 @@ const PROJECTS_DIR = path.join(homedir(), ".claude", "projects");
 const { deviceId, deviceName } = deviceIdentity();
 
 async function post(config, body) {
-  const res = await fetch(`${config.backendEndpoint}/dashboard/token-usage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-API-Key": config.apiKey },
-    body: JSON.stringify(body),
-  });
-  const text = await res.text().catch(() => "");
-  return { ok: res.status < 400, status: res.status, body: text };
+  const result = await getSdkClient(config).recordTokenUsage(body);
+  noteTokenUsageResult(config, result);
+  if (result.reloginRequired) {
+    console.error(RELOGIN_NOTICE);
+    process.exit(1);
+  }
+  return result;
 }
 
 async function main() {
@@ -128,7 +130,7 @@ async function main() {
           );
         } else {
           failed++;
-          console.error(`[backfill] FAIL  ${sessionId} http=${r.status} ${r.body.slice(0, 200)}`);
+          console.error(`[backfill] FAIL  ${sessionId} ${r.status ?? r.reason}`);
         }
       } catch (e) {
         failed++;

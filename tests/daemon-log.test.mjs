@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendDaemonLog, capDaemonLog, daemonLogPath } from "../scripts/lib/daemon-log.mjs";
+import { tempHome } from "./helpers/login-profile.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const hookRouter = path.resolve(here, "..", "scripts", "hook-router.mjs");
@@ -92,8 +93,7 @@ function runHook(dataDir, input) {
       ARMORCLAUDE_POLICY_FILE: path.join(dataDir, "policy.json"),
       ARMORCLAUDE_DEBUG: "false",
       ARMORCLAUDE_USE_SDK_INTENT: "false",
-      ARMORIQ_API_KEY: "",
-      CLAUDE_PLUGIN_OPTION_API_KEY: "invalid-test-key",
+      HOME: tempHome(),
     },
     cwd: dataDir,
   });

@@ -31,6 +31,7 @@ import {
   writeSpoolBatch,
 } from "./obs-spool.mjs";
 import { claimRootStart, markRootEnded, rootEndedAt } from "./obs-root-marker.mjs";
+import { markReloginRequired } from "./relogin.mjs";
 
 const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
 
@@ -122,7 +123,8 @@ const leaseStoreFor = (config) =>
   obsLeaseStore(config.dataDir, config.observabilityEndpoint, config.apiKey);
 
 function dataDirOptions(config, entry, leaseStore = leaseStoreFor(config)) {
-  return entry ? { leaseStore, spanSink: spoolSink(config, entry) } : { leaseStore };
+  const options = { leaseStore, onReloginRequired: () => markReloginRequired(config) };
+  return entry ? { ...options, spanSink: spoolSink(config, entry) } : options;
 }
 
 function runtimeOptionsFor(config, entry, leaseStore) {
