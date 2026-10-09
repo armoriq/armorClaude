@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
@@ -217,7 +217,13 @@ async function stopDaemon(dataDir) {
   );
 }
 
-function writeTranscript(home, sessionId) {
+function sessionUuid(label) {
+  const h = createHash("sha256").update(label).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+function writeTranscript(home, label) {
+  const sessionId = sessionUuid(label);
   const dir = path.join(home, ".claude", "projects", "-work-project-a");
   mkdirSync(dir, { recursive: true });
   const line = {
@@ -307,7 +313,7 @@ for (const [what, refusals] of Object.entries(REFUSALS)) {
 
 test("a history sync refused with relogin_required prints the line once and stops", async () => {
   await withBackend({ daemon: false, refusals: { tokenUsage: RELOGIN_BODY } }, async (run) => {
-    writeTranscript(run.home, randomUUID());
+    writeTranscript(run.home, "s-other");
     const { code, stderr } = await runScript(backfill, run.env, "");
     assert.equal(code, 1);
     assert.equal(stderr.split(RELOGIN_NOTICE).length - 1, 1, stderr);

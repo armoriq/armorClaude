@@ -163,6 +163,10 @@ export async function syncUsage({
       } else {
         ok = false;
         report.failed++;
+        if (result?.reloginRequired) {
+          report.reloginRequired = true;
+          return report;
+        }
       }
     }
     if (ok) {
