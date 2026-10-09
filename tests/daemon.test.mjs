@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { tempHome } from "./helpers/login-profile.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
@@ -28,10 +29,7 @@ function buildEnv(dataDir) {
     ARMORCLAUDE_POLICY_FILE: path.join(dataDir, "policy.json"),
     ARMORCLAUDE_DEBUG: "false",
     ARMORCLAUDE_USE_SDK_INTENT: "false",
-    ARMORIQ_API_KEY: "",
-    // Preempt any developer-machine credentials file, then exercise the
-    // unconfigured path deterministically after loadConfig drops this value.
-    CLAUDE_PLUGIN_OPTION_API_KEY: "invalid-test-key",
+    HOME: tempHome(),
   };
 }
 

@@ -176,24 +176,24 @@ connect_to_armoriq() {
 EOF
 
   if ! is_promptable; then
-    printf "  Run ${G}${B}armoriq login${N} to connect later.\n\n"
+    printf "  Run ${G}${B}armoriq login --product armorclaude${N} to connect later.\n\n"
     return 0
   fi
 
   if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
     echo
-    printf "  No problem. Run ${G}${B}armoriq login${N} anytime to connect.\n\n"
+    printf "  No problem. Run ${G}${B}armoriq login --product armorclaude${N} anytime to connect.\n\n"
     return 0
   fi
 
   echo
   # Run armoriq login inline — uses the globally installed CLI or npx fallback
   if command -v armoriq >/dev/null 2>&1; then
-    armoriq login
+    armoriq login --product armorclaude
   elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk-dev login
+    npx @armoriq/sdk-dev login --product armorclaude
   else
-    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk-dev login${N} manually."
+    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk-dev login --product armorclaude${N} manually."
     return 0
   fi
 

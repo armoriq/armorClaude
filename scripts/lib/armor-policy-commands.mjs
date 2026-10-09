@@ -2539,7 +2539,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
 
     case "profile-push": {
       if (!config.apiKey)
-        return "Profile push requires an API key. Set ARMORIQ_API_KEY or configure credentials.";
+        return "Profile push needs a sign-in. Run: armoriq login --product armorclaude";
       const profile = await loadProfile(config, parsed.name);
       if (!profile) return `Profile not found: ${parsed.name}`;
       const result = await pushProfileToBackend(config, profile);
@@ -2550,7 +2550,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
 
     case "profile-pull": {
       if (!config.apiKey)
-        return "Profile pull requires an API key. Set ARMORIQ_API_KEY or configure credentials.";
+        return "Profile pull needs a sign-in. Run: armoriq login --product armorclaude";
       const result = await pullProfilesFromBackend(config);
       if (!result.ok) return `Failed to pull profiles: ${result.reason || `HTTP ${result.status}`}`;
       if (!result.profiles.length) return "No org profiles found on backend.";
@@ -2591,8 +2591,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
     }
 
     case "sync": {
-      if (!config.apiKey)
-        return "Sync requires an API key. Set ARMORIQ_API_KEY or configure credentials.";
+      if (!config.apiKey) return "Sync needs a sign-in. Run: armoriq login --product armorclaude";
       const state = await loadPolicyState(config.policyFile);
       const result = await syncPolicyToBackend(config, state);
       if (!result.ok) return `Sync failed: ${result.reason || `HTTP ${result.status}`}`;
