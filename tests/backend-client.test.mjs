@@ -197,21 +197,21 @@ test("/armor policy sync without apiKey returns error", async () => {
   const config = buildConfig(tmp);
   await seedPolicy(config, [{ id: "p1", action: "allow", tool: "*" }]);
   const out = await handleArmorPolicyCommand("/armor policy sync", config);
-  assert.ok(out.includes("API key"));
+  assert.ok(out.includes("armoriq login --product armorclaude"));
 });
 
 test("/armor policy profile push without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor policy profile push my-profile", config);
-  assert.ok(out.includes("API key"));
+  assert.ok(out.includes("armoriq login --product armorclaude"));
 });
 
 test("/armor policy profile pull without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor policy profile pull", config);
-  assert.ok(out.includes("API key"));
+  assert.ok(out.includes("armoriq login --product armorclaude"));
 });
 
 test("/armor policy profile push with apiKey sends to backend", async () => {
