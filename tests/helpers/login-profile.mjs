@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import {
   copyFileSync,
@@ -32,17 +33,31 @@ export function writeLoginProfiles(home, entries) {
   const file = credentialsFile(home);
   const doc = existsSync(file)
     ? JSON.parse(readFileSync(file, "utf8"))
-    : { version: 2, active: null, profiles: {} };
+    : { version: 2, active: null, profiles: {}, historyOrigin: "fresh", loginHistory: {} };
   const { profiles } = doc;
-  for (const { backend, product = "armorclaude", apiKey, orgId = "org-login" } of entries) {
-    profiles[profileName(backend, product)] = {
+  for (const {
+    backend,
+    product = "armorclaude",
+    apiKey,
+    orgId = "org-login",
+    userId = "user-login",
+    loggedInAt = "2026-10-08T12:00:00.000Z",
+  } of entries) {
+    const name = profileName(backend, product);
+    profiles[name] = {
       backend: new URL(backend).origin,
       product,
       apiKey,
       email: "dev@example.com",
-      userId: "user-login",
+      userId,
       orgId,
-      savedAt: "2026-10-08T12:00:00.000Z",
+      loggedInAt,
+      savedAt: loggedInAt,
+    };
+    doc.loginHistory[name] = {
+      id: randomUUID(),
+      origin: "fresh",
+      events: [{ sequence: 1, at: loggedInAt, userId }],
     };
   }
   writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o600 });
