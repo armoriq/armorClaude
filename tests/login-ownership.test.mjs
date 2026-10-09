@@ -329,30 +329,58 @@ test("an overlap inside an archived history stays unclaimed after a gap", async 
   ]);
 });
 
-test("the shared clock-rollback history: overlap usage is posted for no one and nothing counts twice", async () => {
-  const anchors = anchorsOf(
-    JSON.parse(readFileSync(new URL("./fixtures/login-clock-rollback.json", import.meta.url)))
-  );
-  const at = (time) => `2026-10-09T${time}Z`;
-  const files = {
-    [`${S1}.jsonl`]: [
-      msg("m1", at("09:00:00.000"), 5),
-      msg("m2", at("09:55:00.000"), 7),
-      msg("m3", at("10:37:12.344"), 11),
-      msg("m4", at("10:59:59.999"), 13),
-      msg("m5", at("11:05:00.000"), 17),
-      msg("m6", at("11:30:00.000"), 19),
+const rollbackCases = {
+  unknown: {
+    A: [[11, 36]],
+    B: [[10, 24]],
+    claimedByA: [
+      [11, 36],
+      [9, 5],
     ],
-  };
-  const row = (hour, tokens) => [S1, "2026-10-09", hour, tokens];
-  assert.deepEqual((await postedFor(files, ownsFor(anchors, "A"))).rows, [row(11, 36)]);
-  assert.deepEqual((await postedFor(files, ownsFor(anchors, "B"))).rows, [row(10, 24)]);
-  assert.deepEqual((await postedFor(files, ownedOrUnassigned(anchors, "A"))).rows, [
-    row(11, 36),
-    row(9, 5),
-  ]);
-  assert.deepEqual((await postedFor(files, ownedOrUnassigned(anchors, "B"))).rows, [
-    row(10, 24),
-    row(9, 5),
-  ]);
-});
+    claimedByB: [
+      [10, 24],
+      [9, 5],
+    ],
+  },
+  fresh: {
+    A: [
+      [11, 36],
+      [9, 5],
+    ],
+    B: [[10, 24]],
+    claimedByA: [
+      [11, 36],
+      [9, 5],
+    ],
+    claimedByB: [[10, 24]],
+  },
+};
+
+for (const [origin, expected] of Object.entries(rollbackCases)) {
+  test(`the shared ${origin}-origin clock-rollback history: overlap usage is posted for no one and nothing counts twice`, async () => {
+    const fixture = new URL(`./fixtures/login-clock-rollback-${origin}.json`, import.meta.url);
+    const anchors = anchorsOf(JSON.parse(readFileSync(fixture)));
+    const at = (time) => `2026-10-09T${time}Z`;
+    const files = {
+      [`${S1}.jsonl`]: [
+        msg("m1", at("09:00:00.000"), 5),
+        msg("m2", at("09:55:00.000"), 7),
+        msg("m3", at("10:37:12.344"), 11),
+        msg("m4", at("10:59:59.999"), 13),
+        msg("m5", at("11:05:00.000"), 17),
+        msg("m6", at("11:30:00.000"), 19),
+      ],
+    };
+    const rows = (hours) => hours.map(([hour, tokens]) => [S1, "2026-10-09", hour, tokens]);
+    assert.deepEqual((await postedFor(files, ownsFor(anchors, "A"))).rows, rows(expected.A));
+    assert.deepEqual((await postedFor(files, ownsFor(anchors, "B"))).rows, rows(expected.B));
+    assert.deepEqual(
+      (await postedFor(files, ownedOrUnassigned(anchors, "A"))).rows,
+      rows(expected.claimedByA)
+    );
+    assert.deepEqual(
+      (await postedFor(files, ownedOrUnassigned(anchors, "B"))).rows,
+      rows(expected.claimedByB)
+    );
+  });
+}
