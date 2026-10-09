@@ -86,13 +86,13 @@ List the active policy:
 
 ## 5. (Optional) Connect to ArmorIQ for backend audit + CSRG
 
-Get a free API key at <https://armoriq.ai>, then in Claude Code:
+Sign in from a terminal and approve the request in your browser:
 
 ```
-/plugin
+armoriq login --product armorclaude
 ```
 
-Pick **armorclaude** → **Configure** → set `api_key` → `enforce`.
+ArmorClaude picks the key up on its next hook and switches to `enforce`.
 
 Now every tool call:
 - gets a signed JWT intent token

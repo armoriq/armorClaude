@@ -57,6 +57,7 @@ import {
 } from "./lib/observability.mjs";
 import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
 import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
+import { withReloginNotice } from "./lib/relogin.mjs";
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
@@ -490,8 +491,13 @@ async function handleLine(rawLine, socket) {
       // audit gating, and observability so concurrent sessions never read each
       // other's credentials.
       const effectiveConfig = effectiveConfigFor(msg.configEnv);
-      const output = await withSessionLock(sessionId, () =>
-        dispatchHook(event, input, effectiveConfig)
+      const output = await withSessionLock(sessionId, async () =>
+        withReloginNotice(
+          event,
+          input,
+          effectiveConfig,
+          await dispatchHook(event, input, effectiveConfig)
+        )
       );
       await journalHook(event, input, output, effectiveConfig);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
@@ -542,7 +548,7 @@ async function stopAndExit(code) {
 process.on("SIGTERM", () => shutdown(0));
 process.on("SIGINT", () => shutdown(0));
 // SIGHUP — operator signals "config / creds changed, reload yourself".
-// Re-reads launchctl env + ~/.armoriq/credentials.json via loadConfig().
+// Re-reads the login profile via loadConfig().
 // The engine's invalidateTokenOnKeyChange detects per-session token drift
 // independently, so this signal is rarely needed — but it's the right
 // idiomatic knob for ops who want to force a reload without restarting
