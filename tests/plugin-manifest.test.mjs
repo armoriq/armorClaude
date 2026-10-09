@@ -54,7 +54,16 @@ test("dev variant stays discoverable from the published catalog", async () => {
   const entry = marketplace.plugins.find((p) => p.name === "armorclaude-dev");
 
   assert.ok(entry, "armorclaude-dev must be listed in marketplace.json");
-  assert.equal(entry.source?.source, "github", "dev variant must install from git");
-  assert.equal(entry.source?.repo, "armoriq/armorClaude", "dev variant must track this repo");
+  assert.equal(entry.source?.source, "url", "dev variant must install from a git URL");
+  assert.equal(
+    entry.source?.url,
+    "https://github.com/armoriq/armorClaude.git",
+    "dev variant must clone this repo over HTTPS so install needs no GitHub SSH key"
+  );
   assert.equal(entry.source?.ref, "dev", "dev variant must track the dev branch");
+  assert.equal(
+    entry.version,
+    undefined,
+    "dev variant must not pin a version; plugin.json on the dev branch is the only one"
+  );
 });
