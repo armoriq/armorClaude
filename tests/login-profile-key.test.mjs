@@ -307,7 +307,7 @@ for (const [what, refusals] of Object.entries(REFUSALS)) {
 
 test("a history sync refused with relogin_required prints the line once and stops", async () => {
   await withBackend({ daemon: false, refusals: { tokenUsage: RELOGIN_BODY } }, async (run) => {
-    writeTranscript(run.home, "s-other");
+    writeTranscript(run.home, randomUUID());
     const { code, stderr } = await runScript(backfill, run.env, "");
     assert.equal(code, 1);
     assert.equal(stderr.split(RELOGIN_NOTICE).length - 1, 1, stderr);
