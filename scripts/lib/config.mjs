@@ -11,12 +11,18 @@ const PRODUCT = "armorclaude";
 
 let cachedLoginCommand;
 
+export function declaredCli({ name, bin }) {
+  const clis = bin !== null && typeof bin === "object" ? Object.keys(bin) : [];
+  if (clis.length !== 1)
+    throw new Error(`${name} must declare exactly one CLI in its package.json bin`);
+  return clis[0];
+}
+
 export function loginCommand() {
-  if (cachedLoginCommand) return cachedLoginCommand;
-  const { name, bin } = createRequire(import.meta.url)("@armoriq/sdk-dev/package.json");
-  const [cli] = Object.keys(bin ?? {});
-  if (!cli) throw new Error(`${name} declares no CLI in its package.json bin`);
-  cachedLoginCommand = `${cli} login --product ${PRODUCT}`;
+  if (!cachedLoginCommand) {
+    const sdkPackage = createRequire(import.meta.url)("@armoriq/sdk-dev/package.json");
+    cachedLoginCommand = `${declaredCli(sdkPackage)} login --product ${PRODUCT}`;
+  }
   return cachedLoginCommand;
 }
 

@@ -187,7 +187,6 @@ EOF
   fi
 
   echo
-  # Run armoriq-dev login inline — uses the globally installed CLI or npx fallback
   if command -v armoriq-dev >/dev/null 2>&1; then
     armoriq-dev login --product armorclaude
   elif command -v npx >/dev/null 2>&1; then

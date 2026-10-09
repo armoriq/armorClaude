@@ -4,7 +4,7 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { loginCommand } from "../scripts/lib/config.mjs";
+import { declaredCli, loginCommand } from "../scripts/lib/config.mjs";
 import { handleSessionStart } from "../scripts/lib/engine.mjs";
 import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
 
@@ -98,4 +98,14 @@ test("the login command names the CLI the installed SDK package declares", () =>
   const { bin } = createRequire(import.meta.url)("@armoriq/sdk-dev/package.json");
   assert.deepEqual(Object.keys(bin), ["armoriq-dev"]);
   assert.equal(loginCommand(), "armoriq-dev login --product armorclaude");
+});
+
+test("the SDK package must declare exactly one CLI by name, or the login command fails", () => {
+  assert.equal(
+    declaredCli({ name: "@armoriq/sdk-dev", bin: { "armoriq-dev": "x.js" } }),
+    "armoriq-dev"
+  );
+  for (const bin of ["dist/cli/index.js", {}, { a: "a.js", b: "b.js" }, undefined]) {
+    assert.throws(() => declaredCli({ name: "@armoriq/sdk-dev", bin }), /@armoriq\/sdk-dev/);
+  }
 });
