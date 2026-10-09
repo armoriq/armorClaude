@@ -128,6 +128,11 @@ function isFrictionlessAllowPolicy(policy) {
   }
 }
 
+function intentMode(config, policy) {
+  if (!config.intentRequired) return "optional";
+  return isFrictionlessAllowPolicy(policy) ? "capture" : "required";
+}
+
 function legacyArmorPolicyMessage() {
   return "Legacy /armor-policy is intentionally unsupported. Use /armorclaude:armor policy ... instead.";
 }
@@ -203,6 +208,10 @@ function invalidateTokenOnPolicyChange(session, currentPolicyHash) {
   session.expiresAt = 0;
   session.policyHash = currentPolicyHash;
   delete session.intentExecution;
+  if (session.planCaptured) {
+    delete session.plan;
+    delete session.planCaptured;
+  }
   return true;
 }
 
@@ -352,7 +361,19 @@ function isPluginPlumbingTool(toolName) {
  *
  * Returns a short label ("daemon" | "wal" | "http") for debug logging.
  */
-async function emitAudit({ dto, config, iapService }) {
+async function emitAudit({ dto: row, config, iapService }) {
+  const { createAuditWal, fitAuditRow } = await import("./audit-wal.mjs");
+  let dto;
+  try {
+    dto = fitAuditRow(row);
+  } catch (err) {
+    const { appendDaemonLog } = await import("./daemon-log.mjs");
+    appendDaemonLog(
+      config.dataDir,
+      `[armorclaude] audit row rejected: ${err.message} pid=${process.pid} at=${new Date().toISOString()}`
+    );
+    return "rejected (too large)";
+  }
   if (config.daemonEnabled) {
     try {
       const { enqueueAuditViaDaemon } = await import("./daemon-client.mjs");
@@ -364,7 +385,6 @@ async function emitAudit({ dto, config, iapService }) {
   }
   if (config.auditWal) {
     try {
-      const { createAuditWal } = await import("./audit-wal.mjs");
       const wal = createAuditWal({ dataDir: config.dataDir });
       await wal.appendLine(dto);
       return "written (wal)";
@@ -374,6 +394,22 @@ async function emitAudit({ dto, config, iapService }) {
   }
   await iapService.createAuditLog(dto);
   return "sent (http)";
+}
+
+function auditLink(config, sessionId, intentTokenRaw) {
+  let planId;
+  try {
+    planId = JSON.parse(intentTokenRaw).planId;
+  } catch {
+    planId = undefined;
+  }
+  return {
+    plan_id: planId,
+    session_id: sessionId,
+    user_id: config.userId,
+    agent_id: config.agentId,
+    client_id: config.mcpName || config.llmId,
+  };
 }
 
 /**
@@ -448,7 +484,6 @@ export async function handleSessionStart(input, config) {
   debugLog(config, `session started: ${sessionId}, mode=${config.mode}`);
 
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
-  const intentLabel = config.intentRequired ? "required" : "optional";
 
   // --- Not connected: installed but no usable API key. Show a clear setup
   // banner and run passively (monitor mode) instead of bricking the session.
@@ -512,6 +547,7 @@ export async function handleSessionStart(input, config) {
     }
   }
 
+  const intentLabel = intentMode(config, (await loadPolicyState(config.policyFile)).policy);
   return addPromptContext(
     `ArmorClaude active (${modeLabel}, intent=${intentLabel})${syncNote}${onboardingMsg}`,
     "SessionStart"
@@ -568,6 +604,7 @@ export async function handleUserPromptSubmit(input, config) {
   upsertSession(runtimeState, sessionId, {
     lastPrompt: prompt,
     lastPromptAt: nowEpochSeconds(),
+    intentRequestFailed: false,
   });
   // Refresh the active-session pointer: register_intent_plan (MCP) is typically
   // the next event, and it resolves the session id from here.
@@ -578,20 +615,13 @@ export async function handleUserPromptSubmit(input, config) {
   // Claude will call the `register_intent_plan` MCP tool (or include a JSON
   // block in its plan file) as its first action. This uses the session's own
   // LLM — no separate API key or extra LLM call needed.
-  //
-  // Only inject this when intent is ACTUALLY enforced. Under an all-allow
-  // (frictionless) policy, handlePreToolUse does not gate tool calls, so
-  // telling Claude "enforcement is active" and "tools will be blocked" is
-  // false — and it makes Claude report a missing `register_intent_plan` tool
-  // and proceed unguarded when the policy MCP isn't surfaced. Keep this gate
-  // consistent with handlePreToolUse's enforceIntent computation.
   const policyState = await loadPolicyState(config.policyFile);
-  const allowAll = isFrictionlessAllowPolicy(policyState.policy);
-  const enforceIntent = config.intentRequired && !allowAll;
+  const mode = intentMode(config, policyState.policy);
   const parts = [];
-  if (config.planningEnabled && enforceIntent) {
+  if (config.planningEnabled && mode !== "optional") {
     parts.push(
-      "ArmorClaude intent enforcement is active. Before using any tool, " +
+      `ArmorClaude intent ${mode === "capture" ? "capture" : "enforcement"} is active. ` +
+        "Before using any tool, " +
         "declare your plan in this exact JSON shape:\n\n" +
         INTENT_PLAN_FORMAT +
         "\n\n" +
@@ -606,7 +636,9 @@ export async function handleUserPromptSubmit(input, config) {
         "server is not connected: do not fabricate the call, and tell the " +
         "user to verify it with `claude mcp list` (expect armorclaude-policy " +
         "Connected) before relying on enforcement.\n" +
-        "Tool calls without a registered plan will be blocked."
+        (mode === "capture"
+          ? "Tool calls are recorded against the registered plan. The current policy blocks none of them."
+          : "Tool calls without a registered plan will be blocked.")
     );
   }
   if (parts.length > 0) {
@@ -898,6 +930,7 @@ export async function handlePreToolUse(input, config) {
           ? pending.tokenRaw || ""
           : "",
       plan: pending.plan,
+      planCaptured: false,
       allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
       expiresAt: pending.expiresAt,
       policyHash: pending.policyHash || pendingPolicyHash,
@@ -913,9 +946,9 @@ export async function handlePreToolUse(input, config) {
   // --- Static policy evaluation ---
   const policyState = await loadPolicyState(config.policyFile);
   const currentPolicyHash = computePolicyHash(policyState.policy);
-  // "All Allow" onboarding policy => run frictionless: no intent-plan gate, no
-  // token required, no drift blocking. Any policy with a deny/require_approval
-  // keeps full enforcement.
+  // "All Allow" policy (including no confirmed policy) => intent is captured
+  // but never blocks: no plan gate, no drift, expiry or proof denies. Any
+  // policy with a deny/require_approval keeps full enforcement.
   const allowAll = isFrictionlessAllowPolicy(policyState.policy);
   const enforceIntent = config.intentRequired && !allowAll;
 
@@ -1072,10 +1105,8 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // If no token, try to acquire one. Skipped entirely for all-allow: no token
-  // is needed to run frictionless, and skipping avoids the backend round-trip
-  // (and its billing/CSRG failure modes) on a policy that permits everything.
-  if (!intentTokenRaw && config.apiKey && !allowAll) {
+  // If no token, try to acquire one.
+  if (!intentTokenRaw && config.apiKey && !(allowAll && session.intentRequestFailed)) {
     try {
       const intentResponse = await requestIntent(config, {
         prompt: session.lastPrompt || `Use tool ${toolName}`,
@@ -1097,6 +1128,7 @@ export async function handlePreToolUse(input, config) {
       const merged = mergeIntentIntoSession(session, intentResponse, config);
       merged.policyHash = currentPolicyHash;
       merged.intentPolicyCompilerVersion = INTENT_POLICY_COMPILER_VERSION;
+      merged.planCaptured = !isPlainObject(localPlan) || session.planCaptured === true;
       upsertSession(runtimeState, sessionId, merged);
       intentTokenRaw = typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
       localPlan = merged.plan || localPlan;
@@ -1106,6 +1138,7 @@ export async function handlePreToolUse(input, config) {
           ? getSessionTokenUsedStepIndices(merged, intentTokenRaw)
           : undefined;
     } catch (error) {
+      if (allowAll) upsertSession(runtimeState, sessionId, { intentRequestFailed: true });
       const message = error instanceof Error ? error.message : String(error);
       // A billing/subscription 402 only means the REMOTE layer is unavailable —
       // it is NOT a policy decision. The configured policy is still enforced
@@ -1157,7 +1190,7 @@ export async function handlePreToolUse(input, config) {
 
   // --- CSRG proof handling ---
   const parsedProofs = parseCsrgProofHeaders(input);
-  if (parsedProofs.error) {
+  if (parsedProofs.error && !allowAll) {
     return denyOrAllow(config, "csrg_proof_invalid", parsedProofs.error);
   }
   let csrgProofs = parsedProofs.proofs;
@@ -1180,7 +1213,7 @@ export async function handlePreToolUse(input, config) {
       Boolean(config.verifyStepEndpoint) &&
       Boolean(intentTokenRaw)
   );
-  if (proofError) {
+  if (proofError && !allowAll) {
     return denyOrAllow(config, "csrg_proof_rejected", proofError);
   }
 
@@ -1192,7 +1225,7 @@ export async function handlePreToolUse(input, config) {
       if (!verifyResult.skipped) {
         remoteAllowed = verifyResult.allowed === true;
       }
-      if (verifyResult.allowed === false) {
+      if (verifyResult.allowed === false && !allowAll) {
         return denyOrAllow(
           config,
           "remote_verify_denied",
@@ -1214,11 +1247,9 @@ export async function handlePreToolUse(input, config) {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const deny = denyOrAllow(
-        config,
-        "remote_verify_failed",
-        `ArmorClaude verify-step failed: ${message}`
-      );
+      const deny =
+        !allowAll &&
+        denyOrAllow(config, "remote_verify_failed", `ArmorClaude verify-step failed: ${message}`);
       if (deny) {
         return deny;
       }
@@ -1226,7 +1257,12 @@ export async function handlePreToolUse(input, config) {
   }
 
   // --- Expiry check ---
-  if (Number.isFinite(localExpiresAt) && localExpiresAt > 0 && nowEpochSeconds() > localExpiresAt) {
+  if (
+    !allowAll &&
+    Number.isFinite(localExpiresAt) &&
+    localExpiresAt > 0 &&
+    nowEpochSeconds() > localExpiresAt
+  ) {
     const deny = denyOrAllow(
       config,
       "intent_token_expired",
@@ -1376,10 +1412,12 @@ async function handleExitPlanModeCapture(input, sessionId, config) {
           const merged = mergeIntentIntoSession(session, intentResponse, config);
           merged.policyHash = policyHash;
           merged.intentPolicyCompilerVersion = INTENT_POLICY_COMPILER_VERSION;
+          merged.planCaptured = false;
           upsertSession(runtimeState, sessionId, merged);
         } else {
           // Store plan locally without ArmorIQ token
           session.plan = plan;
+          session.planCaptured = false;
           session.allowedActions = Array.from(extractAllowedActions(plan));
           upsertSession(runtimeState, sessionId, session);
         }
@@ -1420,21 +1458,11 @@ export async function handlePostToolUse(input, config) {
 
     let dto;
     if (intentTokenRaw) {
-      let token = intentTokenRaw;
-      // Extract JWT if embedded in JSON envelope
-      if (intentTokenRaw.startsWith("{")) {
-        try {
-          const parsed = JSON.parse(intentTokenRaw);
-          token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-        } catch {
-          /* use raw */
-        }
-      }
       // Compute the real step index from the registered plan so the backend's
       // updateExecutionProgress can advance plan status to 'completed'.
       const stepIdx = pickStepIndex(session.plan, toolName, inputs);
       dto = {
-        token,
+        ...auditLink(config, sessionId, intentTokenRaw),
         step_index: stepIdx,
         action: toolName,
         tool: toolName,
@@ -1507,20 +1535,11 @@ export async function handlePostToolUseFailure(input, config) {
 
     const intentTokenRaw = session.intentTokenRaw || "";
     if (!intentTokenRaw) return null;
-    let token = intentTokenRaw;
-    if (intentTokenRaw.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(intentTokenRaw);
-        token = parsed.jwtToken || parsed.jwt_token || intentTokenRaw;
-      } catch {
-        /* use raw */
-      }
-    }
 
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
     const stepIdx = pickStepIndex(session.plan, toolName, inputs);
     const dto = {
-      token,
+      ...auditLink(config, sessionId, intentTokenRaw),
       step_index: stepIdx,
       action: toolName,
       tool: toolName,
