@@ -31,6 +31,45 @@ import {
 const MAX_LINE_BYTES = 4000;
 const DEFAULT_ROTATE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_ROTATE_AGE_MS = 60 * 60 * 1000;
+const ROW_BUDGET_BYTES =
+  MAX_LINE_BYTES -
+  Buffer.byteLength(
+    JSON.stringify({ _seq: Number.MAX_SAFE_INTEGER, _enqueuedAt: Number.MAX_SAFE_INTEGER })
+  );
+
+const rowBytes = (row) => Buffer.byteLength(JSON.stringify(row), "utf8");
+
+function truncateField(row, field) {
+  const json = JSON.stringify(row[field]);
+  const originalBytes = Buffer.byteLength(json, "utf8");
+  let keep = json.length;
+  for (;;) {
+    const next = {
+      ...row,
+      [field]: { truncated: true, originalBytes, preview: json.slice(0, keep) },
+    };
+    const excess = rowBytes(next) - ROW_BUDGET_BYTES;
+    if (excess <= 0 || keep === 0) return next;
+    keep = Math.max(0, keep - excess);
+  }
+}
+
+const fieldBytes = (row, field) => Buffer.byteLength(JSON.stringify(row[field] ?? null), "utf8");
+
+export function fitAuditRow(row) {
+  const largestFirst = ["input", "output"].sort((a, b) => fieldBytes(row, b) - fieldBytes(row, a));
+  let fitted = row;
+  for (const field of largestFirst) {
+    if (rowBytes(fitted) <= ROW_BUDGET_BYTES) return fitted;
+    const shrunk = truncateField(fitted, field);
+    if (rowBytes(shrunk) < rowBytes(fitted)) fitted = shrunk;
+  }
+  const bytes = rowBytes(fitted);
+  if (bytes > ROW_BUDGET_BYTES) {
+    throw new Error(`${row.tool} row is ${bytes} bytes after truncation, cap is ${MAX_LINE_BYTES}`);
+  }
+  return fitted;
+}
 
 export function createAuditWal(opts) {
   const dir = path.join(opts.dataDir, "audit");
@@ -62,7 +101,9 @@ export function createAuditWal(opts) {
     await ensureDirs();
     const json = JSON.stringify(enriched);
     if (Buffer.byteLength(json, "utf8") > MAX_LINE_BYTES) {
-      throw new Error(`audit row too large (${json.length} bytes); cap is ${MAX_LINE_BYTES}`);
+      throw new Error(
+        `audit row too large (${Buffer.byteLength(json, "utf8")} bytes); cap is ${MAX_LINE_BYTES}`
+      );
     }
     await appendFile(currentPath, `${json}\n`, { encoding: "utf8", mode: PRIVATE_FILE_MODE });
   }

@@ -318,14 +318,9 @@ async function enqueueAudit(dto) {
       // (roughly 100-200 rows). Avoids waiting the full 5s tick.
       if (pending > 100_000) flushAudit("threshold");
     } catch (err) {
-      // Disk-full or row-too-large: fall back to in-memory so we don't
-      // silently drop the row. This is best-effort — caller is fire-and-forget.
-      if (config.debug) {
-        process.stderr.write(
-          `[daemon] audit WAL append failed (falling back to memory): ${err?.message ?? err}\n`
-        );
-      }
-      auditBuffer.push(dto);
+      process.stderr.write(
+        `[armorclaude-daemon] audit row rejected: ${err?.message ?? err} tool=${dto.tool} at=${new Date().toISOString()}\n`
+      );
     }
     return;
   }
