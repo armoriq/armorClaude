@@ -35,13 +35,11 @@ import {
   validateCsrgProofHeaders,
 } from "./intent.mjs";
 import { createIapService, reanchorViaSdk, revokeViaSdk } from "./iap-service.mjs";
-import armoriqSdk from "@armoriq/sdk-dev";
 import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
 import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
 import { notSignedIn } from "./config.mjs";
-import { noteTokenUsageResult } from "./relogin.mjs";
 import { readJson, writePrivateFile } from "./fs-store.mjs";
 import { stat, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -56,7 +54,6 @@ import {
   upsertSession,
 } from "./runtime-state.mjs";
 import { sha256Hex } from "./common.mjs";
-import { deviceIdentity } from "./device.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
@@ -397,65 +394,6 @@ async function emitAudit({ dto: row, config, iapService }) {
   }
   await iapService.createAuditLog(dto);
   return "sent (http)";
-}
-
-/**
- * Best-effort: report the session's token usage to the dashboard via the SDK
- * (`POST /dashboard/token-usage`), one row per UTC day with the repo and device.
- *
- * Stop fires every turn, so we debounce on the transcript total and only POST
- * when it changed. Each day's row is replaced server-side, so re-posting is
- * idempotent. `product` is sent explicitly so attribution works even if the API
- * key has product=NULL. `session.lastTokenTotal` is mutated in place; the caller
- * persists it. Failures are swallowed: token telemetry never breaks the hook.
- */
-// SDKs before summarizeTranscriptUsageByDay only report a session total, which
-// the backend files under today; keep reporting rather than dropping usage.
-async function transcriptUsageByDay(transcriptPath) {
-  if (typeof armoriqSdk.summarizeTranscriptUsageByDay === "function") {
-    return armoriqSdk.summarizeTranscriptUsageByDay(transcriptPath);
-  }
-  const entries = await armoriqSdk.summarizeTranscriptUsage(transcriptPath);
-  return { days: entries.length ? [{ usageDate: undefined, entries }] : [] };
-}
-
-async function reportTokenUsage(input, config, session, sessionId) {
-  if (!config.apiKey) return;
-  try {
-    const { days, repo } = await transcriptUsageByDay(input?.transcript_path);
-    const total = days
-      .flatMap((day) => day.entries)
-      .reduce(
-        (s, e) => s + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
-        0
-      );
-    if (total > 0 && total !== session.lastTokenTotal) {
-      const client = getSdkClient(config);
-      const device = deviceIdentity();
-      let allOk = true;
-      for (const day of days) {
-        const result = await client.recordTokenUsage({
-          product: config.productSlug,
-          sessionId,
-          entries: day.entries,
-          usageDate: day.usageDate,
-          repo: repo ?? input?.cwd,
-          ...device,
-          armored: true,
-        });
-        noteTokenUsageResult(config, result);
-        if (!result?.ok) allOk = false;
-        debugLog(
-          config,
-          `[tokens] ${day.usageDate} ${day.entries.length} model(s) ${result?.ok ? "ok" : "failed:" + (result?.reason || "")}`
-        );
-      }
-      if (allOk) session.lastTokenTotal = total;
-    }
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    debugLog(config, `[tokens] usage report failed (non-fatal): ${msg}`);
-  }
 }
 
 function auditLink(config, sessionId, intentTokenRaw) {
@@ -1703,14 +1641,7 @@ export async function handleStop(input, config) {
     }
   }
 
-  // Report cumulative token usage from the transcript at the turn boundary.
-  // Mutates session.lastTokenTotal in place (debounce marker) which we persist.
-  await reportTokenUsage(input, config, session, sessionId);
-
-  upsertSession(runtimeState, sessionId, {
-    lastStopAt: nowEpochSeconds(),
-    lastTokenTotal: session.lastTokenTotal,
-  });
+  upsertSession(runtimeState, sessionId, { lastStopAt: nowEpochSeconds() });
   await saveRuntimeState(config.runtimeFile, runtimeState);
   return null;
 }

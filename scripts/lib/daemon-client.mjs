@@ -240,6 +240,7 @@ export async function dispatchViaDaemon({ event, input, config }) {
           observabilityEnabled: config.observabilityEnabled,
           observabilityEndpoint: config.observabilityEndpoint,
           observabilityProduct: config.observabilityProduct,
+          usageSyncEnabled: config.usageSyncEnabled,
           auditEnabled: config.auditEnabled,
           csrgVerifyEnabled: config.csrgVerifyEnabled,
           cryptoPolicyEnabled: config.cryptoPolicyEnabled,

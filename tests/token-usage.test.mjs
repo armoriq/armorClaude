@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import armoriqSdk from "@armoriq/sdk-dev";
 import { deviceIdentity } from "../scripts/lib/device.mjs";
 import {
   loadRuntimeState,
@@ -28,26 +27,21 @@ test("deviceIdentity falls back to a stable hostname hash without a CLI id", () 
   assert.equal(a.deviceId, b.deviceId);
 });
 
-test("Stop reports one row per UTC day with the repo and device", async () => {
+// The usage sync is the only writer of token-usage rows (#156, #158).
+test("Stop posts no token usage itself", async () => {
   const { handleStop } = await import("../scripts/lib/engine.mjs");
   const intentMod = await import("../scripts/lib/intent.mjs");
   const tmp = mkdtempSync(path.join(tmpdir(), "ac-stop-"));
-  const transcript = path.join(tmp, "t.jsonl");
-  const line = (id, timestamp, input) =>
+  const transcript = path.join(tmp, "sess-tokens.jsonl");
+  writeFileSync(
+    transcript,
     JSON.stringify({
       type: "assistant",
       cwd: "/work/repo-a",
-      timestamp,
-      requestId: `req-${id}`,
-      message: { id, model: "claude-opus", usage: { input_tokens: input, output_tokens: 1 } },
-    });
-  writeFileSync(
-    transcript,
-    [
-      line("m1", "2026-09-20T23:55:00Z", 10),
-      line("m1", "2026-09-20T23:55:01Z", 10),
-      line("m2", "2026-09-21T00:05:00Z", 20),
-    ].join("\n")
+      timestamp: "2026-09-21T00:05:00Z",
+      requestId: "req-m1",
+      message: { id: "m1", model: "claude-opus", usage: { input_tokens: 20, output_tokens: 1 } },
+    })
   );
   const config = {
     mode: "enforce",
@@ -86,18 +80,8 @@ test("Stop reports one row per UTC day with the repo and device", async () => {
   } finally {
     client.recordTokenUsage = original;
   }
-  assert.ok(posts.every((p) => p.deviceId && p.sessionId === "sess-tokens"));
-  if (typeof armoriqSdk.summarizeTranscriptUsageByDay === "function") {
-    assert.deepEqual(
-      posts.map((p) => [p.usageDate, p.repo, p.entries[0].inputTokens]),
-      [
-        ["2026-09-20", "/work/repo-a", 10],
-        ["2026-09-21", "/work/repo-a", 20],
-      ]
-    );
-  } else {
-    // Older SDK: one undated session total, the pre-fix behavior.
-    assert.equal(posts.length, 1);
-    assert.equal(posts[0].usageDate, undefined);
-  }
+  assert.deepEqual(posts, []);
+  const saved = await loadRuntimeState(config.runtimeFile);
+  assert.equal(typeof saved.sessions["sess-tokens"].lastStopAt, "number");
+  assert.equal(saved.sessions["sess-tokens"].lastTokenTotal, undefined);
 });

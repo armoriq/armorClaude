@@ -130,3 +130,62 @@ export async function syncMcpRegistry(config) {
     return { ok: false, reason: String(err?.message || err), servers: [] };
   }
 }
+
+export async function keyOwner(config) {
+  if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
+  try {
+    const res = await postJson(
+      endpoint(config, "/iap/validate-key"),
+      {},
+      buildAuthHeaders(config),
+      config.timeoutMs || 8000
+    );
+    const userId = res.data?.userId;
+    if (!res.ok) return { ok: false, reason: `validate-key returned ${res.status}` };
+    if (typeof userId !== "string" || !userId)
+      return { ok: false, reason: "validate-key returned no userId" };
+    return { ok: true, userId };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err) };
+  }
+}
+
+export async function pendingHistorySync(config, deviceId) {
+  if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.timeoutMs || 8000);
+  try {
+    const query = `?deviceId=${encodeURIComponent(deviceId)}`;
+    const res = await fetch(endpoint(config, `/api-keys/device-history-sync${query}`), {
+      headers: buildAuthHeaders(config),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return { ok: false, reason: `device-history-sync returned ${res.status}` };
+    return {
+      ok: true,
+      requestedAt: typeof data?.requestedAt === "string" ? data.requestedAt : null,
+    };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err) };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function completeHistorySync(config, deviceId, requestedAt) {
+  try {
+    const url = endpoint(config, "/api-keys/device-history-sync/done");
+    const res = await postJson(
+      url,
+      { deviceId, requestedAt },
+      buildAuthHeaders(config),
+      config.timeoutMs || 8000
+    );
+    return res.ok
+      ? { ok: true }
+      : { ok: false, reason: `device-history-sync/done returned ${res.status}` };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err) };
+  }
+}

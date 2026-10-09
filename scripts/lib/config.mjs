@@ -116,6 +116,10 @@ export function loadConfig(env = process.env) {
     pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORIQ_OBSERVABILITY_DISABLED"),
     false
   );
+  const usageSyncDisabled = parseBoolean(
+    pluginOpt(env, "DISABLE_USAGE_SYNC", "ARMORIQ_USAGE_SYNC_DISABLED"),
+    false
+  );
 
   // A key is only usable if it matches the @armoriq/sdk key format
   // (ak_test_/ak_live_/ak_claw_). Anything else — empty, or a stale/old-format
@@ -153,6 +157,7 @@ export function loadConfig(env = process.env) {
     observabilityEnabled: !observabilityDisabled && Boolean(effectiveApiKey),
     observabilityEndpoint: backendEndpoint,
     observabilityProduct: "armorclaude",
+    usageSyncEnabled: !observabilityDisabled && !usageSyncDisabled && Boolean(effectiveApiKey),
 
     // The login profile's key (see effectiveApiKey above: a bad-format key is
     // dropped, and local mock substitutes an SDK-accepted placeholder).

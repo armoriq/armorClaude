@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
@@ -21,7 +21,7 @@ import {
 const { loadProfile } = armoriqSdk;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
-const backfill = path.join(repoRoot, "scripts", "backfill.mjs");
+const usageSync = path.join(repoRoot, "scripts", "usage-sync.mjs");
 const golden = JSON.parse(readFileSync(GOLDEN_CREDENTIALS, "utf8")).profiles;
 const LOGIN_KEY = "ak_live_loginprofile00000000000000";
 const RELOGIN_NOTICE =
@@ -131,6 +131,11 @@ async function startBackend(refusals) {
   const server = createServer((req, res) => {
     req.resume();
     req.on("end", () => {
+      if (req.url === "/iap/validate-key") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ userId: "user-login" }));
+        return;
+      }
       const route = ROUTES[req.url];
       const key = req.headers["x-api-key"];
       if (route) calls.push({ route, key });
@@ -217,7 +222,13 @@ async function stopDaemon(dataDir) {
   );
 }
 
-function writeTranscript(home, sessionId) {
+function sessionUuid(label) {
+  const h = createHash("sha256").update(label).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+function writeTranscript(home, label) {
+  const sessionId = sessionUuid(label);
   const dir = path.join(home, ".claude", "projects", "-work-project-a");
   mkdirSync(dir, { recursive: true });
   const line = {
@@ -308,8 +319,8 @@ for (const [what, refusals] of Object.entries(REFUSALS)) {
 test("a history sync refused with relogin_required prints the line once and stops", async () => {
   await withBackend({ daemon: false, refusals: { tokenUsage: RELOGIN_BODY } }, async (run) => {
     writeTranscript(run.home, "s-other");
-    const { code, stderr } = await runScript(backfill, run.env, "");
-    assert.equal(code, 1);
+    const { code, stderr } = await runScript(usageSync, run.env, "");
+    assert.equal(code, 1, stderr);
     assert.equal(stderr.split(RELOGIN_NOTICE).length - 1, 1, stderr);
     assert.equal(run.backend.calls.filter((c) => c.route === "tokenUsage").length, 1);
     assert.ok(refusalMarked(run.dataDir));
@@ -322,7 +333,7 @@ test("a 403 with another error on the lease, the span export or token usage prin
   await withBackend({ daemon: false, refusals }, async (run) => {
     const id = randomUUID();
     const shown = await notices(run, id, ["SessionStart", "UserPromptSubmit", "Stop", "Stop"]);
-    const sync = await runScript(backfill, run.env, "");
+    const sync = await runScript(usageSync, run.env, "");
     assert.ok(!sync.stderr.includes(RELOGIN_NOTICE), sync.stderr);
     shown.push(...(await notices(run, id, ["Stop"])));
     assert.deepEqual(shown, [false, false, false, false, false]);
