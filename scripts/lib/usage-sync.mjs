@@ -120,7 +120,8 @@ async function postRows(post, rows, session, report, failures) {
     ok = false;
     report.failed++;
     countFailure(failures, rowFailure(session.sessionId, row, result));
-    if (result?.unreachable) return { ok, unreachable: true };
+    if (result?.reloginRequired) report.reloginRequired = true;
+    if (result?.unreachable || result?.reloginRequired) return { ok, unreachable: true };
   }
   return { ok, unreachable: false };
 }

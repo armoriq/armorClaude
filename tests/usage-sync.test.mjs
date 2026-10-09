@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../scripts/lib/config.mjs";
+import { loadConfigWithLogins, STAGING } from "./helpers/login-profile.mjs";
 import { dispatchViaDaemon } from "../scripts/lib/daemon-client.mjs";
 import {
   loadRuntimeState,
@@ -698,7 +699,10 @@ test("usageSyncEnabled needs observability on and disable_usage_sync unset", () 
     [{ ARMORIQ_OBSERVABILITY_DISABLED: "yes" }, false, false],
   ];
   for (const [env, observability, usageSync] of cases) {
-    const cfg = loadConfig({ ARMORIQ_ENV: "staging", CLAUDE_PLUGIN_OPTION_API_KEY: KEY, ...env });
+    const cfg = loadConfigWithLogins([{ backend: STAGING, apiKey: KEY }], {
+      ARMORIQ_ENV: "staging",
+      ...env,
+    });
     assert.equal(cfg.observabilityEnabled, observability, JSON.stringify(env));
     assert.equal(cfg.usageSyncEnabled, usageSync, JSON.stringify(env));
   }
