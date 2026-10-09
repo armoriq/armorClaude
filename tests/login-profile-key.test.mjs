@@ -331,3 +331,30 @@ test("a 403 with another error on the lease, the span export or token usage prin
     assert.equal(refusalMarked(run.dataDir), false);
   });
 });
+
+test("config exposes identity and complete history from its accepted login", () => {
+  const home = copyGoldenCredentials(tempHome());
+  const doc = JSON.parse(readFileSync(GOLDEN_CREDENTIALS, "utf8"));
+  const expected = doc.profiles["armorclaude@staging-api.armoriq.ai"];
+  const config = withHome(home, () =>
+    loadConfig({ ARMORCLAUDE_USER_ID: "other", ARMORIQ_API_KEY: "ak_test_other" })
+  );
+  assert.equal(config.userId, expected.userId);
+  assert.equal(config.loggedInAt, expected.loggedInAt);
+  assert.deepEqual(config.loginHistory, doc.loginHistory["armorclaude@staging-api.armoriq.ai"]);
+});
+
+test("config refuses missing or invalid login timestamps without savedAt inference", () => {
+  for (const timestamp of [undefined, "invalid", "2026-10-08T12:00:00Z"]) {
+    const home = copyGoldenCredentials(tempHome());
+    const file = path.join(home, ".armoriq", "credentials.json");
+    const doc = JSON.parse(readFileSync(file, "utf8"));
+    doc.profiles["armorclaude@staging-api.armoriq.ai"].loggedInAt = timestamp;
+    writeFileSync(file, JSON.stringify(doc));
+    const config = withHome(home, () => loadConfig({}));
+    assert.equal(config.apiKey, "");
+    assert.equal(config.userId, "");
+    assert.equal(config.loggedInAt, "");
+    assert.equal(config.loginHistory, null);
+  }
+});

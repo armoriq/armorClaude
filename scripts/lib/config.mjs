@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean } from "./common.mjs";
 
-const { loadProfile } = armoriqSdk;
+const { loadLoginContext } = armoriqSdk;
 
 const PRODUCT = "armorclaude";
 
@@ -83,7 +83,8 @@ export function loadConfig(env = process.env) {
         : "https://iap-staging.armoriq.ai";
   const useProduction = activeEnv === "production";
 
-  const profile = loadProfile({ backend: backendEndpoint, product: PRODUCT });
+  const login = loadLoginContext({ backend: backendEndpoint, product: PRODUCT });
+  const profile = login?.profile;
   let apiKey = profile?.apiKey ?? "";
   const orgId = profile?.orgId ?? "";
   // Optional default policy template applied (staged for confirm) on first run.
@@ -184,7 +185,9 @@ export function loadConfig(env = process.env) {
     productSlug: "armorclaude",
     llmId: "claude-code",
     mcpName: "claude-code",
-    userId: "claude-user",
+    userId: profile?.userId ?? "",
+    loggedInAt: profile?.loggedInAt ?? "",
+    loginHistory: login?.loginHistory ?? null,
     agentId: "claude-code",
     contextId: "default",
 
