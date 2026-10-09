@@ -61,4 +61,9 @@ test("dev variant stays discoverable from the published catalog", async () => {
     "dev variant must clone this repo over HTTPS so install needs no GitHub SSH key"
   );
   assert.equal(entry.source?.ref, "dev", "dev variant must track the dev branch");
+  assert.equal(
+    entry.version,
+    undefined,
+    "dev variant must not pin a version; plugin.json on the dev branch is the only one"
+  );
 });
