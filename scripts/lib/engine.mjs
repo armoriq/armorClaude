@@ -211,6 +211,10 @@ function invalidateTokenOnPolicyChange(session, currentPolicyHash) {
   session.expiresAt = 0;
   session.policyHash = currentPolicyHash;
   delete session.intentExecution;
+  if (session.planCaptured) {
+    delete session.plan;
+    delete session.planCaptured;
+  }
   return true;
 }
 
@@ -987,6 +991,7 @@ export async function handlePreToolUse(input, config) {
           ? pending.tokenRaw || ""
           : "",
       plan: pending.plan,
+      planCaptured: false,
       allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
       expiresAt: pending.expiresAt,
       policyHash: pending.policyHash || pendingPolicyHash,
@@ -1184,6 +1189,7 @@ export async function handlePreToolUse(input, config) {
       const merged = mergeIntentIntoSession(session, intentResponse, config);
       merged.policyHash = currentPolicyHash;
       merged.intentPolicyCompilerVersion = INTENT_POLICY_COMPILER_VERSION;
+      merged.planCaptured = !isPlainObject(localPlan) || session.planCaptured === true;
       upsertSession(runtimeState, sessionId, merged);
       intentTokenRaw = typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
       localPlan = merged.plan || localPlan;
@@ -1466,10 +1472,12 @@ async function handleExitPlanModeCapture(input, sessionId, config) {
           const merged = mergeIntentIntoSession(session, intentResponse, config);
           merged.policyHash = policyHash;
           merged.intentPolicyCompilerVersion = INTENT_POLICY_COMPILER_VERSION;
+          merged.planCaptured = false;
           upsertSession(runtimeState, sessionId, merged);
         } else {
           // Store plan locally without ArmorIQ token
           session.plan = plan;
+          session.planCaptured = false;
           session.allowedActions = Array.from(extractAllowedActions(plan));
           upsertSession(runtimeState, sessionId, session);
         }

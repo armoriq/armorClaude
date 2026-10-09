@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { computePolicyHash, loadPolicyState } from "../scripts/lib/policy.mjs";
+import { computePolicyHash, loadPolicyState, savePolicyState } from "../scripts/lib/policy.mjs";
 import { startBackend, startHookSession, waitFor } from "./helpers/hook-session.mjs";
 
 function tokenRoute(planId) {
@@ -86,4 +86,37 @@ test("under an all-allow policy an expired intent token that cannot be refreshed
     tool_input: { command: "ls" },
   });
   assert.equal(denied(output), false, JSON.stringify(output));
+});
+
+test("a plan captured under allow-all does not count as registered once an enforcing policy is confirmed (#294)", async (t) => {
+  const backend = await startBackend(tokenRoute(randomUUID()));
+  const { dataDir, hook } = await startHookSession(t, backend);
+  const bash = { tool_name: "Bash", tool_input: { command: "ls" } };
+
+  await hook({ hook_event_name: "SessionStart", source: "startup" });
+  assert.equal(denied(await hook({ hook_event_name: "PreToolUse", ...bash })), false);
+
+  await savePolicyState(path.join(dataDir, "policy.json"), {
+    version: 1,
+    policy: {
+      schemaVersion: "armor.policy.v1",
+      kind: "PolicyProfile",
+      metadata: { name: "enforcing", description: "" },
+      defaults: { decision: "allow", conflictResolution: "deny_overrides" },
+      statements: [
+        {
+          id: "hold-webfetch",
+          effect: "require_approval",
+          principal: { type: "agent", id: "claude-code" },
+          action: { type: "tool", eq: "WebFetch" },
+          resource: { type: "workspace", scope: "current" },
+          conditions: [],
+        },
+      ],
+    },
+  });
+
+  const output = await hook({ hook_event_name: "PreToolUse", ...bash });
+  assert.equal(denied(output), true, JSON.stringify(output));
+  assert.match(output.hookSpecificOutput.permissionDecisionReason, /intent plan missing/);
 });
