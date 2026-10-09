@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyTranscripts } from "../scripts/lib/transcripts.mjs";
+import { STAGING, writeLoginProfiles } from "./helpers/login-profile.mjs";
 
 const BACKFILL = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -70,12 +71,12 @@ test("classifyTranscripts sorts main, subagent, journal and other files", async 
 
 test("backfill --dry-run posts one row per session-hour and counts forked history once", () => {
   const home = fixtureHome();
+  writeLoginProfiles(home, [{ backend: STAGING, apiKey: "ak_test_backfill" }]);
   const run = spawnSync(process.execPath, [BACKFILL, "--dry-run"], {
     encoding: "utf8",
     env: {
       PATH: process.env.PATH,
       HOME: home,
-      ARMORIQ_API_KEY: "ak_test_backfill",
       ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
     },
   });

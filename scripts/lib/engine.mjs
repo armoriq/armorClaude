@@ -40,6 +40,8 @@ import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs
 import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
+import { NOT_SIGNED_IN } from "./config.mjs";
+import { noteTokenUsageResult } from "./relogin.mjs";
 import { readJson, writePrivateFile } from "./fs-store.mjs";
 import { stat, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -160,10 +162,10 @@ function mergeIntentIntoSession(session, intentResponse, config) {
 
 /**
  * Auto-invalidate cached token when the API key has changed (different
- * prefix). Triggered when the user edits ~/.armoriq/credentials.json or
- * the launchctl ARMORIQ_API_KEY env. Without this, the plugin keeps
- * reusing the old token even after the key changes — meaning audit rows
- * land in the old org until the user manually clears runtime.json.
+ * prefix). Triggered when `armoriq login` saves a new armorclaude key.
+ * Without this, the plugin keeps reusing the old token after the key
+ * changes, and audit rows land in the old org until the user clears
+ * runtime.json.
  *
  * Returns true if the cache was invalidated (caller should re-mint).
  */
@@ -414,6 +416,7 @@ async function reportTokenUsage(input, config, session, sessionId) {
           ...device,
           armored: true,
         });
+        noteTokenUsageResult(config, result);
         if (!result?.ok) allOk = false;
         debugLog(
           config,
@@ -508,19 +511,19 @@ export async function handleSessionStart(input, config) {
   // interactive installer/onboarding. ---
   if (config.unconfigured) {
     const staleNote = config.hadUnusableKey
-      ? "\n(An existing credential was ignored — it isn't a valid ArmorIQ key.)"
+      ? "\n(The saved armorclaude key was ignored: it isn't a valid ArmorIQ key.)"
       : "";
-    return addPromptContext(
-      `ArmorClaude installed but NOT connected — no valid ArmorIQ API key found.${staleNote}\n` +
-        `Running in MONITOR mode: observing only, your tools are not blocked.\n\n` +
-        `To enable protection:\n` +
-        `  1. Get an API key: https://tools.armoriq.ai/tools/api-keys\n` +
-        `  2. Provide it via the plugin's API_KEY setting, or set ` +
-        `ARMORIQ_API_KEY=ak_live_… (or add it to ~/.armoriq/credentials.json).\n` +
-        `Once a valid key is present, ArmorClaude enforces automatically.\n` +
-        `Type /armorclaude:armor for all commands.`,
-      "SessionStart"
-    );
+    return {
+      systemMessage: NOT_SIGNED_IN,
+      ...addPromptContext(
+        `ArmorClaude installed but NOT connected.${staleNote}\n` +
+          `Running in MONITOR mode: observing only, your tools are not blocked.\n\n` +
+          `${NOT_SIGNED_IN}\n` +
+          `Once you sign in, ArmorClaude enforces automatically.\n` +
+          `Type /armorclaude:armor for all commands.`,
+        "SessionStart"
+      ),
+    };
   }
 
   // --- First-run onboarding: if no policy.json, show template picker ---
@@ -1004,9 +1007,8 @@ export async function handlePreToolUse(input, config) {
   const session = getSession(runtimeState, sessionId) || {};
   // Auto-reload on credential change: if the cached token was minted with
   // a different API key than the one currently configured, discard it so
-  // the mint path runs fresh below. Otherwise editing
-  // ~/.armoriq/credentials.json silently has no effect until the token
-  // expires.
+  // the mint path runs fresh below. Otherwise a new `armoriq login` silently
+  // has no effect until the token expires.
   if (invalidateTokenOnKeyChange(session, config)) {
     debugLog(config, "API key changed (prefix differs); discarded cached token for fresh mint");
     upsertSession(runtimeState, sessionId, session);

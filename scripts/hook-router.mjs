@@ -14,6 +14,7 @@ import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 import { appendDaemonLog } from "./lib/daemon-log.mjs";
 import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
 import { observeHook, obsFlush } from "./lib/observability.mjs";
+import { withReloginNotice } from "./lib/relogin.mjs";
 
 async function readStdin() {
   const chunks = [];
@@ -98,7 +99,7 @@ async function main() {
     debugLog(config, `unhandled hook event: ${event}`);
     return;
   }
-  const output = await handler(input, config);
+  const output = await withReloginNotice(event, input, config, await handler(input, config));
 
   if (output) {
     emitJson(output);
