@@ -67,18 +67,9 @@ const AB = history([
   [T("10:37"), "B"],
 ]);
 
-test("a history is valid only with consecutive sequences, canonical times that never go back, and users", () => {
+test("a history is valid only with consecutive sequences, canonical times, and users", () => {
   assert.equal(validHistory(AB), true);
   assert.equal(validHistory({ ...AB, origin: "reset" }), false);
-  assert.equal(
-    validHistory(
-      history([
-        [T("10:00"), "A"],
-        [T("09:00"), "B"],
-      ])
-    ),
-    false
-  );
   assert.equal(validHistory(history([["2026-10-09T10:00:00Z", "A"]])), false);
   assert.equal(validHistory({ ...AB, events: [{ ...AB.events[0], sequence: 2 }] }), false);
   assert.equal(validHistory(history([[T("10:00"), ""]])), false);
@@ -288,5 +279,52 @@ test("a dashboard history request claims unassigned time and its own, never anot
   assert.deepEqual((await postedFor(files, claims)).rows, [
     [S1, "2026-10-09", 10, 13],
     [S1, "2026-10-09", 11, 2],
+  ]);
+});
+
+const rolledBack = (origin = "fresh") =>
+  history(
+    [
+      [T("10:30"), "A"],
+      [T("10:10"), "B"],
+    ],
+    { origin }
+  );
+const rollbackFiles = {
+  [`${S1}.jsonl`]: [
+    msg("a1", T("09:10"), 7),
+    msg("x1", T("10:20"), 11),
+    msg("b1", T("10:45"), 13),
+    msg("b2", T("11:30"), 17),
+  ],
+};
+
+test("a login whose time is earlier than the one before it is accepted in sequence order", () => {
+  assert.equal(validHistory(rolledBack()), true);
+});
+
+test("after a clock rollback, usage in the overlap is posted for neither user and never claimed", async () => {
+  const anchors = anchorsOf(rolledBack());
+  const asA = [[S1, "2026-10-09", 9, 7]];
+  const asB = [
+    [S1, "2026-10-09", 10, 13],
+    [S1, "2026-10-09", 11, 17],
+  ];
+  assert.deepEqual((await postedFor(rollbackFiles, ownsFor(anchors, "A"))).rows, asA);
+  assert.deepEqual((await postedFor(rollbackFiles, ownsFor(anchors, "B"))).rows, asB);
+  assert.deepEqual((await postedFor(rollbackFiles, ownedOrUnassigned(anchors, "A"))).rows, asA);
+  assert.deepEqual((await postedFor(rollbackFiles, ownedOrUnassigned(anchors, "B"))).rows, asB);
+});
+
+test("an overlap inside an archived history stays unclaimed after a gap", async () => {
+  const seen = anchorsOf(rolledBack("unknown"), T("11:00"));
+  const { anchors } = observeHistory(
+    seen,
+    history([[T("11:10"), "C"]], { id: "h-2", origin: "unknown" }),
+    T("11:40")
+  );
+  assert.deepEqual((await postedFor(rollbackFiles, ownedOrUnassigned(anchors, "C"))).rows, [
+    [S1, "2026-10-09", 11, 17],
+    [S1, "2026-10-09", 9, 7],
   ]);
 });
