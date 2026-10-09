@@ -131,6 +131,11 @@ async function startBackend(refusals) {
   const server = createServer((req, res) => {
     req.resume();
     req.on("end", () => {
+      if (req.url === "/iap/validate-key") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ userId: "user-login" }));
+        return;
+      }
       const route = ROUTES[req.url];
       const key = req.headers["x-api-key"];
       if (route) calls.push({ route, key });

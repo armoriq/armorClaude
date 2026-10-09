@@ -18,7 +18,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../scripts/lib/config.mjs";
-import { loadConfigWithLogins, STAGING } from "./helpers/login-profile.mjs";
+import { randomUUID } from "node:crypto";
+import armoriqSdk from "@armoriq/sdk-dev";
+import { loadConfigWithLogins, STAGING, withHome } from "./helpers/login-profile.mjs";
 import { dispatchViaDaemon } from "../scripts/lib/daemon-client.mjs";
 import {
   loadRuntimeState,
@@ -584,18 +586,20 @@ const readLastRun = (statePath) => {
   }
 };
 
-const pluginEnv = (home, dataDir, port) => ({
-  PATH: process.env.PATH,
-  HOME: home,
-  ARMORCLAUDE_DATA_DIR: dataDir,
-  ARMORCLAUDE_DEBUG: "false",
-  ARMORCLAUDE_USE_SDK_INTENT: "false",
-  ARMORIQ_ENV: "local",
-  ARMORIQ_BACKEND_URL: `http://127.0.0.1:${port}`,
-  ARMORIQ_CSRG_URL: `http://127.0.0.1:${port}`,
-  CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_usage_sync_stop",
-  ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
-});
+const pluginEnv = (home, dataDir, port, apiKey = "ak_test_usage_sync_stop") => (
+  signedIn(home, port, apiKey),
+  {
+    PATH: process.env.PATH,
+    HOME: home,
+    ARMORCLAUDE_DATA_DIR: dataDir,
+    ARMORCLAUDE_DEBUG: "false",
+    ARMORCLAUDE_USE_SDK_INTENT: "false",
+    ARMORIQ_ENV: "local",
+    ARMORIQ_BACKEND_URL: `http://127.0.0.1:${port}`,
+    ARMORIQ_CSRG_URL: `http://127.0.0.1:${port}`,
+    ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
+  }
+);
 
 test("a Stop through the daemon triggers the sync, the only writer of a forked session's rows", async () => {
   const home = fixtureHome();
@@ -754,9 +758,8 @@ test("usageSyncEnabled needs observability on and disable_usage_sync unset", () 
 test("the launcher starts no sync and writes no request while the usage sync is off", () => {
   for (const [name, toggles] of TOGGLES) {
     const dataDir = mkdtempSync(path.join(tmpdir(), "ac-sync-off-"));
-    const cfg = loadConfig({
+    const cfg = loadConfigWithLogins([{ backend: STAGING, apiKey: KEY }], {
       ARMORIQ_ENV: "staging",
-      CLAUDE_PLUGIN_OPTION_API_KEY: KEY,
       CLAUDE_PLUGIN_DATA: dataDir,
       ...toggles,
     });
@@ -768,6 +771,7 @@ test("the launcher starts no sync and writes no request while the usage sync is 
 });
 
 function cliAgainst(home, port, env) {
+  signedIn(home, port, KEY);
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [SYNC], {
       env: {
@@ -777,7 +781,6 @@ function cliAgainst(home, port, env) {
         CLAUDE_PLUGIN_DATA: path.join(home, "data"),
         ARMORIQ_ENV: "local",
         ARMORIQ_BACKEND_URL: `http://127.0.0.1:${port}`,
-        CLAUDE_PLUGIN_OPTION_API_KEY: KEY,
         ...env,
       },
     });
@@ -902,7 +905,7 @@ async function withDaemon(daemonToggles, fn) {
   const { server, posts, port } = await fakeBackend();
   const statePath = userState(dataDir, port, KEY);
   const lockPath = `${syncBasePath(dataDir)}.lock`;
-  const env = { ...pluginEnv(home, dataDir, port), CLAUDE_PLUGIN_OPTION_API_KEY: KEY };
+  const env = pluginEnv(home, dataDir, port, KEY);
   mkdirSync(dataDir, { recursive: true });
   const daemon = spawn(process.execPath, [DAEMON], {
     stdio: "ignore",
@@ -917,7 +920,7 @@ async function withDaemon(daemonToggles, fn) {
         session_id: S2,
         transcript_path: path.join(projectsOf(home), "-work-repo-a", `${S2}.jsonl`),
       },
-      config: loadConfig({ ...env, ...toggles }),
+      config: withHome(home, () => loadConfig({ ...env, ...toggles })),
     });
   const synced = () =>
     until(() => readLastRun(statePath) !== undefined && !existsSync(lockPath), "a sync pass");
@@ -989,20 +992,35 @@ test("a fork's copied lines never stop its original from counting them", async (
   assert.deepEqual(summary((await run(home, state)).rows), [[S1, "2026-09-20", 9, 301]]);
 });
 
-function login(home, port, apiKey) {
+function login(home, port, apiKey, at = new Date().toISOString()) {
   assert.ok(home.startsWith(tmpdir()), home);
-  mkdirSync(path.join(home, ".armoriq"), { recursive: true });
-  writeFileSync(
-    path.join(home, ".armoriq", "credentials.json"),
-    JSON.stringify({
-      apiKey,
-      product: "armorclaude",
-      backend: `http://127.0.0.1:${port}`,
-      userId: userOf(apiKey),
-      orgId: "org-1",
-    })
-  );
+  const backend = `http://127.0.0.1:${port}`;
+  const file = path.join(home, ".armoriq", "credentials.json");
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const doc = existsSync(file)
+    ? JSON.parse(readFileSync(file, "utf8"))
+    : { version: 2, active: null, profiles: {}, historyOrigin: "fresh", loginHistory: {} };
+  const name = armoriqSdk.profileName(backend, "armorclaude");
+  const history = doc.loginHistory[name] ?? { id: randomUUID(), origin: "fresh", events: [] };
+  history.events.push({ sequence: history.events.length + 1, at, userId: userOf(apiKey) });
+  doc.loginHistory[name] = history;
+  doc.profiles[name] = {
+    backend,
+    product: "armorclaude",
+    apiKey,
+    email: "dev@example.com",
+    userId: userOf(apiKey),
+    orgId: "org-1",
+    loggedInAt: at,
+    savedAt: at,
+  };
+  doc.active = name;
+  writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o600 });
 }
+
+const signedIn = (home, port, apiKey) => {
+  if (!existsSync(path.join(home, ".armoriq", "credentials.json"))) login(home, port, apiKey);
+};
 
 const asLoggedIn = { CLAUDE_PLUGIN_OPTION_API_KEY: "" };
 
@@ -1182,10 +1200,7 @@ test("a sync running as one user leaves a pass requested with another user's key
       [`${S4}.jsonl`]: [assistant("n1", isoIn(60_000), 42)],
     });
     login(home, port, "ak_test_user_b");
-    const asB = loadConfig({
-      ...pluginEnv(home, dataDir, port),
-      CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_user_b",
-    });
+    const asB = withHome(home, () => loadConfig(pluginEnv(home, dataDir, port)));
     assert.equal(requestUsageSync(asB), true);
     release();
 
