@@ -1,7 +1,14 @@
+import armoriqSdk from "@armoriq/sdk-dev";
 import { homedir } from "node:os";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean } from "./common.mjs";
+
+const { loadLoginContext } = armoriqSdk;
+
+const PRODUCT = "armorclaude";
+
+export const NOT_SIGNED_IN = `ArmorIQ: not signed in. Run: armoriq login --product ${PRODUCT}`;
 
 /**
  * Read a config value from CLAUDE_PLUGIN_OPTION_* (injected by Claude Code
@@ -27,7 +34,9 @@ function normalizeArmoriqEnv(value) {
 /**
  * armorClaude config — main branch (production).
  *
- *   userConfig (plugin UI)  → api_key only
+ *   API key and org         → the armorclaude profile `armoriq login` saved
+ *                             for this backend, nothing else
+ *   userConfig (plugin UI)  → default_template, disable_observability
  *   env vars                → paths + debug
  *   everything else         → hardcoded to the tested-good default
  *
@@ -74,11 +83,12 @@ export function loadConfig(env = process.env) {
         : "https://iap-staging.armoriq.ai";
   const useProduction = activeEnv === "production";
 
-  // ── userConfig fields. UI primary, legacy env fallback. ──
-  let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
+  const login = loadLoginContext({ backend: backendEndpoint, product: PRODUCT });
+  const profile = login?.profile;
+  let apiKey = profile?.apiKey ?? "";
+  const orgId = profile?.orgId ?? "";
   // Optional default policy template applied (staged for confirm) on first run.
   const defaultTemplate = pluginOpt(env, "DEFAULT_TEMPLATE");
-  let orgId = env.ARMORIQ_ORG_ID?.trim() || "";
 
   // Observability is ON by default. Users can opt out via the
   // `disable_observability` plugin option or the ARMORIQ_OBSERVABILITY_DISABLED
@@ -91,15 +101,6 @@ export function loadConfig(env = process.env) {
     pluginOpt(env, "DISABLE_USAGE_SYNC", "ARMORIQ_USAGE_SYNC_DISABLED"),
     false
   );
-  try {
-    const creds = JSON.parse(
-      readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
-    );
-    if (!apiKey && typeof creds?.apiKey === "string") apiKey = creds.apiKey;
-    if (!orgId && typeof creds?.orgId === "string") orgId = creds.orgId;
-  } catch {
-    // no credentials file — local-only mode
-  }
 
   // A key is only usable if it matches the @armoriq/sdk key format
   // (ak_test_/ak_live_/ak_claw_). Anything else — empty, or a stale/old-format
@@ -139,8 +140,8 @@ export function loadConfig(env = process.env) {
     observabilityProduct: "armorclaude",
     usageSyncEnabled: !observabilityDisabled && !usageSyncDisabled && Boolean(effectiveApiKey),
 
-    // userConfig-driven credential (see effectiveApiKey above: a bad-format key
-    // is dropped, and local mock substitutes an SDK-accepted placeholder).
+    // The login profile's key (see effectiveApiKey above: a bad-format key is
+    // dropped, and local mock substitutes an SDK-accepted placeholder).
     apiKey: effectiveApiKey,
     orgId,
     auditEnabled: Boolean(effectiveApiKey),
@@ -189,7 +190,9 @@ export function loadConfig(env = process.env) {
     productSlug: "armorclaude",
     llmId: "claude-code",
     mcpName: "claude-code",
-    userId: "claude-user",
+    userId: profile?.userId ?? "",
+    loggedInAt: profile?.loggedInAt ?? "",
+    loginHistory: login?.loginHistory ?? null,
     agentId: "claude-code",
     contextId: "default",
 

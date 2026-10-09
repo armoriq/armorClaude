@@ -22,6 +22,7 @@ import {
 import { batchCalls, eventCall, journalName } from "../scripts/lib/obs-journal.mjs";
 import { shipSpool, writeSpoolBatch } from "../scripts/lib/obs-spool.mjs";
 import { deadPid, placeFile } from "./helpers/obs-files.mjs";
+import { writeLoginProfiles } from "./helpers/login-profile.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
@@ -200,6 +201,7 @@ async function withoutDaemon(dataDir) {
 }
 
 function pluginEnv(home, dataDir, backendUrl) {
+  writeLoginProfiles(home, [{ backend: backendUrl, apiKey: API_KEY }]);
   return {
     PATH: process.env.PATH,
     HOME: home,
@@ -209,7 +211,6 @@ function pluginEnv(home, dataDir, backendUrl) {
     ARMORIQ_ENV: "local",
     ARMORIQ_BACKEND_URL: backendUrl,
     ARMORIQ_CSRG_URL: backendUrl,
-    CLAUDE_PLUGIN_OPTION_API_KEY: API_KEY,
   };
 }
 
