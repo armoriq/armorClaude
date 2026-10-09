@@ -74,13 +74,21 @@ export function ownerAt({ current, archived }, t) {
   return archived.length ? null : firstUserIfFresh(current, t);
 }
 
+export const ownedBy = (anchors, userId) => (t) => ownerAt(anchors, t) === userId;
+
+/** A dashboard history request also claims time no recorded login owns. */
+export const ownedOrUnassigned = (anchors, userId) => (t) => {
+  const owner = ownerAt(anchors, t);
+  return owner === userId || owner === null;
+};
+
 /**
  * Which messages `userId` owns, from the accepted profile's login history and
- * the anchors this data dir has recorded. A pending dashboard history request
- * owns everything. Null when the profile has no usable history for this user.
+ * the anchors this data dir has recorded; with a pending dashboard history
+ * request, also the unassigned ones. Null when the profile has no usable
+ * history for this user.
  */
 export async function loginOwnership({ config, userId, request, log }) {
-  if (request) return () => true;
   const history = config.loginHistory;
   const last = history?.events?.at(-1);
   const accepted =
@@ -98,5 +106,5 @@ export async function loginOwnership({ config, userId, request, log }) {
   if (gap)
     log("the login history doesn't extend the one seen before, earlier usage stays unassigned");
   await writeJson(anchorsPath, anchors);
-  return (t) => ownerAt(anchors, t) === userId;
+  return request ? ownedOrUnassigned(anchors, userId) : ownedBy(anchors, userId);
 }

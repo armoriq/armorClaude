@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { observeHistory, ownerAt, validHistory } from "../scripts/lib/login-ownership.mjs";
+import {
+  observeHistory,
+  ownedOrUnassigned,
+  ownerAt,
+  validHistory,
+} from "../scripts/lib/login-ownership.mjs";
 import { syncUsage } from "../scripts/lib/usage-sync.mjs";
 
 const T = (hhmm, day = "2026-10-09") => `${day}T${hhmm}:00.000Z`;
@@ -242,7 +247,7 @@ test("A's rows that failed before B logged in are posted when A syncs again", as
   assert.deepEqual(again.rows, [[S1, "2026-10-09", 9, 7]]);
 });
 
-test("a rotated key for the same user keeps the interval, and the dashboard override owns everything", async () => {
+test("a rotated key for the same user keeps the interval", () => {
   const rotated = anchorsOf(
     history([
       [T("09:00"), "A"],
@@ -250,6 +255,38 @@ test("a rotated key for the same user keeps the interval, and the dashboard over
     ])
   );
   assert.equal(ownerAt(rotated, ms(T("09:30"))), "A");
-  const files = { [`${S1}.jsonl`]: [msg("a1", T("10:20"), 11), msg("b1", T("10:45"), 13)] };
-  assert.deepEqual((await postedFor(files, () => true)).rows, [[S1, "2026-10-09", 10, 24]]);
+  assert.equal(ownerAt(rotated, ms(T("10:30"))), "A");
+});
+
+test("a dashboard history request claims unassigned time and its own, never another user's", async () => {
+  const seen = anchorsOf(history([[T("09:00"), "A"]]), T("09:30"));
+  const { anchors } = observeHistory(
+    seen,
+    history([[T("11:00"), "B"]], { id: "h-2", origin: "unknown" }),
+    T("11:30")
+  );
+  const claims = ownedOrUnassigned(anchors, "B");
+  assert.equal(claims(ms(T("09:10"))), false, "A's proven interval");
+  assert.equal(claims(ms(T("10:00"))), true, "unknown, after A was last seen");
+  assert.equal(claims(ms(T("11:10"))), true, "B's own");
+  const loggedOut = anchorsOf(
+    history([
+      [T("09:00"), "A"],
+      [T("10:00"), null],
+      [T("11:00"), "B"],
+    ])
+  );
+  assert.equal(ownedOrUnassigned(loggedOut, "B")(ms(T("10:30"))), true, "logged out");
+  assert.equal(ownedOrUnassigned(loggedOut, "B")(ms(T("09:30"))), false, "A's interval");
+  const files = {
+    [`${S1}.jsonl`]: [
+      msg("a1", T("09:10"), 11),
+      msg("u1", T("10:00"), 13),
+      msg("b1", T("11:10"), 2),
+    ],
+  };
+  assert.deepEqual((await postedFor(files, claims)).rows, [
+    [S1, "2026-10-09", 10, 13],
+    [S1, "2026-10-09", 11, 2],
+  ]);
 });
