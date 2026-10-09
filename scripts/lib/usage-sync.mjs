@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { sessionTranscriptPaths, summarizeSessionUsageByHour } from "@armoriq/sdk-dev";
 import { readJson } from "./fs-store.mjs";
-import { classifyTranscripts, copiedMessageKeys, foreignUsage } from "./transcripts.mjs";
+import { classifyTranscripts, copiedMessageKeys } from "./transcripts.mjs";
 
 const STATE_VERSION = 2;
 
@@ -87,32 +87,11 @@ function changedHours(usage, prevHours = {}) {
   return { hours, rows };
 }
 
-const FIELDS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
-
-function withoutKeyless(usage, keyless) {
-  const hours = usage.hours.map((h) => ({ ...h, entries: h.entries.map((e) => ({ ...e })) }));
-  for (const line of keyless) {
-    const hour = line.hour ? hours.find((h) => hourKey(h).slice(0, 13) === line.hour) : hours[0];
-    const entry = hour?.entries.find((e) => e.model === line.model);
-    for (const f of FIELDS) if (entry) entry[f] = Math.max(0, entry[f] - line[f]);
-  }
-  const counted = (e) => FIELDS.some((f) => e[f] > 0);
-  const kept = hours
-    .map((h) => ({ ...h, entries: h.entries.filter(counted) }))
-    .filter((h) => h.entries.length > 0);
-  return { ...usage, hours: kept };
-}
-
 /** The session's usage that `owns` accepts; with no `owns`, all of it. */
 function summarizeOwned(file, sessionId, seen, owns) {
-  const copied = copiedMessageKeys(file, sessionId);
-  const foreign = owns
-    ? foreignUsage(sessionTranscriptPaths(file), owns)
-    : { keys: [], keyless: [] };
-  const usage = seen.withSkipped([...copied, ...foreign.keys], () =>
-    summarizeSessionUsageByHour(file, { seen })
+  return seen.withSkipped(copiedMessageKeys(file, sessionId), () =>
+    summarizeSessionUsageByHour(file, { seen, include: owns })
   );
-  return foreign.keyless.length ? withoutKeyless(usage, foreign.keyless) : usage;
 }
 
 function countFailure(failures, failure) {

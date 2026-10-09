@@ -434,3 +434,15 @@ test("a refused login history logs its cause and the command that fixes it", asy
   assert.equal(typeof owned, "function");
   assert.deepEqual(logged, []);
 });
+
+test("a 130,000-line session syncs each user's share in one pass", async () => {
+  const start = Date.parse(T("08:00"));
+  const lines = Array.from({ length: 130_000 }, (_, i) =>
+    msg(`m${i}`, new Date(start + i * 100).toISOString(), 1)
+  );
+  const { rows } = await postedFor({ [`${S1}.jsonl`]: lines }, ownsFor(anchorsOf(AB), "B"));
+  assert.deepEqual(rows, [
+    [S1, "2026-10-09", 10, 13_800],
+    [S1, "2026-10-09", 11, 22_000],
+  ]);
+});
