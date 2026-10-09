@@ -1505,7 +1505,7 @@ test("/armor policy sync without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor policy sync", config);
-  assert.ok(out.includes("armoriq login --product armorclaude"));
+  assert.ok(out.includes("armoriq-dev login --product armorclaude"));
 });
 
 // ---------------------------------------------------------------------------

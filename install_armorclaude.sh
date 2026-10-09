@@ -115,7 +115,7 @@ install_plugin() {
 
   info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
   npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
-    && ok "armoriq CLI ready" \
+    && ok "armoriq-dev CLI ready" \
     || warn "couldn't install globally — use ${B}npx @armoriq/sdk-dev${N} instead"
 }
 
@@ -176,24 +176,23 @@ connect_to_armoriq() {
 EOF
 
   if ! is_promptable; then
-    printf "  Run ${G}${B}armoriq login --product armorclaude${N} to connect later.\n\n"
+    printf "  Run ${G}${B}armoriq-dev login --product armorclaude${N} to connect later.\n\n"
     return 0
   fi
 
   if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
     echo
-    printf "  No problem. Run ${G}${B}armoriq login --product armorclaude${N} anytime to connect.\n\n"
+    printf "  No problem. Run ${G}${B}armoriq-dev login --product armorclaude${N} anytime to connect.\n\n"
     return 0
   fi
 
   echo
-  # Run armoriq login inline — uses the globally installed CLI or npx fallback
-  if command -v armoriq >/dev/null 2>&1; then
-    armoriq login --product armorclaude
+  if command -v armoriq-dev >/dev/null 2>&1; then
+    armoriq-dev login --product armorclaude
   elif command -v npx >/dev/null 2>&1; then
     npx @armoriq/sdk-dev login --product armorclaude
   else
-    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk-dev login --product armorclaude${N} manually."
+    warn "armoriq-dev CLI not found. Run ${B}npx @armoriq/sdk-dev login --product armorclaude${N} manually."
     return 0
   fi
 
