@@ -238,6 +238,7 @@ MCP tools: `policy_read`, `register_intent_plan`, and Trust Update tools. There 
 - **Crypto Policy Binding**: Optional Merkle tree binding via CSRG ensures policy rules can't be tampered with after token issuance.
 - **Audit Trail**: Every tool execution (success/failure) is logged to ArmorIQ IAP.
 - **Fail-Closed**: Missing tokens, failed planning, invalid proofs — all result in denied tool calls in enforce mode.
+- **Allow-all policy**: With the `all-allow` template, or with no confirmed policy yet, intent is captured but never blocks. Claude is still asked to register a plan, a signed intent token is requested, and audit rows are linked to that plan, but missing plans, drift, expired tokens and proof failures do not deny a tool call. The session banner shows `intent=capture`.
 
 ## Data & Privacy
 
