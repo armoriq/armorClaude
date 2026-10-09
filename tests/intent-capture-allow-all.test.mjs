@@ -120,3 +120,17 @@ test("a plan captured under allow-all does not count as registered once an enfor
   assert.equal(denied(output), true, JSON.stringify(output));
   assert.match(output.hookSpecificOutput.permissionDecisionReason, /intent plan missing/);
 });
+
+test("under an all-allow policy a malformed CSRG proof header does not block the tool (#294)", async (t) => {
+  const backend = await startBackend(tokenRoute(randomUUID()));
+  const { hook } = await startHookSession(t, backend);
+  const output = await hook({
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "ls" },
+    csrg_path: "/steps/[0]/action",
+    csrg_proof: "{not-json}",
+    csrg_value_digest: "abc",
+  });
+  assert.equal(denied(output), false, JSON.stringify(output));
+});

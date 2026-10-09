@@ -1250,7 +1250,7 @@ export async function handlePreToolUse(input, config) {
 
   // --- CSRG proof handling ---
   const parsedProofs = parseCsrgProofHeaders(input);
-  if (parsedProofs.error) {
+  if (parsedProofs.error && !allowAll) {
     return denyOrAllow(config, "csrg_proof_invalid", parsedProofs.error);
   }
   let csrgProofs = parsedProofs.proofs;
