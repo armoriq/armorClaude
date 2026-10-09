@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { NOT_SIGNED_IN } from "../scripts/lib/config.mjs";
+import { createRequire } from "node:module";
+import { loginCommand } from "../scripts/lib/config.mjs";
 import { handleSessionStart } from "../scripts/lib/engine.mjs";
 import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
 
 const PROD = "https://api.armoriq.ai";
+const LOGIN_LINE = `No ArmorClaude login for ${PROD}. Run: armoriq-dev login --product armorclaude`;
 
 // ---------------------------------------------------------------------------
 // Enforcement is gated on being "connected" (a usable, SDK-format API key).
@@ -47,6 +49,7 @@ test("SessionStart when unconfigured: shows connect banner, runs passively (no b
     policyFile: path.join(tmp, "policy.json"),
     runtimeFile: path.join(tmp, "runtime.json"),
     apiKey: "",
+    backendEndpoint: PROD,
     debug: false,
   };
   const output = await handleSessionStart(
@@ -56,8 +59,43 @@ test("SessionStart when unconfigured: shows connect banner, runs passively (no b
   const ctx = output?.hookSpecificOutput?.additionalContext || "";
   assert.ok(ctx.includes("NOT connected"), "banner should say the plugin is not connected");
   assert.ok(ctx.includes("MONITOR"), "banner should state monitor mode");
-  assert.ok(ctx.includes(NOT_SIGNED_IN), "banner should tell the model how to sign in");
-  assert.equal(output?.systemMessage, NOT_SIGNED_IN);
+  assert.ok(ctx.includes(LOGIN_LINE), "banner should tell the model how to sign in");
+  assert.equal(output?.systemMessage, LOGIN_LINE);
   // Must not be a deny/block decision — SessionStart only adds context.
   assert.notEqual(output?.hookSpecificOutput?.permissionDecision, "deny");
+});
+
+test("SessionStart when unconfigured: the login line shows once per session, the monitor context every time", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "connect-gating-"));
+  const config = {
+    mode: "monitor",
+    intentRequired: false,
+    unconfigured: true,
+    hadUnusableKey: false,
+    dataDir: tmp,
+    policyFile: path.join(tmp, "policy.json"),
+    runtimeFile: path.join(tmp, "runtime.json"),
+    apiKey: "",
+    backendEndpoint: PROD,
+    debug: false,
+  };
+  const start = (session_id) =>
+    handleSessionStart({ hook_event_name: "SessionStart", session_id }, config);
+  const first = await start("once-1");
+  const resumed = await start("once-1");
+  const other = await start("once-2");
+  assert.deepEqual(
+    [first, resumed, other].map((o) => o?.systemMessage),
+    [LOGIN_LINE, undefined, LOGIN_LINE]
+  );
+  for (const o of [first, resumed, other]) {
+    const ctx = o?.hookSpecificOutput?.additionalContext || "";
+    assert.ok(ctx.includes("MONITOR") && ctx.includes(LOGIN_LINE), ctx);
+  }
+});
+
+test("the login command names the CLI the installed SDK package declares", () => {
+  const { bin } = createRequire(import.meta.url)("@armoriq/sdk-dev/package.json");
+  assert.deepEqual(Object.keys(bin), ["armoriq-dev"]);
+  assert.equal(loginCommand(), "armoriq-dev login --product armorclaude");
 });

@@ -40,7 +40,7 @@ import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs
 import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
-import { NOT_SIGNED_IN } from "./config.mjs";
+import { notSignedIn } from "./config.mjs";
 import { noteTokenUsageResult } from "./relogin.mjs";
 import { readJson, writePrivateFile } from "./fs-store.mjs";
 import { stat, unlink } from "node:fs/promises";
@@ -492,11 +492,36 @@ function pickStepIndex(plan, toolName, toolInput) {
 // SessionStart
 // ---------------------------------------------------------------------------
 
+function claimLoginNotice(runtimeState, sessionId, config) {
+  if (!config.unconfigured || getSession(runtimeState, sessionId)?.loginNoticeShown) return false;
+  upsertSession(runtimeState, sessionId, { loginNoticeShown: true });
+  return true;
+}
+
+function notConnectedStart(config, loginNoticeDue) {
+  const staleNote = config.hadUnusableKey
+    ? "\n(The saved armorclaude key was ignored: it isn't a valid ArmorIQ key.)"
+    : "";
+  const notice = notSignedIn(config.backendEndpoint);
+  return {
+    ...(loginNoticeDue && { systemMessage: notice }),
+    ...addPromptContext(
+      `ArmorClaude installed but NOT connected.${staleNote}\n` +
+        `Running in MONITOR mode: observing only, your tools are not blocked.\n\n` +
+        `${notice}\n` +
+        `Once you sign in, ArmorClaude enforces automatically.\n` +
+        `Type /armorclaude:armor for all commands.`,
+      "SessionStart"
+    ),
+  };
+}
+
 export async function handleSessionStart(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
 
   const runtimeState = await loadRuntimeState(config.runtimeFile);
+  const loginNoticeDue = claimLoginNotice(runtimeState, sessionId, config);
   upsertSession(runtimeState, sessionId, {
     startedAt: nowEpochSeconds(),
     discoveredTools: [],
@@ -551,22 +576,7 @@ export async function handleSessionStart(input, config) {
   // banner and run passively (monitor mode) instead of bricking the session.
   // This is the fresh `claude plugin install` path, which never ran the
   // interactive installer/onboarding. ---
-  if (config.unconfigured) {
-    const staleNote = config.hadUnusableKey
-      ? "\n(The saved armorclaude key was ignored: it isn't a valid ArmorIQ key.)"
-      : "";
-    return {
-      systemMessage: NOT_SIGNED_IN,
-      ...addPromptContext(
-        `ArmorClaude installed but NOT connected.${staleNote}\n` +
-          `Running in MONITOR mode: observing only, your tools are not blocked.\n\n` +
-          `${NOT_SIGNED_IN}\n` +
-          `Once you sign in, ArmorClaude enforces automatically.\n` +
-          `Type /armorclaude:armor for all commands.`,
-        "SessionStart"
-      ),
-    };
-  }
+  if (config.unconfigured) return notConnectedStart(config, loginNoticeDue);
 
   // --- First-run onboarding: if no policy.json, show template picker ---
   const onboardingFlag = path.join(config.dataDir, "onboarding-shown");

@@ -1,4 +1,5 @@
 import armoriqSdk from "@armoriq/sdk-dev";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -8,7 +9,19 @@ const { loadLoginContext } = armoriqSdk;
 
 const PRODUCT = "armorclaude";
 
-export const NOT_SIGNED_IN = `ArmorIQ: not signed in. Run: armoriq login --product ${PRODUCT}`;
+let cachedLoginCommand;
+
+export function loginCommand() {
+  if (cachedLoginCommand) return cachedLoginCommand;
+  const { name, bin } = createRequire(import.meta.url)("@armoriq/sdk-dev/package.json");
+  const [cli] = Object.keys(bin ?? {});
+  if (!cli) throw new Error(`${name} declares no CLI in its package.json bin`);
+  cachedLoginCommand = `${cli} login --product ${PRODUCT}`;
+  return cachedLoginCommand;
+}
+
+export const notSignedIn = (backend) =>
+  `No ArmorClaude login for ${backend}. Run: ${loginCommand()}`;
 
 /**
  * Read a config value from CLAUDE_PLUGIN_OPTION_* (injected by Claude Code
