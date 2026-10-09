@@ -211,6 +211,10 @@ function invalidateTokenOnPolicyChange(session, currentPolicyHash) {
   session.expiresAt = 0;
   session.policyHash = currentPolicyHash;
   delete session.intentExecution;
+  if (session.planCaptured) {
+    delete session.plan;
+    delete session.planCaptured;
+  }
   return true;
 }
 
@@ -662,6 +666,7 @@ export async function handleUserPromptSubmit(input, config) {
   upsertSession(runtimeState, sessionId, {
     lastPrompt: prompt,
     lastPromptAt: nowEpochSeconds(),
+    intentRequestFailed: false,
   });
   // Refresh the active-session pointer: register_intent_plan (MCP) is typically
   // the next event, and it resolves the session id from here.
@@ -987,6 +992,7 @@ export async function handlePreToolUse(input, config) {
           ? pending.tokenRaw || ""
           : "",
       plan: pending.plan,
+      planCaptured: false,
       allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
       expiresAt: pending.expiresAt,
       policyHash: pending.policyHash || pendingPolicyHash,
@@ -1162,7 +1168,7 @@ export async function handlePreToolUse(input, config) {
   }
 
   // If no token, try to acquire one.
-  if (!intentTokenRaw && config.apiKey) {
+  if (!intentTokenRaw && config.apiKey && !(allowAll && session.intentRequestFailed)) {
     try {
       const intentResponse = await requestIntent(config, {
         prompt: session.lastPrompt || `Use tool ${toolName}`,
@@ -1184,6 +1190,7 @@ export async function handlePreToolUse(input, config) {
       const merged = mergeIntentIntoSession(session, intentResponse, config);
       merged.policyHash = currentPolicyHash;
       merged.intentPolicyCompilerVersion = INTENT_POLICY_COMPILER_VERSION;
+      merged.planCaptured = !isPlainObject(localPlan) || session.planCaptured === true;
       upsertSession(runtimeState, sessionId, merged);
       intentTokenRaw = typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
       localPlan = merged.plan || localPlan;
@@ -1193,6 +1200,7 @@ export async function handlePreToolUse(input, config) {
           ? getSessionTokenUsedStepIndices(merged, intentTokenRaw)
           : undefined;
     } catch (error) {
+      if (allowAll) upsertSession(runtimeState, sessionId, { intentRequestFailed: true });
       const message = error instanceof Error ? error.message : String(error);
       // A billing/subscription 402 only means the REMOTE layer is unavailable —
       // it is NOT a policy decision. The configured policy is still enforced
@@ -1244,7 +1252,7 @@ export async function handlePreToolUse(input, config) {
 
   // --- CSRG proof handling ---
   const parsedProofs = parseCsrgProofHeaders(input);
-  if (parsedProofs.error) {
+  if (parsedProofs.error && !allowAll) {
     return denyOrAllow(config, "csrg_proof_invalid", parsedProofs.error);
   }
   let csrgProofs = parsedProofs.proofs;
@@ -1466,10 +1474,12 @@ async function handleExitPlanModeCapture(input, sessionId, config) {
           const merged = mergeIntentIntoSession(session, intentResponse, config);
           merged.policyHash = policyHash;
           merged.intentPolicyCompilerVersion = INTENT_POLICY_COMPILER_VERSION;
+          merged.planCaptured = false;
           upsertSession(runtimeState, sessionId, merged);
         } else {
           // Store plan locally without ArmorIQ token
           session.plan = plan;
+          session.planCaptured = false;
           session.allowedActions = Array.from(extractAllowedActions(plan));
           upsertSession(runtimeState, sessionId, session);
         }
