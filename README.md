@@ -59,9 +59,9 @@ to stderr:
 - Requires **Node.js >= 20** and **npm on PATH**, plus **network access on that first run**.
 - The bundled MCP server (`armorclaude-policy`) registers once dependencies finish installing;
   it stays connected on subsequent runs without reinstalling.
-- **No API key is needed to start.** With `api_key` blank the plugin runs in **local-only mode**
-  (no data leaves your machine — see [Data & Privacy](#data--privacy)); a key only adds backend
-  audit, intent tokens, and CSRG proofs.
+- **No API key is needed to start.** Until you sign in, the plugin runs in **local-only mode**
+  (no data leaves your machine, see [Data & Privacy](#data--privacy)). Signing in with
+  `armoriq login --product armorclaude` adds backend audit, intent tokens, and CSRG proofs.
 
 If `claude mcp list` does not show `✓ Connected`, run the server directly from the plugin
 directory to surface the install/startup error:
@@ -120,13 +120,16 @@ armorClaude/
 
 ## Configuration
 
+ArmorClaude takes its ArmorIQ key and org only from `armoriq login --product armorclaude`,
+which saves them in `~/.armoriq/credentials.json` for the backend ArmorClaude calls. There is no
+key setting, and `ARMORIQ_API_KEY` is ignored.
+
 ### Plugin userConfig (recommended)
 
 When installed as a Claude Code plugin, these values are prompted on enable:
 
 | Key | Sensitive | Description |
 |-----|-----------|-------------|
-| `api_key` | Yes | ArmorIQ API key |
 | `mode` | No | `enforce` (default) or `monitor` |
 | `intent_required` | No | Require intent for all tools (default: `true`) |
 | `crypto_policy_enabled` | No | Enable Merkle tree policy binding |
@@ -145,7 +148,6 @@ When installed as a Claude Code plugin, these values are prompted on enable:
 **ArmorIQ Integration:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARMORIQ_API_KEY` | — | ArmorIQ SDK API key |
 | `ARMORCLAUDE_USE_SDK_INTENT` | `true` | Use ArmorIQ SDK for intent capture |
 | `ARMORCLAUDE_INTENT_URL` | — | Custom intent endpoint (overrides SDK) |
 | `ARMORCLAUDE_VERIFY_STEP_URL` | `<backend>/iap/verify-step` | IAP verify endpoint |
@@ -242,9 +244,9 @@ MCP tools: `policy_read`, `register_intent_plan`, and Trust Update tools. There 
 ArmorClaude's security enforcement works by inspecting prompts and tool calls. **What leaves your
 machine depends entirely on whether an ArmorIQ API key is configured:**
 
-- **Local-only mode (no `api_key`)** — nothing is transmitted. Policy checks, intent-drift
+- **Local-only mode (not signed in).** Nothing is transmitted. Policy checks, intent-drift
   detection, and audit logging all run locally.
-- **Connected mode (`api_key` set)** — the following is sent to the ArmorIQ backend
+- **Connected mode (signed in).** The following is sent to the ArmorIQ backend
   (`api.armoriq.ai` / `iap.armoriq.ai`) to provide intent tokens, audit trails, and CSRG proofs:
   - The captured **prompt and structured intent plan** (goal + steps).
   - Per-step **audit logs** containing the tool name and its **inputs and outputs**.

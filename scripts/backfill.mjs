@@ -26,6 +26,8 @@ import path from "node:path";
 import { summarizeTranscriptUsageByDay } from "@armoriq/sdk-dev";
 import { loadConfig } from "./lib/config.mjs";
 import { deviceIdentity } from "./lib/device.mjs";
+import { getSdkClient } from "./lib/intent.mjs";
+import { noteTokenUsageResult, RELOGIN_NOTICE } from "./lib/relogin.mjs";
 
 const argv = process.argv.slice(2);
 const args = new Set(argv);
@@ -59,21 +61,19 @@ async function post(config, body) {
   const payload = COMPAT
     ? { product: body.product, sessionId: body.sessionId, entries: body.entries }
     : body;
-  const res = await fetch(`${config.backendEndpoint}/dashboard/token-usage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-API-Key": config.apiKey },
-    body: JSON.stringify(payload),
-  });
-  const text = await res.text().catch(() => "");
-  return { ok: res.status < 400, status: res.status, body: text };
+  const result = await getSdkClient(config).recordTokenUsage(payload);
+  noteTokenUsageResult(config, result);
+  if (result.reloginRequired) {
+    console.error(RELOGIN_NOTICE);
+    process.exit(1);
+  }
+  return result;
 }
 
 async function main() {
   const config = loadConfig(process.env);
   if (!config.apiKey) {
-    console.error(
-      "[backfill] no API key. Set ARMORIQ_API_KEY or ~/.armoriq/credentials.json first."
-    );
+    console.error("[backfill] not signed in. Run: armoriq login --product armorclaude");
     process.exit(1);
   }
   console.error(
@@ -118,20 +118,15 @@ async function main() {
         posted++;
         continue;
       }
-      try {
-        const r = await post(config, body);
-        if (r.ok) {
-          posted++;
-          console.error(
-            `[backfill] ok    ${sessionId} date=${body.usageDate} models=${day.entries.length}`
-          );
-        } else {
-          failed++;
-          console.error(`[backfill] FAIL  ${sessionId} http=${r.status} ${r.body.slice(0, 200)}`);
-        }
-      } catch (e) {
+      const r = await post(config, body);
+      if (r.ok) {
+        posted++;
+        console.error(
+          `[backfill] ok    ${sessionId} date=${body.usageDate} models=${day.entries.length}`
+        );
+      } else {
         failed++;
-        console.error(`[backfill] FAIL  ${sessionId} ${e?.message ?? e}`);
+        console.error(`[backfill] FAIL  ${sessionId} ${r.status ?? r.reason}`);
       }
     }
   }
