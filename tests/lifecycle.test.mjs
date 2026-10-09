@@ -102,6 +102,93 @@ test("handleStop returns null", async () => {
   assert.equal(output, null);
 });
 
+test("Stop reports every model after a transcript model switch", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-token-usage-"));
+  const config = buildConfig(tmp, {
+    apiKey: "ak_test_model_switch",
+    productSlug: "armorclaude",
+    userId: "test-user-model-switch",
+    auditEnabled: false,
+  });
+  const sessionId = "sess-model-switch";
+  const transcriptPath = path.join(tmp, "transcript.jsonl");
+  await writeFile(
+    transcriptPath,
+    [
+      {
+        type: "assistant",
+        message: {
+          model: "claude-3-7-sonnet",
+          usage: { input_tokens: 120, output_tokens: 12 },
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          model: "claude-sonnet-4",
+          usage: {
+            input_tokens: 80,
+            output_tokens: 18,
+            cache_read_input_tokens: 40,
+          },
+        },
+      },
+    ]
+      .map((entry) => JSON.stringify(entry))
+      .join("\n") + "\n"
+  );
+
+  const priorState = await loadRuntimeState(config.runtimeFile);
+  upsertSession(priorState, sessionId, {
+    lastTokenTotal: 0,
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
+  });
+  await saveRuntimeState(config.runtimeFile, priorState);
+
+  const intentMod = await import("../scripts/lib/intent.mjs");
+  const client = intentMod.getSdkClient(config);
+  const calls = [];
+  const originalRecordTokenUsage = client.recordTokenUsage;
+  client.recordTokenUsage = async (payload) => {
+    calls.push(payload);
+    return { ok: true, recorded: payload.entries.length };
+  };
+
+  try {
+    await handleStop(
+      { hook_event_name: "Stop", session_id: sessionId, transcript_path: transcriptPath },
+      config
+    );
+    await handleStop(
+      { hook_event_name: "Stop", session_id: sessionId, transcript_path: transcriptPath },
+      config
+    );
+  } finally {
+    if (originalRecordTokenUsage) client.recordTokenUsage = originalRecordTokenUsage;
+    else delete client.recordTokenUsage;
+  }
+
+  assert.equal(calls.length, 1, "unchanged cumulative usage must be debounced");
+  assert.deepEqual(calls[0].entries, [
+    {
+      model: "claude-3-7-sonnet",
+      inputTokens: 120,
+      outputTokens: 12,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    },
+    {
+      model: "claude-sonnet-4",
+      inputTokens: 80,
+      outputTokens: 18,
+      cacheReadTokens: 40,
+      cacheWriteTokens: 0,
+    },
+  ]);
+  assert.equal(calls[0].product, "armorclaude");
+  assert.equal(calls[0].sessionId, sessionId);
+});
+
 test("handlePostToolUse returns null when audit disabled", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { auditEnabled: false });
