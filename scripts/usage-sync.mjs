@@ -23,6 +23,7 @@ import { deviceIdentity } from "./lib/device.mjs";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, writeJson } from "./lib/fs-store.mjs";
 import { confirmHistory, historyRequest, startHistory } from "./lib/history-request.mjs";
 import { getSdkClient } from "./lib/intent.mjs";
+import { noteTokenUsageResult, RELOGIN_NOTICE } from "./lib/relogin.mjs";
 import { loadRuntimeState } from "./lib/runtime-state.mjs";
 import { loadSyncState, syncUsage } from "./lib/usage-sync.mjs";
 import {
@@ -126,7 +127,11 @@ async function syncPass({ config, statePath, skip, history, deadline }) {
         process.stdout.write(`${JSON.stringify(toBody(row))}\n`);
         return { ok: true };
       }
-    : (row) => client.recordTokenUsage(toBody(row));
+    : async (row) => {
+        const result = await client.recordTokenUsage(toBody(row));
+        noteTokenUsageResult(config, result);
+        return result;
+      };
   const started = Date.now();
   const report = await syncUsage({
     projectsDir: PROJECTS_DIR,
@@ -153,6 +158,7 @@ async function syncPass({ config, statePath, skip, history, deadline }) {
       `(${report.tokens} tokens), ${report.failed} failed${why ? ` (${why})` : ""}, ` +
       `${report.left} left for the next run, ${Date.now() - started}ms`
   );
+  if (report.reloginRequired) log(RELOGIN_NOTICE);
   if (report.failed) process.exitCode = 1;
 }
 

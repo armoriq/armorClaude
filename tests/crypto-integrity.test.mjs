@@ -7,6 +7,7 @@ import http from "node:http";
 import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.mjs";
 import { computePolicyHash, savePolicyState } from "../scripts/lib/policy.mjs";
 import { loadConfig } from "../scripts/lib/config.mjs";
+import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
 import { readJson } from "../scripts/lib/fs-store.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
@@ -80,10 +81,10 @@ function startMockCsrg(handler) {
 // ---------------------------------------------------------------------------
 
 test("loadConfig auto-enables cryptoPolicyEnabled when apiKey is set", () => {
-  const config = loadConfig({
-    CLAUDE_PLUGIN_OPTION_API_KEY: "ak_test_1234567890",
-    ARMORIQ_ENV: "development",
-  });
+  const config = loadConfigWithLogins(
+    [{ backend: "http://localhost:8000", apiKey: "ak_test_1234567890" }],
+    { ARMORIQ_ENV: "development" }
+  );
   assert.equal(config.cryptoPolicyEnabled, true);
 });
 
@@ -100,8 +101,10 @@ test("loadConfig: cryptoPolicyEnabled is tied to real apiKey presence", () => {
   assert.equal(config.cryptoPolicyEnabled, Boolean(config.apiKey) && !usingPlaceholder);
 });
 
-test("loadConfig: an explicit api key enables crypto policy", () => {
-  const config = loadConfig({ ARMORIQ_API_KEY: "ak_test_explicit0000000000000" });
+test("loadConfig: a signed-in key enables crypto policy", () => {
+  const config = loadConfigWithLogins([
+    { backend: "https://staging-api.armoriq.ai", apiKey: "ak_test_explicit0000000000000" },
+  ]);
   assert.equal(config.apiKey, "ak_test_explicit0000000000000");
   assert.equal(config.cryptoPolicyEnabled, true);
 });
