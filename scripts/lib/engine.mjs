@@ -131,6 +131,11 @@ function isFrictionlessAllowPolicy(policy) {
   }
 }
 
+function intentMode(config, policy) {
+  if (!config.intentRequired) return "optional";
+  return isFrictionlessAllowPolicy(policy) ? "capture" : "required";
+}
+
 function legacyArmorPolicyMessage() {
   return "Legacy /armor-policy is intentionally unsupported. Use /armorclaude:armor policy ... instead.";
 }
@@ -537,7 +542,6 @@ export async function handleSessionStart(input, config) {
   debugLog(config, `session started: ${sessionId}, mode=${config.mode}`);
 
   const modeLabel = config.mode === "enforce" ? "ENFORCING" : "MONITORING";
-  const intentLabel = config.intentRequired ? "required" : "optional";
 
   // --- Not connected: installed but no usable API key. Show a clear setup
   // banner and run passively (monitor mode) instead of bricking the session.
@@ -601,6 +605,7 @@ export async function handleSessionStart(input, config) {
     }
   }
 
+  const intentLabel = intentMode(config, (await loadPolicyState(config.policyFile)).policy);
   return addPromptContext(
     `ArmorClaude active (${modeLabel}, intent=${intentLabel})${syncNote}${onboardingMsg}`,
     "SessionStart"
@@ -667,20 +672,13 @@ export async function handleUserPromptSubmit(input, config) {
   // Claude will call the `register_intent_plan` MCP tool (or include a JSON
   // block in its plan file) as its first action. This uses the session's own
   // LLM — no separate API key or extra LLM call needed.
-  //
-  // Only inject this when intent is ACTUALLY enforced. Under an all-allow
-  // (frictionless) policy, handlePreToolUse does not gate tool calls, so
-  // telling Claude "enforcement is active" and "tools will be blocked" is
-  // false — and it makes Claude report a missing `register_intent_plan` tool
-  // and proceed unguarded when the policy MCP isn't surfaced. Keep this gate
-  // consistent with handlePreToolUse's enforceIntent computation.
   const policyState = await loadPolicyState(config.policyFile);
-  const allowAll = isFrictionlessAllowPolicy(policyState.policy);
-  const enforceIntent = config.intentRequired && !allowAll;
+  const mode = intentMode(config, policyState.policy);
   const parts = [];
-  if (config.planningEnabled && enforceIntent) {
+  if (config.planningEnabled && mode !== "optional") {
     parts.push(
-      "ArmorClaude intent enforcement is active. Before using any tool, " +
+      `ArmorClaude intent ${mode === "capture" ? "capture" : "enforcement"} is active. ` +
+        "Before using any tool, " +
         "declare your plan in this exact JSON shape:\n\n" +
         INTENT_PLAN_FORMAT +
         "\n\n" +
@@ -695,7 +693,9 @@ export async function handleUserPromptSubmit(input, config) {
         "server is not connected: do not fabricate the call, and tell the " +
         "user to verify it with `claude mcp list` (expect armorclaude-policy " +
         "Connected) before relying on enforcement.\n" +
-        "Tool calls without a registered plan will be blocked."
+        (mode === "capture"
+          ? "Tool calls are recorded against the registered plan. The current policy blocks none of them."
+          : "Tool calls without a registered plan will be blocked.")
     );
   }
   if (parts.length > 0) {
@@ -1002,9 +1002,9 @@ export async function handlePreToolUse(input, config) {
   // --- Static policy evaluation ---
   const policyState = await loadPolicyState(config.policyFile);
   const currentPolicyHash = computePolicyHash(policyState.policy);
-  // "All Allow" onboarding policy => run frictionless: no intent-plan gate, no
-  // token required, no drift blocking. Any policy with a deny/require_approval
-  // keeps full enforcement.
+  // "All Allow" policy (including no confirmed policy) => intent is captured
+  // but never blocks: no plan gate, no drift, expiry or proof denies. Any
+  // policy with a deny/require_approval keeps full enforcement.
   const allowAll = isFrictionlessAllowPolicy(policyState.policy);
   const enforceIntent = config.intentRequired && !allowAll;
 
@@ -1161,10 +1161,8 @@ export async function handlePreToolUse(input, config) {
     }
   }
 
-  // If no token, try to acquire one. Skipped entirely for all-allow: no token
-  // is needed to run frictionless, and skipping avoids the backend round-trip
-  // (and its billing/CSRG failure modes) on a policy that permits everything.
-  if (!intentTokenRaw && config.apiKey && !allowAll) {
+  // If no token, try to acquire one.
+  if (!intentTokenRaw && config.apiKey) {
     try {
       const intentResponse = await requestIntent(config, {
         prompt: session.lastPrompt || `Use tool ${toolName}`,
@@ -1269,7 +1267,7 @@ export async function handlePreToolUse(input, config) {
       Boolean(config.verifyStepEndpoint) &&
       Boolean(intentTokenRaw)
   );
-  if (proofError) {
+  if (proofError && !allowAll) {
     return denyOrAllow(config, "csrg_proof_rejected", proofError);
   }
 
@@ -1281,7 +1279,7 @@ export async function handlePreToolUse(input, config) {
       if (!verifyResult.skipped) {
         remoteAllowed = verifyResult.allowed === true;
       }
-      if (verifyResult.allowed === false) {
+      if (verifyResult.allowed === false && !allowAll) {
         return denyOrAllow(
           config,
           "remote_verify_denied",
@@ -1303,11 +1301,9 @@ export async function handlePreToolUse(input, config) {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const deny = denyOrAllow(
-        config,
-        "remote_verify_failed",
-        `ArmorClaude verify-step failed: ${message}`
-      );
+      const deny =
+        !allowAll &&
+        denyOrAllow(config, "remote_verify_failed", `ArmorClaude verify-step failed: ${message}`);
       if (deny) {
         return deny;
       }
@@ -1315,7 +1311,12 @@ export async function handlePreToolUse(input, config) {
   }
 
   // --- Expiry check ---
-  if (Number.isFinite(localExpiresAt) && localExpiresAt > 0 && nowEpochSeconds() > localExpiresAt) {
+  if (
+    !allowAll &&
+    Number.isFinite(localExpiresAt) &&
+    localExpiresAt > 0 &&
+    nowEpochSeconds() > localExpiresAt
+  ) {
     const deny = denyOrAllow(
       config,
       "intent_token_expired",
