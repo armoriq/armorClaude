@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { access } from "node:fs/promises";
 import path from "node:path";
+import { loginCommand } from "./config.mjs";
 import { writePrivateFileSync } from "./fs-store.mjs";
 import { getSession, loadRuntimeState, saveRuntimeState, upsertSession } from "./runtime-state.mjs";
 
-export const RELOGIN_NOTICE =
-  "ArmorIQ: sign in again to keep sending armorclaude data. Run: armoriq login --product armorclaude --force";
+export const reloginNotice = () =>
+  `ArmorIQ: sign in again to keep sending armorclaude data. Run: ${loginCommand()} --force`;
 
 function markerFile({ dataDir, observabilityEndpoint, apiKey }) {
   const binding = createHash("sha256").update(`${observabilityEndpoint}\n${apiKey}`).digest("hex");
@@ -43,7 +44,7 @@ export async function withReloginNotice(event, input, config, output) {
   if (!sessionId || event === "SessionEnd" || !config.apiKey) return output;
   if (!(await reloginRequired(config)) || !(await claimNotice(config, sessionId))) return output;
   const systemMessage = output?.systemMessage
-    ? `${output.systemMessage}\n\n${RELOGIN_NOTICE}`
-    : RELOGIN_NOTICE;
+    ? `${output.systemMessage}\n\n${reloginNotice()}`
+    : reloginNotice();
   return { ...output, systemMessage };
 }
