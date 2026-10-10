@@ -38,7 +38,7 @@ export function backend() {
         if (body.generation !== b.generation)
           return reply(409, { message: "Usage stream generation changed" });
         batches.push(body);
-        if (b.onBatch?.(res)) return;
+        if (b.onBatch?.(res, body)) return;
         return reply(200, {
           results: body.snapshots.map((s) => ({
             sessionId: s.sessionId,
@@ -205,6 +205,11 @@ export const liveFiles = (h, sessionId) => {
   return {
     lock: path.join(dir, `${sessionId}.lock`),
     queued: () => (existsSync(queue) ? readdirSync(queue).filter((n) => n.endsWith(".json")) : []),
+    refused: () => {
+      const dir = path.join(queue, "refused");
+      const names = existsSync(dir) ? readdirSync(dir) : [];
+      return names.map((n) => JSON.parse(readFileSync(path.join(dir, n), "utf8")));
+    },
   };
 };
 

@@ -253,3 +253,30 @@ test("after the usage stream is reset every hour of the session is sent again un
     assert.deepEqual(files.queued(), []);
   });
 });
+
+test("a batch the backend refuses for good is set aside with its reason and the next capture is sent", async () => {
+  await withSession(async (b, h, id) => {
+    let refusedId;
+    b.onBatch = (res, body) => {
+      refusedId ??= body.batchId;
+      if (body.batchId !== refusedId) return false;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "usageHour must be a UTC hour" }));
+      return true;
+    };
+    writeSession(h, id, [assistant(id, "a", isoAgo(60_000), { input_tokens: 7 })]);
+    await stop(h, b.url, false, id);
+    await until(() => b.batches.length === 1, "the refused batch");
+    await settled(h, id);
+    appendFileSync(projectFile(h, id), usageLine(id, "b", isoAgo(30_000), { input_tokens: 3 }));
+    await stop(h, b.url, false, id);
+    await until(() => b.batches.some((x) => x.batchId !== refusedId), "the next capture");
+    const files = await settled(h, id);
+    assert.equal(b.batches.filter((x) => x.batchId === refusedId).length, 1);
+    assert.deepEqual(b.batches.at(-1).snapshots.map(total), [10]);
+    assert.deepEqual(files.queued(), []);
+    const [aside] = files.refused();
+    assert.equal(aside.batch.batchId, refusedId);
+    assert.deepEqual(aside.refused, { status: 400, reason: "usageHour must be a UTC hour" });
+  });
+});
