@@ -91,22 +91,34 @@ async function recordAcks(dir, { batch, admits }) {
   }
 }
 
+async function setAside(queueDir, { file, ...item }, result) {
+  const refused = { status: result.status ?? null, reason: result.reason };
+  await writeJson(path.join(queueDir, "refused", path.basename(file)), { ...item, refused });
+  await settle(file);
+}
+
 export async function drain(job, dropped = () => false) {
   let sent = 0;
+  const refused = [];
   for (const item of await queued(job.queueDir)) {
     const result = await job.client.recordTokenUsageBatch(item.batch);
     noteTokenUsageResult(job.config, result);
-    if (fenced(result)) return { outcome: "fenced", sent, result };
+    if (fenced(result)) return { outcome: "fenced", sent, refused, result };
     if (!result.ok && dropped(result, item)) {
       await settle(item.file);
       continue;
     }
-    if (!result.ok) return { outcome: "kept", sent, result };
+    if (!result.ok && result.retryable === false) {
+      await setAside(job.queueDir, item, result);
+      refused.push(`${item.batch.snapshots.length} session-hour(s), ${describe(result)}`);
+      continue;
+    }
+    if (!result.ok) return { outcome: "kept", sent, refused, result };
     await recordAcks(job.dir, item);
     await settle(item.file);
     sent += item.batch.snapshots.length;
   }
-  return { outcome: "drained", sent };
+  return { outcome: "drained", sent, refused };
 }
 
 export async function clearQueue(queueDir) {

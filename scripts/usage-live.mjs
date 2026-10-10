@@ -26,7 +26,8 @@ async function uploadOnce(job) {
     const taken = await captureChanges(job, { ...job.session, cutoff: job.cutoff, generation });
     for (const p of taken.problems) log(`not read ${p.path} (${p.reason})`);
     await enqueue(job.queueDir, toItems(taken.snapshots, { generation, ...job }));
-    const { outcome, sent, result } = await drain(job);
+    const { outcome, sent, refused, result } = await drain(job);
+    for (const reason of refused) log(`set aside a batch the backend refused: ${reason}`);
     if (sent) log(`sent ${sent} session-hour(s)`);
     if (outcome === "kept") log(`kept the rest for the next upload: ${describe(result)}`);
     if (outcome !== "fenced") return;
