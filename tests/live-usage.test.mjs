@@ -280,3 +280,48 @@ test("a batch the backend refuses for good is set aside with its reason and the 
     assert.deepEqual(aside.refused, { status: 400, reason: "usageHour must be a UTC hour" });
   });
 });
+
+test("a batch refused for good is retried hour by hour, only the refused hour is set aside, and it is sent again only once it changes", async () => {
+  await withSession(async (b, h, id) => {
+    const bad = isoAgo(2 * 3_600_000);
+    const isBad = (s) =>
+      s.usageDate === bad.slice(0, 10) && s.usageHour === Number(bad.slice(11, 13));
+    b.onBatch = (res, body) => {
+      if (!body.snapshots.some(isBad)) return false;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "usageHour must be a UTC hour" }));
+      return true;
+    };
+    writeSession(h, id, [
+      assistant(id, "a", bad, { input_tokens: 4 }),
+      assistant(id, "b", isoAgo(60_000), { input_tokens: 6 }),
+    ]);
+    await stop(h, b.url, false, id);
+    const alone = (x) => x.snapshots.length === 1 && !isBad(x.snapshots[0]);
+    await until(() => b.batches.some(alone), "the good hour alone");
+    const files = await settled(h, id);
+    assert.deepEqual(
+      files.refused().map((r) => r.batch.snapshots.map(total)),
+      [[4]]
+    );
+    const sentBefore = b.batches.length;
+    appendFileSync(projectFile(h, id), usageLine(id, "c", isoAgo(30_000), { input_tokens: 5 }));
+    await stop(h, b.url, false, id);
+    await until(() => b.batches.length > sentBefore, "the next capture");
+    await settled(h, id);
+    assert.deepEqual(
+      b.batches
+        .slice(sentBefore)
+        .flatMap((x) => x.snapshots)
+        .map(total),
+      [11]
+    );
+    appendFileSync(projectFile(h, id), usageLine(id, "d", bad, { input_tokens: 2 }));
+    await stop(h, b.url, false, id);
+    await until(
+      () => b.batches.slice(sentBefore + 1).some((x) => x.snapshots.some(isBad)),
+      "the changed hour"
+    );
+    await settled(h, id);
+  });
+});
