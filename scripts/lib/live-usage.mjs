@@ -101,9 +101,20 @@ export function captureSession({ transcript, sessionId, cutoff }) {
   });
 }
 
-export function changedSnapshots({ capture, sessionId, revision, acknowledged = {} }) {
+const acknowledgedIn = (state, generation) =>
+  state.generation === generation ? (state.acknowledged ?? {}) : {};
+
+export function knownDigests(state, generation, pendingBatches, sessionId) {
+  const known = { ...acknowledgedIn(state, generation) };
+  for (const batch of pendingBatches.filter((b) => b.generation === generation))
+    for (const s of batch.snapshots)
+      if (s.sessionId === sessionId) known[hourKey(s)] = digest(s.entries);
+  return known;
+}
+
+export function changedSnapshots({ capture, sessionId, revision, known = {} }) {
   return capture.hours
-    .filter((h) => acknowledged[hourKey(h)] !== digest(h.entries))
+    .filter((h) => known[hourKey(h)] !== digest(h.entries))
     .map((h) => ({
       sessionId,
       usageDate: h.usageDate,
@@ -115,10 +126,10 @@ export function changedSnapshots({ capture, sessionId, revision, acknowledged = 
     }));
 }
 
-export function acknowledge(acknowledged, snapshots) {
-  const next = { ...acknowledged };
-  for (const s of snapshots) next[hourKey(s)] = digest(s.entries);
-  return next;
+export function acknowledge(state, generation, snapshots) {
+  const acknowledged = { ...acknowledgedIn(state, generation) };
+  for (const s of snapshots) acknowledged[hourKey(s)] = digest(s.entries);
+  return { ...state, generation, acknowledged };
 }
 
 const encoded = (snapshot) => Buffer.byteLength(JSON.stringify(snapshot));

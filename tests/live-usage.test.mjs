@@ -1,215 +1,37 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { createServer } from "node:http";
-import { tmpdir } from "node:os";
+import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import armoriqSdk from "@armoriq/sdk-dev";
+import {
+  alive,
+  assistant,
+  backend,
+  env,
+  GENERATION,
+  home,
+  isoAgo,
+  liveFiles,
+  projectFile,
+  run,
+  sessionBatches,
+  settled,
+  stop,
+  stopDaemon,
+  total,
+  until,
+  usageLine,
+  withSession,
+  writeSession,
+} from "./helpers/live-usage.mjs";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
-const scanner = path.join(repoRoot, "scripts", "usage-sync.mjs");
-const KEY = "ak_test_live_usage_0001";
-const USER = `user-of-${KEY}`;
-const isoAgo = (ms) => new Date(Date.now() - ms).toISOString();
-
-function backend() {
-  const batches = [];
-  const singles = [];
-  let release;
-  const released = new Promise((resolve) => (release = resolve));
-  const server = createServer((req, res) => {
-    let raw = "";
-    req.on("data", (c) => (raw += c));
-    req.on("end", async () => {
-      const body = raw ? JSON.parse(raw) : {};
-      const reply = (status, data) => {
-        res.writeHead(status, { "content-type": "application/json" });
-        res.end(JSON.stringify(data));
-      };
-      if (req.url === "/iap/validate-key") return reply(200, { userId: USER });
-      if (req.url.startsWith("/api-keys/device-history-sync"))
-        return reply(200, { requestedAt: null });
-      if (req.url === "/dashboard/token-usage/stream")
-        return reply(200, { generation: GENERATION });
-      if (req.url === "/dashboard/token-usage/batch") {
-        batches.push(body);
-        return reply(200, {
-          results: body.snapshots.map((s) => ({
-            sessionId: s.sessionId,
-            usageDate: s.usageDate,
-            usageHour: s.usageHour,
-            status: "applied",
-          })),
-        });
-      }
-      if (req.url === "/dashboard/token-usage") {
-        singles.push(body);
-        await released;
-        return reply(201, { ok: true, recorded: 1 });
-      }
-      reply(404, {});
-    });
-  });
-  return new Promise((resolve) =>
-    server.listen(0, "127.0.0.1", () =>
-      resolve({
-        server,
-        batches,
-        singles,
-        release,
-        url: `http://127.0.0.1:${server.address().port}`,
-      })
-    )
-  );
-}
-
-const GENERATION = randomUUID();
-
-function login(home, url, at) {
-  const file = path.join(home, ".armoriq", "credentials.json");
-  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const name = armoriqSdk.profileName(url, "armorclaude");
-  const doc = {
-    version: 2,
-    active: name,
-    historyOrigin: "fresh",
-    loginHistory: {
-      [name]: { id: randomUUID(), origin: "fresh", events: [{ sequence: 1, at, userId: USER }] },
-    },
-    profiles: {
-      [name]: {
-        backend: url,
-        product: "armorclaude",
-        apiKey: KEY,
-        email: "dev@example.com",
-        userId: USER,
-        orgId: "org-1",
-        loggedInAt: at,
-        savedAt: at,
-      },
-    },
-  };
-  writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o600 });
-}
-
-function home(url, loggedInAt) {
-  const dir = path.join(tmpdir(), `live-usage-${randomUUID()}`);
-  assert.ok(dir.startsWith(tmpdir()));
-  mkdirSync(path.join(dir, ".claude", "projects", "-work-repo"), { recursive: true });
-  login(dir, url, loggedInAt);
-  return dir;
-}
-
-const projectFile = (h, sessionId) =>
-  path.join(h, ".claude", "projects", "-work-repo", `${sessionId}.jsonl`);
-
-const assistant = (sessionId, id, timestamp, usage) => ({
-  type: "assistant",
-  sessionId,
-  cwd: "/work/repo",
-  timestamp,
-  requestId: `r-${id}`,
-  message: { id, model: "claude-opus", usage },
-});
-
-function writeSession(h, sessionId, lines) {
-  writeFileSync(projectFile(h, sessionId), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
-}
-
-function env(h, url, daemon) {
-  const dataDir = path.join(h, "data");
-  mkdirSync(dataDir, { recursive: true });
-  if (!daemon) writeFileSync(path.join(dataDir, "profiles"), "not a directory");
-  return {
-    PATH: process.env.PATH,
-    HOME: h,
-    NODE_OPTIONS: process.env.NODE_OPTIONS ?? "",
-    ARMORCLAUDE_DATA_DIR: dataDir,
-    ARMORCLAUDE_RUNTIME_FILE: path.join(dataDir, "runtime.json"),
-    ARMORCLAUDE_POLICY_FILE: path.join(dataDir, "policy.json"),
-    ARMORIQ_ENV: "local",
-    ARMORIQ_BACKEND_URL: url,
-    ARMORIQ_CSRG_URL: url,
-    ARMORIQ_DEVICE_ID_PATH: path.join(h, "device-id"),
-  };
-}
-
-function run(script, environment, stdin = "") {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [script], {
-      env: environment,
-      stdio: ["pipe", "ignore", "pipe"],
-    });
-    let stderr = "";
-    child.stderr.on("data", (c) => (stderr += c));
-    child.on("error", reject);
-    child.on("exit", (code) => resolve({ code, stderr, pid: child.pid }));
-    child.stdin.end(stdin);
-  });
-}
-
-const stop = (h, url, daemon, sessionId, extra = {}) =>
-  run(
-    hookRouter,
-    { ...env(h, url, daemon), ...extra },
-    JSON.stringify({
-      hook_event_name: "Stop",
-      session_id: sessionId,
-      transcript_path: projectFile(h, sessionId),
-    })
-  );
-
-async function until(check, what, timeoutMs = 20_000) {
-  const start = Date.now();
-  while (!check()) {
-    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 50));
-  }
-}
-
-async function stopDaemon(h) {
-  const pidFile = path.join(h, "data", "daemon.pid");
-  if (!existsSync(pidFile)) return;
-  const pid = Number(readFileSync(pidFile, "utf8"));
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return;
-  }
-  await until(
-    () => {
-      try {
-        process.kill(pid, 0);
-        return false;
-      } catch {
-        return true;
-      }
-    },
-    "the daemon to exit",
-    10_000
-  );
-}
-
-const total = (s) =>
-  s.entries.reduce(
-    (n, e) => n + e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens,
-    0
-  );
-const sessionBatches = (b, sessionId) =>
-  b.batches.flatMap((x) => x.snapshots).filter((s) => s.sessionId === sessionId);
+const scanner = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "scripts",
+  "usage-sync.mjs"
+);
 
 for (const daemon of [false, true]) {
   const via = daemon ? "through the daemon" : "without the daemon";
@@ -354,4 +176,80 @@ test("the live upload keeps its state and log owner-only", async () => {
     await new Promise((r) => b.server.close(r));
     rmSync(h, { recursive: true, force: true });
   }
+});
+
+for (const loss of ["the upload is killed", "the response is lost"]) {
+  test(`a batch the backend committed is sent again once with the same id and bytes when ${loss}`, async () => {
+    await withSession(async (b, h, id) => {
+      let held;
+      b.onBatch = (res) => {
+        b.onBatch = null;
+        if (loss === "the response is lost") res.socket.destroy();
+        else held = res;
+        return true;
+      };
+      writeSession(h, id, [assistant(id, "a", isoAgo(60_000), { input_tokens: 7 })]);
+      await stop(h, b.url, false, id);
+      await until(() => b.batches.length === 1, "the first batch");
+      if (held) {
+        await until(() => existsSync(liveFiles(h, id).lock), "the upload's lock");
+        const pid = Number(readFileSync(liveFiles(h, id).lock, "utf8"));
+        process.kill(pid, "SIGKILL");
+        await until(() => !alive(pid), "the killed upload to exit");
+        held.socket.destroy();
+        assert.equal(liveFiles(h, id).queued().length, 1);
+      } else {
+        assert.equal((await settled(h, id)).queued().length, 1);
+      }
+      appendFileSync(projectFile(h, id), usageLine(id, "b", isoAgo(30_000), { input_tokens: 3 }));
+      await stop(h, b.url, false, id);
+      await until(() => b.batches.length === 3, "the replay and the next capture");
+      const files = await settled(h, id);
+      assert.deepEqual(b.batches[1], b.batches[0]);
+      assert.equal(b.batches.filter((x) => x.batchId === b.batches[0].batchId).length, 2);
+      assert.ok(b.batches[2].snapshots[0].revision > b.batches[0].snapshots[0].revision);
+      assert.deepEqual(b.batches[2].snapshots.map(total), [10]);
+      assert.deepEqual(files.queued(), []);
+    });
+  });
+}
+
+test("a correction that moves tokens between categories posts although the total is the same", async () => {
+  await withSession(async (b, h, id) => {
+    const at = isoAgo(60_000);
+    writeSession(h, id, [assistant(id, "a", at, { input_tokens: 100 })]);
+    await stop(h, b.url, false, id);
+    await until(() => b.batches.length === 1, "the first batch");
+    await settled(h, id);
+    writeSession(h, id, [
+      assistant(id, "a", at, { input_tokens: 40, cache_read_input_tokens: 60 }),
+    ]);
+    await stop(h, b.url, false, id);
+    await until(() => b.batches.length === 2, "the corrected batch");
+    const [first, second] = b.batches.map((x) => x.snapshots[0]);
+    assert.equal(total(first), total(second));
+    assert.deepEqual([second.entries[0].inputTokens, second.entries[0].cacheReadTokens], [40, 60]);
+  });
+});
+
+test("after the usage stream is reset every hour of the session is sent again under the new generation", async () => {
+  await withSession(async (b, h, id) => {
+    const earlier = isoAgo(2 * 3_600_000);
+    writeSession(h, id, [
+      assistant(id, "a", earlier, { input_tokens: 4 }),
+      assistant(id, "b", isoAgo(60_000), { input_tokens: 6 }),
+    ]);
+    await stop(h, b.url, false, id);
+    await until(() => b.batches.length === 1, "the first batch");
+    await settled(h, id);
+    b.generation = randomUUID();
+    appendFileSync(projectFile(h, id), usageLine(id, "c", isoAgo(30_000), { input_tokens: 5 }));
+    await stop(h, b.url, false, id);
+    await until(() => b.batches.length === 2, "the batch under the new generation");
+    const files = await settled(h, id);
+    assert.equal(b.batches[1].generation, b.generation);
+    assert.deepEqual(b.batches[1].snapshots.map(total).sort(), [11, 4].sort());
+    assert.ok(b.batches[1].snapshots.some((s) => s.usageHour === Number(earlier.slice(11, 13))));
+    assert.deepEqual(files.queued(), []);
+  });
 });
