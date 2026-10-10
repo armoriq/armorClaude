@@ -212,3 +212,24 @@ test("a history request replaced by a newer one drops its queued upload and neve
     assert.match(stderr, new RegExp(`completed the history request ${newer}`));
   });
 });
+
+test("a history run with one hour the backend refuses for good completes with the remaining hours", async () => {
+  await withBackend(at(30), async (b, h) => {
+    const kept = randomUUID();
+    const refused = randomUUID();
+    writeSession(h, kept, [assistant(kept, "k", at(10), { input_tokens: 10 })]);
+    writeSession(h, refused, [assistant(refused, "r", at(12), { input_tokens: 7 })]);
+    b.onBatch = (res, body) => {
+      if (!body.snapshots.some((s) => s.sessionId === refused)) return false;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: "entries are invalid" }));
+      return true;
+    };
+    b.requestId = randomUUID();
+    await runWorker(h, b);
+    const done = reportsOf(b, "history").at(-1);
+    assert.deepEqual([done.phase, done.total], ["complete", 1]);
+    assert.equal(b.requestId, null);
+    assert.equal(sessionBatches(b, kept).length > 0, true);
+  });
+});
