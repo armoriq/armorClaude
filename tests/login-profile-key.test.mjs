@@ -21,7 +21,7 @@ import {
 const { loadProfile } = armoriqSdk;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
-const usageSync = path.join(repoRoot, "scripts", "usage-sync.mjs");
+const usageWorker = path.join(repoRoot, "scripts", "usage-worker.mjs");
 const golden = JSON.parse(readFileSync(GOLDEN_CREDENTIALS, "utf8")).profiles;
 const LOGIN_KEY = "ak_live_loginprofile00000000000000";
 const RELOGIN_NOTICE =
@@ -318,12 +318,11 @@ for (const [what, refusals] of Object.entries(REFUSALS)) {
   }
 }
 
-test("a history sync refused with relogin_required prints the line once and stops", async () => {
+test("a worker pass refused with relogin_required stops and the next session shows the line once", async () => {
   await withBackend({ daemon: false, refusals: { tokenUsage: RELOGIN_BODY } }, async (run) => {
     writeTranscript(run.home, "s-other");
-    const { code, stderr } = await runScript(usageSync, run.env, "");
+    const { code, stderr } = await runScript(usageWorker, run.env, "");
     assert.equal(code, 1, stderr);
-    assert.equal(stderr.split(RELOGIN_NOTICE).length - 1, 1, stderr);
     assert.equal(run.backend.calls.filter((c) => c.route === "tokenUsage").length, 1);
     assert.ok(refusalMarked(run.dataDir));
     assert.deepEqual(await notices(run, "s-after-sync", ["SessionStart", "Stop"]), [true, false]);
@@ -335,7 +334,7 @@ test("a 403 with another error on the lease, the span export or token usage prin
   await withBackend({ daemon: false, refusals }, async (run) => {
     const id = randomUUID();
     const shown = await notices(run, id, ["SessionStart", "UserPromptSubmit", "Stop", "Stop"]);
-    const sync = await runScript(usageSync, run.env, "");
+    const sync = await runScript(usageWorker, run.env, "");
     assert.ok(!sync.stderr.includes(RELOGIN_NOTICE), sync.stderr);
     shown.push(...(await notices(run, id, ["Stop"])));
     assert.deepEqual(shown, [false, false, false, false, false]);

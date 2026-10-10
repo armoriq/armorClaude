@@ -26,17 +26,19 @@ import {
   writeSession,
 } from "./helpers/live-usage.mjs";
 
-const scanner = path.join(
+const worker = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
   "scripts",
-  "usage-sync.mjs"
+  "usage-worker.mjs"
 );
 
 for (const daemon of [false, true]) {
   const via = daemon ? "through the daemon" : "without the daemon";
-  test(`a Stop posts its own session while the scanner is held on a backlog, ${via}`, async () => {
+  test(`a Stop posts its own session while the usage worker is held on a backlog, ${via}`, async () => {
     const b = await backend();
+    const held = [];
+    b.onBatch = (res, body) => Boolean(body.runId) && held.push(res) > 0;
     const h = home(b.url, isoAgo(3 * 3_600_000));
     try {
       for (let i = 0; i < 30; i++) {
@@ -48,8 +50,8 @@ for (const daemon of [false, true]) {
           }),
         ]);
       }
-      const scan = run(scanner, env(h, b.url, false));
-      await until(() => b.singles.length > 0, "the scanner's first held post");
+      const scan = run(worker, env(h, b.url, false));
+      await until(() => held.length > 0, "the worker's first held batch");
       const target = randomUUID();
       const at = isoAgo(60_000);
       const big = {
@@ -71,11 +73,11 @@ for (const daemon of [false, true]) {
         [[at.slice(0, 10), Number(at.slice(11, 13)), 400_790]]
       );
       assert.equal(b.batches[0].generation, GENERATION);
-      assert.equal(b.singles.length > 0 && !b.singles.some((s) => s.sessionId === target), true);
-      b.release();
+      assert.equal(b.batches.filter((x) => x.runId).flatMap((x) => x.snapshots).length, 30);
+      for (const res of held) res.socket.destroy();
       await scan;
     } finally {
-      b.release();
+      for (const res of held) res.socket.destroy();
       await stopDaemon(h);
       b.server.closeAllConnections();
       await new Promise((r) => b.server.close(r));

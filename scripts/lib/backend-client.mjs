@@ -173,20 +173,3 @@ export async function pendingHistorySync(config, deviceId) {
     clearTimeout(timeout);
   }
 }
-
-export async function completeHistorySync(config, deviceId, requestedAt) {
-  try {
-    const url = endpoint(config, "/api-keys/device-history-sync/done");
-    const res = await postJson(
-      url,
-      { deviceId, requestedAt },
-      buildAuthHeaders(config),
-      config.timeoutMs || 8000
-    );
-    return res.ok
-      ? { ok: true }
-      : { ok: false, reason: `device-history-sync/done returned ${res.status}` };
-  } catch (err) {
-    return { ok: false, reason: String(err?.message || err) };
-  }
-}
