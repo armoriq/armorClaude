@@ -182,7 +182,7 @@ export function loadConfig(env = process.env) {
     autoRevokeOnEnd: true,
     daemonEnabled: true,
     // csrgVerifyEnabled drives verify-step heartbeats → activeSessions counter.
-    // Production: false — org native policy on api.armoriq.io denies all paths
+    // Production: false — org native policy on api.armoriq.ai denies all paths
     //   for gmail.com domain, so verify-step always returns "blocked". Keeping
     //   this false lets tools run while the org policy issue is resolved upstream.
     // Local mock: true — mock always returns allowed, so heartbeats work and
