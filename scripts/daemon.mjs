@@ -56,12 +56,11 @@ import {
   obsServeAsDaemon,
 } from "./lib/observability.mjs";
 import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
-import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
+import { launchLiveUsage } from "./lib/usage-sync-launch.mjs";
 import { withReloginNotice } from "./lib/relogin.mjs";
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
-const USAGE_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 
 let config = loadConfig();
 ensurePrivateDirSync(config.dataDir);
@@ -372,14 +371,8 @@ async function dispatchHook(event, input, cfg) {
 }
 
 // ---- Token usage sync ----------------------------------------------------
-let lastUsageSyncAt = 0;
-function syncUsageAfter(event, cfg) {
-  if (event === "Stop") {
-    if (requestUsageSync(cfg)) lastUsageSyncAt = Date.now();
-    return;
-  }
-  if (Date.now() - lastUsageSyncAt < USAGE_SYNC_INTERVAL_MS) return;
-  if (launchUsageSync(cfg)) lastUsageSyncAt = Date.now();
+function syncUsageAfter(event, cfg, input) {
+  if (event === "Stop") launchLiveUsage(cfg, input);
 }
 
 // ---- Idle timeout --------------------------------------------------------
@@ -497,7 +490,7 @@ async function handleLine(rawLine, socket) {
       );
       await journalHook(event, input, output, effectiveConfig);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
-      syncUsageAfter(event, effectiveConfig);
+      syncUsageAfter(event, effectiveConfig, input);
       return;
     }
     default: {
