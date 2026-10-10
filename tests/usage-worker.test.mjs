@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, rmSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -162,5 +162,27 @@ test("a history request cancelled before its upload is acknowledged sends nothin
     await until(() => sessionBatches(b, id).length === 3, "the live batch");
     await settled(h, id);
     assert.equal(total(sessionBatches(b, id).at(-1)), 25);
+  });
+});
+
+test("a history request stays open while one of its sessions cannot be read, and completes once it is read", async () => {
+  await withBackend(at(30), async (b, h) => {
+    const id = randomUUID();
+    writeSession(h, id, [assistant(id, "pre", at(10), { input_tokens: 10 })]);
+    const sub = path.join(path.dirname(projectFile(h, id)), id, "subagents", "agent-a.jsonl");
+    mkdirSync(path.dirname(sub), { recursive: true });
+    writeFileSync(sub, usageLine(id, "sub", at(12), { input_tokens: 4 }), { mode: 0o000 });
+    b.requestId = randomUUID();
+    for (let pass = 0; pass < 2; pass++) {
+      await runWorker(h, b);
+      const last = reportsOf(b, "history").at(-1);
+      assert.deepEqual([last.phase, last.errorCode], ["uploading", "source_unreadable"]);
+      assert.notEqual(b.requestId, null);
+    }
+    chmodSync(sub, 0o600);
+    await runWorker(h, b);
+    assert.equal(reportsOf(b, "history").at(-1).phase, "complete");
+    assert.equal(b.requestId, null);
+    assert.equal(total(sessionBatches(b, id).at(-1)), 14);
   });
 });

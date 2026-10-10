@@ -98,7 +98,7 @@ async function scan(job, run, sessions, generation, save) {
     found.snapshots.push(...taken.snapshots);
     if (taken.problems.length) unread += 1;
     else if (plan.seen) found.seen[session.sessionId] = plan.seen;
-    if (history) found.scanned.push(session.sessionId);
+    else if (history) found.scanned.push(session.sessionId);
   }
   const refused = await flush(job, run, found, generation);
   if (refused) return { unread, refused };
@@ -139,6 +139,7 @@ async function drainRuns(job, historyRefused) {
     dropped ||= current && cancelled(res);
     return cancelled(res) || (current && dropped);
   });
+  for (const reason of result.refused) log(`set aside a batch the backend refused: ${reason}`);
   if (result.sent) log(`sent ${result.sent} session-hour(s)`);
   if (result.outcome === "kept") log(`kept the rest for the next run: ${describe(result.result)}`);
   if (dropped) job.state.history = null;
