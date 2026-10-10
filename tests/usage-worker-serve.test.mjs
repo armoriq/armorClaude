@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { processInfo } from "../scripts/lib/usage-sessions.mjs";
 import {
@@ -131,5 +131,48 @@ test("SessionEnd of the last session stops the worker and keeps the harness runn
     await until(() => !alive(worker), "the worker to exit", 15_000);
     assert.equal(existsSync(path.join(contextDir(h), "worker.lock")), false);
     assert.equal(alive(harness.pid), true);
+  });
+});
+
+function switchUser(h) {
+  const file = path.join(h, ".armoriq", "credentials.json");
+  const doc = JSON.parse(readFileSync(file, "utf8"));
+  const now = new Date().toISOString();
+  const profile = Object.values(doc.profiles)[0];
+  Object.assign(profile, {
+    userId: "user-b",
+    apiKey: "ak_test_other_user_0002",
+    loggedInAt: now,
+    savedAt: now,
+  });
+  const history = Object.values(doc.loginHistory)[0];
+  history.events.push({ sequence: history.events.length + 1, at: now, userId: "user-b" });
+  writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o600 });
+}
+
+test("a serve worker stops once the login changes to another user and uploads nothing more under the old key", async () => {
+  await withServing(async (b, h, cleanup) => {
+    const first = randomUUID();
+    writeSession(h, first, [assistant(first, "a", at(20), { input_tokens: 3 })]);
+    b.onBatch = (res) => {
+      b.onBatch = null;
+      res.writeHead(503, { "content-type": "application/json", "retry-after": "2" });
+      res.end(JSON.stringify({ message: "busy" }));
+      return true;
+    };
+    const harness = await startHarness(h, b, randomUUID());
+    cleanup.push(harness.pid);
+    await until(
+      () => reportsOf(b, "discovery").some((r) => r.phase === "retrying"),
+      "the failed pass"
+    );
+    const worker = workerPid(h);
+    switchUser(h);
+    const theirs = randomUUID();
+    writeSession(h, theirs, [
+      assistant(theirs, "b", new Date().toISOString(), { input_tokens: 9 }),
+    ]);
+    await until(() => !alive(worker), "the worker to exit", 15_000);
+    assert.equal(sessionBatches(b, theirs).length, 0);
   });
 });

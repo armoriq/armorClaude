@@ -237,11 +237,21 @@ function exitWhenClosed(job, lockPath) {
   }
 }
 
+async function sameLogin(job) {
+  const current = await prepareUsage(log);
+  if (current?.dir !== job.dir) return false;
+  Object.assign(job, { config: current.config, client: current.client, cutoff: current.cutoff });
+  return true;
+}
+
 async function serve(job, lockPath) {
   const watch = setInterval(() => exitWhenClosed(job, lockPath), WATCH_MS);
   try {
-    while (await liveSessions(job.dir)) await sleep(await tick(job));
-    log("no live session left, exiting");
+    for (;;) {
+      if (!(await liveSessions(job.dir))) return log("no live session left, exiting");
+      if (!(await sameLogin(job))) return log("the login changed, exiting");
+      await sleep(await tick(job));
+    }
   } finally {
     clearInterval(watch);
   }
