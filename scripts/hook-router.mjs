@@ -14,7 +14,7 @@ import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 import { appendDaemonLog } from "./lib/daemon-log.mjs";
 import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
 import { observeHook, obsFlush } from "./lib/observability.mjs";
-import { launchLiveUsage } from "./lib/usage-sync-launch.mjs";
+import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
 import { withReloginNotice } from "./lib/relogin.mjs";
 
 async function readStdin() {
@@ -92,6 +92,7 @@ async function main() {
   }
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   debugLog(config, `hook=${event}`);
+  await trackUsageSession(event, input, config);
 
   if (config.daemonEnabled && (await dispatchInDaemon(event, input, config))) return;
 

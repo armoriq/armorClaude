@@ -44,8 +44,9 @@ export function backend() {
         if (body.phase === "complete" && !(acked >= body.total))
           return reply(409, { message: "Run has unacknowledged session-hours" });
         b.runs.set(runId, body);
-        if (body.mode === "history" && body.phase === "complete") b.requestId = null;
-        return reply(200, { applied: true, run: { runId } });
+        const historyCompleted = body.mode === "history" && body.phase === "complete";
+        if (historyCompleted) b.requestId = null;
+        return reply(200, { applied: true, historyCompleted, run: { runId } });
       }
       if (req.url === "/dashboard/token-usage/batch") {
         if (body.generation !== b.generation)

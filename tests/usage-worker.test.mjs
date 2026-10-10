@@ -186,3 +186,29 @@ test("a history request stays open while one of its sessions cannot be read, and
     assert.equal(total(sessionBatches(b, id).at(-1)), 14);
   });
 });
+
+test("a history request replaced by a newer one drops its queued upload and never completes, and the newer one uploads the earlier usage", async () => {
+  await withBackend(at(30), async (b, h) => {
+    const id = randomUUID();
+    writeSession(h, id, [
+      assistant(id, "pre", at(10), { input_tokens: 10 }),
+      assistant(id, "post", at(40), { input_tokens: 20 }),
+    ]);
+    const replaced = randomUUID();
+    b.requestId = replaced;
+    failSecondBatch(b);
+    await runWorker(h, b);
+    const newer = randomUUID();
+    b.requestId = newer;
+    const { stderr } = await runWorker(h, b);
+    const history = reportsOf(b, "history");
+    assert.equal(
+      history.some((r) => r.requestId === replaced && r.phase === "complete"),
+      false
+    );
+    assert.deepEqual([history.at(-1).requestId, history.at(-1).phase], [newer, "complete"]);
+    const newerBatches = b.batches.filter((x) => b.runs.get(x.runId)?.requestId === newer);
+    assert.deepEqual(newerBatches.flatMap((x) => x.snapshots).map(total), [30]);
+    assert.match(stderr, new RegExp(`completed the history request ${newer}`));
+  });
+});
