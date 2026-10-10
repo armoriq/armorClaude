@@ -3,14 +3,12 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -21,12 +19,6 @@ import { randomUUID } from "node:crypto";
 import armoriqSdk from "@armoriq/sdk-dev";
 import { loadConfig } from "../scripts/lib/config.mjs";
 import { STAGING, loadConfigWithLogins, withHome } from "./helpers/login-profile.mjs";
-import { dispatchViaDaemon } from "../scripts/lib/daemon-client.mjs";
-import {
-  loadRuntimeState,
-  saveRuntimeState,
-  upsertSession,
-} from "../scripts/lib/runtime-state.mjs";
 import { classifyTranscripts } from "../scripts/lib/transcripts.mjs";
 import { writeJson } from "../scripts/lib/fs-store.mjs";
 import { loadSyncState, syncUsage } from "../scripts/lib/usage-sync.mjs";
@@ -43,13 +35,6 @@ const SYNC = path.join(
   "scripts",
   "usage-sync.mjs"
 );
-const DAEMON = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "scripts",
-  "daemon.mjs"
-);
-const ROUTER = path.join(path.dirname(DAEMON), "hook-router.mjs");
 const S1 = "aaaaaaaa-0000-4000-8000-000000000001";
 const S2 = "aaaaaaaa-0000-4000-8000-000000000002";
 const S3 = "aaaaaaaa-0000-4000-8000-000000000003";
@@ -589,14 +574,6 @@ async function until(check, what, timeoutMs = 20_000) {
   }
 }
 
-const readLastRun = (statePath) => {
-  try {
-    return JSON.parse(readFileSync(statePath, "utf8")).lastRun?.at;
-  } catch {
-    return undefined;
-  }
-};
-
 const pluginEnv = (home, dataDir, port, apiKey = "ak_test_usage_sync_stop") => (
   signedIn(home, port, apiKey),
   {
@@ -611,124 +588,6 @@ const pluginEnv = (home, dataDir, port, apiKey = "ak_test_usage_sync_stop") => (
     ARMORIQ_DEVICE_ID_PATH: path.join(home, "device-id"),
   }
 );
-
-test("a Stop through the daemon triggers the sync, the only writer of a forked session's rows", async () => {
-  const home = fixtureHome();
-  const dataDir = path.join(home, "data");
-  const { server, posts, port } = await fakeBackend();
-  const statePath = userState(dataDir, port, "ak_test_usage_sync_stop");
-  const env = pluginEnv(home, dataDir, port);
-  mkdirSync(dataDir, { recursive: true });
-  const runtimeFile = path.join(dataDir, "runtime.json");
-  const runtime = await loadRuntimeState(runtimeFile);
-  upsertSession(runtime, S2, { lastPrompt: "p" });
-  await saveRuntimeState(runtimeFile, runtime);
-  const daemon = spawn(process.execPath, [DAEMON], { stdio: "ignore", env, cwd: dataDir });
-  try {
-    await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
-    const config = loadConfig(env);
-    const stop = (sessionId) =>
-      dispatchViaDaemon({
-        event: "Stop",
-        input: {
-          hook_event_name: "Stop",
-          session_id: sessionId,
-          transcript_path: path.join(projectsOf(home), "-work-repo-a", `${sessionId}.jsonl`),
-        },
-        config,
-      });
-    const settled = (after) => () =>
-      readLastRun(statePath) !== after && !existsSync(`${syncBasePath(dataDir)}.lock`);
-
-    await stop(S2);
-    await until(settled(undefined), "the first sync pass");
-    const rows = (list) =>
-      list
-        .map((p) => [p.sessionId, p.usageDate, p.usageHour, p.entries[0].inputTokens, p.armored])
-        .sort();
-    const expected = [
-      [S1, "2026-09-20", 9, 133, false],
-      [S1, "2026-09-21", 9, 1000, false],
-      [S2, "2026-09-21", 10, 7, true],
-    ];
-    assert.deepEqual(rows(posts), expected);
-
-    const firstRun = readLastRun(statePath);
-    append(home, `${S2}.jsonl`, assistant("m4", "2026-09-21T10:30:00Z", 40));
-    await stop(S2);
-    await until(settled(firstRun), "the pass after a new turn");
-    assert.deepEqual(rows(posts), [...expected, [S2, "2026-09-21", 10, 47, true]].sort());
-
-    const secondRun = readLastRun(statePath);
-    await stop(S2);
-    await stop(S1);
-    await until(settled(secondRun), "the pass after turns that changed nothing");
-    assert.equal(posts.length, 4);
-  } finally {
-    daemon.kill("SIGTERM");
-    server.close();
-  }
-});
-
-test("an in-process Stop, with no daemon reachable, triggers the sync", async () => {
-  const home = fixtureHome();
-  const dataDir = path.join(home, "data");
-  mkdirSync(dataDir, { recursive: true });
-  // The daemon exits on startup when profiles is a file, so the hook runs in-process.
-  writeFileSync(path.join(dataDir, "profiles"), "not a directory");
-  const { server, posts, port } = await fakeBackend();
-  const statePath = userState(dataDir, port, "ak_test_usage_sync_stop");
-  try {
-    const hook = spawn(process.execPath, [ROUTER], { env: pluginEnv(home, dataDir, port) });
-    const exited = new Promise((resolve) => hook.once("exit", resolve));
-    hook.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: S2 }));
-    assert.equal(await exited, 0);
-    await until(
-      () => readLastRun(statePath) && !existsSync(`${syncBasePath(dataDir)}.lock`),
-      "the sync pass"
-    );
-    assert.equal(existsSync(path.join(dataDir, "daemon.sock")), false);
-    assert.equal(posts.length, 3);
-  } finally {
-    server.close();
-  }
-});
-
-test("the sync's log, request marker and state are owner-only, and 0644 ones are tightened", async () => {
-  const home = fixtureHome();
-  const dataDir = path.join(home, "data");
-  const { server, posts, port } = await fakeBackend();
-  const statePath = userState(dataDir, port, "ak_test_usage_sync_stop");
-  mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o755 });
-  chmodSync(dataDir, 0o755);
-  writeFileSync(path.join(dataDir, "profiles"), "not a directory");
-  const files = [
-    path.join(dataDir, "usage-sync.log"),
-    `${syncBasePath(dataDir)}.request`,
-    statePath,
-  ];
-  for (const file of files) {
-    writeFileSync(file, file === statePath ? "{}" : "");
-    chmodSync(file, 0o644);
-  }
-  try {
-    const hook = spawn(process.execPath, [ROUTER], { env: pluginEnv(home, dataDir, port) });
-    const exited = new Promise((resolve) => hook.once("exit", resolve));
-    hook.stdin.end(JSON.stringify({ hook_event_name: "Stop", session_id: S2 }));
-    assert.equal(await exited, 0);
-    await until(
-      () => readLastRun(statePath) && !existsSync(`${syncBasePath(dataDir)}.lock`),
-      "the sync pass"
-    );
-    assert.equal(posts.length, 3);
-    const mode = (file) => statSync(file).mode & 0o777;
-    for (const file of files) assert.equal(mode(file), 0o600, file);
-    assert.equal(mode(dataDir), 0o700);
-    assert.equal(mode(path.dirname(statePath)), 0o700);
-  } finally {
-    server.close();
-  }
-});
 
 const KEY = "ak_test_usage_sync_toggle";
 const OBS_OFF = { CLAUDE_PLUGIN_OPTION_DISABLE_OBSERVABILITY: "true" };
@@ -908,65 +767,6 @@ test("a backend that drops token-usage requests stops the run after one row and 
   } finally {
     server.close();
   }
-});
-
-async function withDaemon(daemonToggles, fn) {
-  const home = fixtureHome();
-  const dataDir = path.join(home, "data");
-  const { server, posts, port } = await fakeBackend();
-  const statePath = userState(dataDir, port, KEY);
-  const lockPath = `${syncBasePath(dataDir)}.lock`;
-  const env = pluginEnv(home, dataDir, port, KEY);
-  mkdirSync(dataDir, { recursive: true });
-  const daemon = spawn(process.execPath, [DAEMON], {
-    stdio: "ignore",
-    env: { ...env, ...daemonToggles },
-    cwd: dataDir,
-  });
-  const stop = (toggles) =>
-    dispatchViaDaemon({
-      event: "Stop",
-      input: {
-        hook_event_name: "Stop",
-        session_id: S2,
-        transcript_path: path.join(projectsOf(home), "-work-repo-a", `${S2}.jsonl`),
-      },
-      config: withHome(home, () => loadConfig({ ...env, ...toggles })),
-    });
-  const synced = () =>
-    until(() => readLastRun(statePath) !== undefined && !existsSync(lockPath), "a sync pass");
-  try {
-    await until(() => existsSync(path.join(dataDir, "daemon.sock")), "the daemon socket");
-    await fn({ stop, synced, posts, statePath, dataDir });
-  } finally {
-    daemon.kill("SIGTERM");
-    server.close();
-  }
-}
-
-test("a Stop through the daemon starts no sync while the calling session turns it off", async () => {
-  await withDaemon({}, async ({ stop, synced, posts, statePath, dataDir }) => {
-    for (const [name, toggles] of TOGGLES) {
-      await stop(toggles);
-      assert.equal(existsSync(`${syncBasePath(dataDir)}.request`), false, name);
-      assert.equal(existsSync(`${syncBasePath(dataDir)}.lock`), false, name);
-    }
-    await new Promise((r) => setTimeout(r, 3000));
-    assert.equal(posts.length, 0);
-    assert.equal(existsSync(statePath), false);
-
-    await stop({});
-    await synced();
-    assert.equal(posts.length, 3);
-  });
-});
-
-test("a daemon started while the usage sync was off syncs once the calling session turns it on", async () => {
-  await withDaemon(SYNC_OFF, async ({ stop, synced, posts }) => {
-    await stop({ CLAUDE_PLUGIN_OPTION_DISABLE_USAGE_SYNC: "false" });
-    await synced();
-    assert.equal(posts.length, 3);
-  });
 });
 
 function forkHome(withOriginal) {

@@ -14,7 +14,7 @@ import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 import { appendDaemonLog } from "./lib/daemon-log.mjs";
 import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
 import { observeHook, obsFlush } from "./lib/observability.mjs";
-import { launchUsageSync, requestUsageSync } from "./lib/usage-sync-launch.mjs";
+import { launchLiveUsage } from "./lib/usage-sync-launch.mjs";
 import { withReloginNotice } from "./lib/relogin.mjs";
 
 async function readStdin() {
@@ -105,8 +105,7 @@ async function main() {
   if (output) {
     emitJson(output);
   }
-  if (event === "SessionStart") launchUsageSync(config);
-  if (event === "Stop") requestUsageSync(config);
+  if (event === "Stop") launchLiveUsage(config, input);
 
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   await observeHook(event, input, output, config);

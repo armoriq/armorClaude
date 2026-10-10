@@ -3,10 +3,14 @@ import { createHash } from "node:crypto";
 import { closeSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { deviceIdentity } from "./device.mjs";
 import { ensurePrivateDirSync, openPrivateSync, writePrivateFileSync } from "./fs-store.mjs";
+import { liveDir, liveTranscript, projectsDir } from "./live-usage.mjs";
 
 const LOG_MAX_BYTES = 1024 * 1024;
-const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "usage-sync.mjs");
+const SCRIPTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SCRIPT = path.join(SCRIPTS, "usage-sync.mjs");
+const LIVE_SCRIPT = path.join(SCRIPTS, "usage-live.mjs");
 
 /**
  * The lock a running sync holds and the request marker a Stop touches to ask
@@ -109,25 +113,51 @@ export function launchUsageSync(config) {
   try {
     ensurePrivateDirSync(config.dataDir);
     if (lockHeld(syncPaths(syncBasePath(config.dataDir)).lock)) return true;
-    const logPath = path.join(config.dataDir, "usage-sync.log");
-    const logFd = openPrivateSync(logPath, logSize(logPath) > LOG_MAX_BYTES ? "w" : "a");
-    try {
-      const child = spawn(process.execPath, [SCRIPT], {
-        detached: true,
-        stdio: ["ignore", "ignore", logFd],
-        cwd: config.dataDir,
-        env: childEnv(config),
-      });
-      child.once("error", (err) => {
-        process.stderr.write(`[armorclaude] usage sync failed to start: ${err?.message ?? err}\n`);
-      });
-      child.unref();
-    } finally {
-      closeSync(logFd);
-    }
+    spawnDetached(config, [SCRIPT]);
     return true;
   } catch (err) {
     process.stderr.write(`[armorclaude] usage sync failed to start: ${err?.message ?? err}\n`);
+    return false;
+  }
+}
+
+function spawnDetached(config, args) {
+  const logPath = path.join(config.dataDir, "usage-sync.log");
+  const logFd = openPrivateSync(logPath, logSize(logPath) > LOG_MAX_BYTES ? "w" : "a");
+  try {
+    const child = spawn(process.execPath, args, {
+      detached: true,
+      stdio: ["ignore", "ignore", logFd],
+      cwd: config.dataDir,
+      env: childEnv(config),
+    });
+    child.once("error", (err) => {
+      process.stderr.write(`[armorclaude] usage sync failed to start: ${err?.message ?? err}\n`);
+    });
+    child.unref();
+  } finally {
+    closeSync(logFd);
+  }
+}
+
+export function launchLiveUsage(config, input) {
+  if (!config?.usageSyncEnabled) return false;
+  const sessionId = input?.session_id;
+  const transcript = liveTranscript(projectsDir(), sessionId, input?.transcript_path);
+  if (!transcript) return false;
+  try {
+    const dir = liveDir(config.dataDir, {
+      backend: config.backendEndpoint,
+      product: config.productSlug,
+      userId: config.userId,
+      deviceId: deviceIdentity().deviceId,
+    });
+    ensurePrivateDirSync(dir);
+    writePrivateFileSync(path.join(dir, `${sessionId}.pending`), "");
+    spawnDetached(config, [LIVE_SCRIPT, sessionId, transcript]);
+    return true;
+  } catch (err) {
+    process.stderr.write(`[armorclaude] usage upload failed to start: ${err?.message ?? err}\n`);
     return false;
   }
 }

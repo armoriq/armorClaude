@@ -124,6 +124,8 @@ const ROUTES = {
   "/observability/policy/lease": "lease",
   "/v1/traces": "traces",
   "/dashboard/token-usage": "tokenUsage",
+  "/dashboard/token-usage/stream": "tokenUsage",
+  "/dashboard/token-usage/batch": "tokenUsage",
 };
 
 async function startBackend(refusals) {
@@ -233,7 +235,7 @@ function writeTranscript(home, label) {
   mkdirSync(dir, { recursive: true });
   const line = {
     type: "assistant",
-    timestamp: "2026-10-08T10:00:00.000Z",
+    timestamp: "2026-10-08T13:00:00.000Z",
     cwd: "/work/project-a",
     sessionId,
     message: {
@@ -256,7 +258,7 @@ async function notices(run, sessionId, events) {
   const shown = [];
   for (const hook_event_name of events) {
     const { code, output } = await runHook(run.env, {
-      session_id: sessionId,
+      session_id: sessionUuid(sessionId),
       hook_event_name,
       prompt: "list the files",
       transcript_path: run.transcript,
