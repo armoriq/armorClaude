@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile, unlink, writeFile } from "node:fs/promises";
+import { statSync } from "node:fs";
+import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -8,8 +9,13 @@ import { ensurePrivateDir, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-s
 import { validHistory } from "./login-ownership.mjs";
 import { isAlive } from "./usage-sync-launch.mjs";
 
-const { MAX_BATCH_BYTES, MAX_BATCH_ENTRIES, MAX_BATCH_SNAPSHOTS, snapshotSessionUsage } =
-  armoriqSdk;
+const {
+  MAX_BATCH_BYTES,
+  MAX_BATCH_ENTRIES,
+  MAX_BATCH_SNAPSHOTS,
+  sessionTranscriptPaths,
+  snapshotSessionUsage,
+} = armoriqSdk;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LOCK_WAIT_MS = 5_000;
 
@@ -29,6 +35,28 @@ export function liveTranscript(projectsDir, sessionId, transcriptPath) {
   const resolved = path.resolve(transcriptPath);
   const inside = resolved.startsWith(path.resolve(projectsDir) + path.sep);
   return inside && path.basename(resolved) === `${sessionId}.jsonl` ? resolved : null;
+}
+
+export async function listSessions(root) {
+  const sessions = [];
+  for (const project of await readdir(root, { withFileTypes: true }).catch(() => [])) {
+    if (!project.isDirectory()) continue;
+    const dir = path.join(root, project.name);
+    for (const name of await readdir(dir).catch(() => [])) {
+      const sessionId = name.slice(0, -".jsonl".length);
+      if (name.endsWith(".jsonl") && SESSION_ID.test(sessionId))
+        sessions.push({ sessionId, transcript: path.join(dir, name) });
+    }
+  }
+  return sessions;
+}
+
+export function sessionFingerprint(transcript, cutoff) {
+  const files = sessionTranscriptPaths(transcript).map((file) => {
+    const st = statSync(file, { throwIfNoEntry: false });
+    return [file, st?.size ?? null, st?.mtimeMs ?? null];
+  });
+  return digest([cutoff, files]);
 }
 
 export function liveDir(dataDir, { backend, product, userId, deviceId }) {

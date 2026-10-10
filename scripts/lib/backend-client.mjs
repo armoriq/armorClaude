@@ -165,6 +165,7 @@ export async function pendingHistorySync(config, deviceId) {
     return {
       ok: true,
       requestedAt: typeof data?.requestedAt === "string" ? data.requestedAt : null,
+      requestId: typeof data?.requestId === "string" ? data.requestId : null,
     };
   } catch (err) {
     return { ok: false, reason: String(err?.message || err) };

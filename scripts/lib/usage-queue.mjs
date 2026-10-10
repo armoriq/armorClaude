@@ -57,25 +57,36 @@ export const settle = (file) => unlink(file).catch(() => {});
 export async function captureChanges(job, { sessionId, transcript, cutoff, generation }) {
   const state = await readJson(sessionFile(job.dir, sessionId), {});
   const revision = await allocateRevision(job.dir);
-  const taken = captureSession({ transcript, sessionId, cutoff });
+  const taken = captureSession({
+    transcript,
+    sessionId,
+    cutoff: state.admitted ? -Infinity : cutoff,
+  });
   const pending = (await queued(job.queueDir)).map((q) => q.batch);
   const known = knownDigests(state, generation, pending, sessionId);
   return { ...taken, snapshots: changedSnapshots({ capture: taken, sessionId, revision, known }) };
 }
 
-export const toItems = (snapshots, { generation, deviceName }) =>
+export const toItems = (snapshots, { generation, deviceName, runId }) =>
   packBatches(snapshots).map((group) => ({
-    batch: { generation, batchId: newBatchId(), deviceName, snapshots: group },
+    batch: {
+      generation,
+      batchId: newBatchId(),
+      ...(runId ? { runId } : {}),
+      deviceName,
+      snapshots: group,
+    },
   }));
 
-async function recordAcks(dir, { batch }) {
+async function recordAcks(dir, { batch, admits }) {
   const bySession = new Map();
   for (const s of batch.snapshots)
     bySession.set(s.sessionId, [...(bySession.get(s.sessionId) ?? []), s]);
   for (const [sessionId, snapshots] of bySession) {
     const file = sessionFile(dir, sessionId);
     await withFileLock(path.join(dir, `${sessionId}.ack.lock`), async () => {
-      await writeJson(file, acknowledge(await readJson(file, {}), batch.generation, snapshots));
+      const state = acknowledge(await readJson(file, {}), batch.generation, snapshots);
+      await writeJson(file, admits ? { ...state, admitted: true } : state);
     });
   }
 }
