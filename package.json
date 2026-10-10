@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@armoriq/sdk-dev": "^0.8.13",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
