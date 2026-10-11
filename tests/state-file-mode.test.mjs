@@ -172,7 +172,6 @@ test("the onboarding flag is owner-only", async () => {
       dataDir,
       policyFile: path.join(dataDir, "policy.json"),
       runtimeFile: path.join(dataDir, "runtime.json"),
-      useProduction: false,
       backendEndpoint: "http://127.0.0.1:3000",
       csrgEndpoint: "http://127.0.0.1:8080",
       apiKey: "",
