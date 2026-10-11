@@ -20,7 +20,6 @@ function buildSdkClientKey(config) {
     config.contextId,
     config.backendEndpoint,
     config.csrgEndpoint,
-    config.useProduction ? "prod" : "dev",
   ].join("|");
 }
 
@@ -42,7 +41,6 @@ export function getSdkClient(config) {
     userId: config.userId,
     agentId: config.agentId,
     contextId: config.contextId,
-    useProduction: config.useProduction,
     iapEndpoint: config.csrgEndpoint,
     backendEndpoint: config.backendEndpoint,
     timeout: config.timeoutMs,

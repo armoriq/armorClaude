@@ -20,7 +20,6 @@ function buildConfig(tmpDir) {
     dataDir: tmpDir,
     policyFile: path.join(tmpDir, "policy.json"),
     runtimeFile: path.join(tmpDir, "runtime.json"),
-    useProduction: false,
     backendEndpoint: "http://127.0.0.1:3000",
     csrgEndpoint: "http://127.0.0.1:8080",
     apiKey: "",
