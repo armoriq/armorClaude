@@ -362,7 +362,7 @@ function isPluginPlumbingTool(toolName) {
  * Returns a short label ("daemon" | "wal" | "http") for debug logging.
  */
 async function emitAudit({ dto: row, config, iapService }) {
-  const { createAuditWal, fitAuditRow } = await import("./audit-wal.mjs");
+  const { createAuditWal, fitAuditRow, loginTag } = await import("./audit-wal.mjs");
   let dto;
   try {
     dto = fitAuditRow(row);
@@ -385,7 +385,8 @@ async function emitAudit({ dto: row, config, iapService }) {
   }
   if (config.auditWal) {
     try {
-      const wal = createAuditWal({ dataDir: config.dataDir });
+      const login = loginTag(config.backendEndpoint, config.apiKey);
+      const wal = createAuditWal({ dataDir: config.dataDir, login });
       await wal.appendLine(dto);
       return "written (wal)";
     } catch (err) {
