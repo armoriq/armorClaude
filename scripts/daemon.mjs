@@ -30,14 +30,14 @@
  */
 
 import { createServer } from "node:net";
-import { readFileSync, unlinkSync, existsSync, chmodSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync, unlinkSync, existsSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { REQUEST_CONFIG_KEYS, loadConfig, loginEnforcement } from "./lib/config.mjs";
 import { daemonSocketPath, prepareDaemonSocketDir } from "./lib/daemon-socket.mjs";
 import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
-import { createAuditWal } from "./lib/audit-wal.mjs";
+import { LOGIN_TAG, createAuditWal, loginTag } from "./lib/audit-wal.mjs";
 import { ensurePrivateDirSync, writePrivateFileSync } from "./lib/fs-store.mjs";
-import { capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
+import { appendDaemonLog, capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
 import {
   handleSessionStart,
   handleUserPromptExpansion,
@@ -173,131 +173,79 @@ function withSessionLock(sessionId, fn) {
   return next;
 }
 
-// ---- Audit log (Tier C2 + WAL durability) -------------------------------
-// Rows are appended to a local JSONL file on disk before the caller is
-// acknowledged. A background tick reads from the WAL, ships up to 100 rows
-// per batch, then advances the shipped offset. This makes audit crash-safe:
-// SIGKILL between disk write and backend ack loses zero rows because the
-// rows are on disk before we ack the hook.
-//
-// In-memory `auditBuffer` is retained as a back-compat fallback when WAL is
-// disabled (ARMORCLAUDE_AUDIT_WAL=false). Today's tests assert behavior
-// against either path.
-const auditWal = config.auditWal ? createAuditWal({ dataDir: config.dataDir }) : null;
-const auditBuffer = [];
 const AUDIT_FLUSH_INTERVAL_MS = 5_000;
 const AUDIT_FLUSH_THRESHOLD = 100;
-let auditFlushInFlight = false;
+const auditRoot = path.join(config.dataDir, "audit");
+const logins = new Map();
+let auditFlush = null;
 
-async function flushAudit(reason, cfg = config) {
-  if (auditFlushInFlight) return;
-  if (!cfg.auditEnabled || !cfg.apiKey) {
-    // No backend to ship to. Don't truncate the WAL — rotation handles
-    // unbounded growth at 10 MB / 1 h. Earlier code aggressively advanced
-    // the offset which destroyed crash-recovery if audit was later enabled.
-    auditBuffer.length = 0;
-    return;
-  }
+function loginWal(tag) {
+  if (!logins.has(tag))
+    logins.set(tag, { cfg: null, wal: createAuditWal({ dataDir: config.dataDir, login: tag }) });
+  return logins.get(tag);
+}
 
-  auditFlushInFlight = true;
-  try {
-    const { createIapService } = await import("./lib/iap-service.mjs");
-    const iap = createIapService(cfg);
+function trackLogin(cfg) {
+  if (cfg.auditEnabled && cfg.apiKey) loginWal(loginTag(cfg.backendEndpoint, cfg.apiKey)).cfg = cfg;
+}
 
-    if (auditWal) {
-      // WAL path: read up to 100 rows from disk, ship, advance offset.
-      // Loop until pending is empty or we hit a transient failure.
-      while (true) {
-        const { rows, endOffset } = await auditWal.readBatch(AUDIT_FLUSH_THRESHOLD);
-        if (rows.length === 0) break;
-        try {
-          if (typeof iap.createAuditLogBatch === "function") {
-            await iap.createAuditLogBatch(rows);
-          } else {
-            for (const dto of rows) {
-              await iap.createAuditLog(dto).catch((e) => {
-                if (config.debug)
-                  process.stderr.write(`[daemon] audit row failed: ${e?.message ?? e}\n`);
-              });
-            }
-          }
-          await auditWal.advanceOffset(endOffset);
-          if (config.debug) {
-            process.stderr.write(
-              `[daemon] audit WAL flushed size=${rows.length} reason=${reason}\n`
-            );
-          }
-        } catch (err) {
-          // Don't advance the offset — next tick replays from same position.
-          if (config.debug) {
-            process.stderr.write(
-              `[daemon] audit WAL flush failed reason=${reason} err=${err?.message ?? err}\n`
-            );
-          }
-          break;
-        }
-      }
-      // Prune archived segments older than the retention cap (default 5).
-      try {
-        await auditWal.pruneArchive();
-      } catch {
-        /* empty */
-      }
-      return;
+function adoptAuditDir() {
+  if (!existsSync(auditRoot)) return;
+  for (const name of readdirSync(auditRoot)) {
+    if (LOGIN_TAG.test(name)) loginWal(name);
+    else {
+      rmSync(path.join(auditRoot, name), { recursive: true, force: true });
+      appendDaemonLog(
+        config.dataDir,
+        `[armorclaude-daemon] deleted audit/${name}: rows not tagged with a login at=${new Date().toISOString()}`
+      );
     }
-
-    // Legacy in-memory path: kept for back-compat when auditWal=false.
-    if (auditBuffer.length === 0) return;
-    const batch = auditBuffer.splice(0, auditBuffer.length);
-    try {
-      if (typeof iap.createAuditLogBatch === "function") {
-        await iap.createAuditLogBatch(batch);
-      } else {
-        for (const dto of batch) {
-          await iap.createAuditLog(dto).catch((e) => {
-            if (config.debug)
-              process.stderr.write(`[daemon] audit row failed: ${e?.message ?? e}\n`);
-          });
-        }
-      }
-      if (config.debug) {
-        process.stderr.write(`[daemon] audit flush ok size=${batch.length} reason=${reason}\n`);
-      }
-    } catch (err) {
-      if (auditBuffer.length + batch.length <= 10_000) {
-        auditBuffer.unshift(...batch);
-      }
-      if (config.debug) {
-        process.stderr.write(
-          `[daemon] audit flush failed reason=${reason} err=${err?.message ?? err}\n`
-        );
-      }
-    }
-  } finally {
-    auditFlushInFlight = false;
   }
 }
 
-async function enqueueAudit(dto) {
-  if (!dto || typeof dto !== "object") return;
-  if (auditWal) {
-    try {
-      await auditWal.appendLine(dto);
-      const pending = await auditWal.pendingBytes();
-      // Heuristic: kick a flush early if the WAL has grown past ~100KB
-      // (roughly 100-200 rows). Avoids waiting the full 5s tick.
-      if (pending > 100_000) flushAudit("threshold");
-    } catch (err) {
-      process.stderr.write(
-        `[armorclaude-daemon] audit row rejected: ${err?.message ?? err} tool=${dto.tool} at=${new Date().toISOString()}\n`
-      );
-    }
-    return;
+function flushAudit(reason) {
+  auditFlush ??= shipAudit(reason).finally(() => (auditFlush = null));
+  return auditFlush;
+}
+
+async function shipAudit(reason) {
+  const { createIapService } = await import("./lib/iap-service.mjs");
+  for (const entry of logins.values()) {
+    if (entry.cfg) await shipLogin(entry, createIapService(entry.cfg), reason);
+    await entry.wal.pruneArchive().catch(() => undefined);
   }
-  // Legacy path
-  auditBuffer.push(dto);
-  if (auditBuffer.length >= AUDIT_FLUSH_THRESHOLD) {
-    flushAudit("threshold");
+}
+
+async function shipLogin({ wal }, iap, reason) {
+  for (;;) {
+    const { rows, endOffset } = await wal.readBatch(AUDIT_FLUSH_THRESHOLD);
+    if (rows.length === 0) return;
+    try {
+      await iap.createAuditLogBatch(rows);
+    } catch (err) {
+      if (config.debug)
+        process.stderr.write(
+          `[daemon] audit WAL flush failed reason=${reason} err=${err?.message ?? err}\n`
+        );
+      return;
+    }
+    await wal.advanceOffset(endOffset);
+  }
+}
+
+adoptAuditDir();
+trackLogin(config);
+
+async function enqueueAudit(dto, login) {
+  if (!dto || typeof dto !== "object" || !LOGIN_TAG.test(login ?? "")) return;
+  const { wal } = loginWal(login);
+  try {
+    await wal.appendLine(dto);
+    if ((await wal.pendingBytes()) > 100_000) flushAudit("threshold");
+  } catch (err) {
+    process.stderr.write(
+      `[armorclaude-daemon] audit row rejected: ${err?.message ?? err} tool=${dto.tool} at=${new Date().toISOString()}\n`
+    );
   }
 }
 
@@ -327,12 +275,12 @@ async function dispatchHook(event, input, cfg) {
     case "Stop": {
       const out = await handleStop(input, cfg);
       // Flush audits on turn end so each turn's row count lands together.
-      await flushAudit("stop", cfg);
+      await flushAudit("stop");
       return out;
     }
     case "SessionEnd": {
       const out = await handleSessionEnd(input, cfg);
-      await flushAudit("session_end", cfg);
+      await flushAudit("session_end");
       return out;
     }
     default:
@@ -425,7 +373,7 @@ async function handleLine(rawLine, socket) {
       // moves on. Without the await a crash between read and write loses
       // the audit row even though the WAL exists for exactly this reason.
       try {
-        await enqueueAudit(msg.dto);
+        await enqueueAudit(msg.dto, msg.login);
       } catch (err) {
         if (config.debug)
           process.stderr.write(`[daemon] enqueueAudit failed: ${err?.message ?? err}\n`);
@@ -442,6 +390,7 @@ async function handleLine(rawLine, socket) {
       const input = msg.input ?? {};
       const sessionId = typeof input.session_id === "string" ? input.session_id : "";
       const effectiveConfig = effectiveConfigFor(msg.configEnv);
+      trackLogin(effectiveConfig);
       const output = await withSessionLock(sessionId, async () =>
         withReloginNotice(
           event,
@@ -510,6 +459,7 @@ process.on("SIGHUP", () => {
     const before = config.apiKey ? config.apiKey.slice(0, 16) : "(unset)";
     const after = fresh.apiKey ? fresh.apiKey.slice(0, 16) : "(unset)";
     config = fresh;
+    trackLogin(fresh);
     process.stderr.write(
       `[armorclaude-daemon] SIGHUP: config reloaded. apiKey prefix: ${before} -> ${after}\n`
     );

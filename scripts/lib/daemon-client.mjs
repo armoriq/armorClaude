@@ -22,6 +22,7 @@ import { ensurePrivateDirSync, openPrivateSync } from "./fs-store.mjs";
 import { capDaemonLog, daemonLogPath } from "./daemon-log.mjs";
 import { DAEMON_VERSION } from "./daemon-version.mjs";
 import { REQUEST_CONFIG_KEYS } from "./config.mjs";
+import { loginTag } from "./audit-wal.mjs";
 
 const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if daemon is hung
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
@@ -268,7 +269,14 @@ export async function enqueueAuditViaDaemon({ dto, config }) {
     return false;
   }
   try {
-    sock.write(JSON.stringify({ type: "audit_enqueue", dto, reqId: makeReqId() }) + "\n");
+    sock.write(
+      JSON.stringify({
+        type: "audit_enqueue",
+        dto,
+        login: loginTag(config.backendEndpoint, config.apiKey),
+        reqId: makeReqId(),
+      }) + "\n"
+    );
     return true;
   } catch {
     return false;

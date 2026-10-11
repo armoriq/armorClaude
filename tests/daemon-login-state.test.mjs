@@ -5,6 +5,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
+import { loginTag } from "../scripts/lib/audit-wal.mjs";
 import { waitFor } from "./helpers/hook-session.mjs";
 import { STAGING, tempHome, writeLoginProfiles } from "./helpers/login-profile.mjs";
 
@@ -136,7 +137,7 @@ test("a login after the daemon started puts the new user on audit rows", async (
       tool_use_id: "toolu_1",
     });
 
-    const wal = path.join(dataDir, "audit", "current.jsonl");
+    const wal = path.join(dataDir, "audit", loginTag(STAGING, LOGIN.apiKey), "current.jsonl");
     await waitFor(
       () => existsSync(wal) && readFileSync(wal, "utf8").endsWith("\n"),
       5_000,

@@ -1,12 +1,11 @@
 /**
  * Audit Write-Ahead Log
  *
- * Replaces the in-memory `auditBuffer` in daemon.mjs with an append-only
- * JSONL file on disk. Crash-recoverable: a daemon SIGKILL between disk
- * write and backend ack loses zero rows, because rows are on disk before
- * the caller is acknowledged.
+ * An append-only JSONL file on disk per login. Crash-recoverable: a daemon
+ * SIGKILL between disk write and backend ack loses zero rows, because rows
+ * are on disk before the caller is acknowledged.
  *
- * Layout under <dataDir>/audit/:
+ * Layout under <dataDir>/audit/<loginTag(backend, apiKey)>/:
  *   current.jsonl       - append-only, today's audit rows
  *   shipped.offset      - last byte the backend has acked (atomic write)
  *   archive/YYYY-MM-DD-NNN.jsonl - rotated segments
@@ -18,6 +17,7 @@
  * caps rows at 4000 bytes and rejects larger payloads.
  */
 
+import { createHash } from "node:crypto";
 import { appendFile, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
@@ -36,6 +36,11 @@ const ROW_BUDGET_BYTES =
   Buffer.byteLength(
     JSON.stringify({ _seq: Number.MAX_SAFE_INTEGER, _enqueuedAt: Number.MAX_SAFE_INTEGER })
   );
+
+export const loginTag = (backend, apiKey) =>
+  createHash("sha256").update(`${backend}\n${apiKey}`).digest("hex").slice(0, 16);
+
+export const LOGIN_TAG = /^[0-9a-f]{16}$/;
 
 const rowBytes = (row) => Buffer.byteLength(JSON.stringify(row), "utf8");
 
@@ -72,7 +77,7 @@ export function fitAuditRow(row) {
 }
 
 export function createAuditWal(opts) {
-  const dir = path.join(opts.dataDir, "audit");
+  const dir = path.join(opts.dataDir, "audit", opts.login);
   const currentPath = path.join(dir, "current.jsonl");
   const offsetPath = path.join(dir, "shipped.offset");
   const archiveDir = path.join(dir, "archive");
@@ -83,6 +88,7 @@ export function createAuditWal(opts) {
   async function ensureDirs() {
     if (ensured) return;
     await ensurePrivateDir(opts.dataDir);
+    await ensurePrivateDir(path.dirname(dir));
     await ensurePrivateDir(dir);
     await ensurePrivateDir(archiveDir);
     await tightenDirFilesOnce(dir);
