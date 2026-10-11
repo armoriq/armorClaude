@@ -74,7 +74,9 @@ async function pruneOnce(dir) {
 async function claim(dataDir, binding, sessionId, at) {
   const marker = markerPath(dataDir, binding, sessionId);
   await ensurePrivateDir(path.dirname(marker));
-  const startedAt = new Date(at);
+  const claimed = await readMarker(marker);
+  if (claimed?.startTime) return claimed.startTime;
+  const startedAt = new Date(typeof at === "function" ? at() : at);
   if (await linkMarker(marker, startedAt)) {
     await pruneOnce(path.dirname(marker)).catch(() => undefined);
     return startedAt;
