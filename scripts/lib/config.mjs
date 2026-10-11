@@ -40,6 +40,33 @@ function pluginOpt(env, pluginKey, legacyKey) {
   return "";
 }
 
+export const REQUEST_CONFIG_KEYS = [
+  "armoriqEnv",
+  "apiKey",
+  "orgId",
+  "userId",
+  "loggedInAt",
+  "loginHistory",
+  "hadUnusableKey",
+  "backendEndpoint",
+  "observabilityEnabled",
+  "observabilityEndpoint",
+  "observabilityProduct",
+  "usageSyncEnabled",
+  "auditEnabled",
+  "csrgVerifyEnabled",
+  "cryptoPolicyEnabled",
+];
+
+export function loginEnforcement(apiKey, localMock) {
+  const connected = localMock || /^ak_(test|live|claw)_/.test(apiKey);
+  return {
+    mode: connected ? "enforce" : "monitor",
+    intentRequired: connected,
+    unconfigured: !connected,
+  };
+}
+
 function normalizeArmoriqEnv(value) {
   const normalized = String(value || "")
     .trim()
@@ -128,7 +155,7 @@ export function loadConfig(env = process.env) {
   //     constructor, which crashed the policy MCP server ("-32000").
   //   • enforcing without a working key just hard-blocks every tool, bricking
   //     the session on a fresh `claude plugin install` (no onboarding ran).
-  // So we drop an unusable key and fall into monitor mode (see `connected`).
+  // So we drop an unusable key and fall into monitor mode (see loginEnforcement).
   const keyLooksUsable = /^ak_(test|live|claw)_/.test(apiKey);
   const hadUnusableKey = Boolean(apiKey) && !keyLooksUsable;
   if (hadUnusableKey) apiKey = "";
@@ -136,9 +163,6 @@ export function loadConfig(env = process.env) {
   // key-format check accepts (the mock server ignores auth). Everything that
   // keys off "do we have a working credential" uses this.
   const effectiveApiKey = apiKey || (localMock ? "ak_test_localmock000000000000" : "");
-  // "Connected" == we have a usable key (or we're in local mock). Only then do
-  // we enforce. Unconfigured installs run passively until the user connects.
-  const connected = localMock || keyLooksUsable;
 
   return {
     // Paths / endpoints
@@ -166,16 +190,7 @@ export function loadConfig(env = process.env) {
     auditEnabled: Boolean(effectiveApiKey),
     defaultTemplate,
 
-    // Enforcement is gated on being connected. With a usable key (or local
-    // mock) we enforce + require intent, exactly as before. Without one, we run
-    // in monitor mode so the plugin never bricks an un-onboarded session; the
-    // SessionStart banner tells the user how to connect. Once a valid key is
-    // present, this flips back to enforce automatically.
-    mode: connected ? "enforce" : "monitor",
-    intentRequired: connected,
-    // True when the plugin is installed but not connected (no usable key).
-    // Drives the SessionStart setup banner.
-    unconfigured: !connected,
+    ...loginEnforcement(effectiveApiKey, localMock),
     hadUnusableKey,
     auditWal: true,
     autoReanchor: true,

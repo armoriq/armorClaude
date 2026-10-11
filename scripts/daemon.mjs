@@ -32,7 +32,7 @@
 import { createServer } from "node:net";
 import { readFileSync, unlinkSync, existsSync, chmodSync } from "node:fs";
 import path from "node:path";
-import { loadConfig } from "./lib/config.mjs";
+import { REQUEST_CONFIG_KEYS, loadConfig, loginEnforcement } from "./lib/config.mjs";
 import { daemonSocketPath, prepareDaemonSocketDir } from "./lib/daemon-socket.mjs";
 import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
 import { createAuditWal } from "./lib/audit-wal.mjs";
@@ -130,22 +130,8 @@ cleanupSocket();
 // slice of its freshly-loaded config; when that slice differs from what the
 // daemon currently holds, adopt it. This keeps enforcement, audit, and obs on
 // the live session's credentials without forcing a respawn per session.
-const OBS_AUTH_KEYS = [
-  "armoriqEnv",
-  "apiKey",
-  "orgId",
-  "backendEndpoint",
-  "observabilityEnabled",
-  "observabilityEndpoint",
-  "observabilityProduct",
-  "usageSyncEnabled",
-  "auditEnabled",
-  "csrgVerifyEnabled",
-  "cryptoPolicyEnabled",
-];
-
 function obsAuthSignature(cfg) {
-  return OBS_AUTH_KEYS.map((k) => String(cfg?.[k] ?? "")).join("|");
+  return JSON.stringify(REQUEST_CONFIG_KEYS.map((k) => cfg?.[k] ?? ""));
 }
 
 // Build the EFFECTIVE config for one request by overlaying the caller's obs/auth
@@ -158,9 +144,10 @@ function effectiveConfigFor(configEnv) {
   if (!configEnv || typeof configEnv !== "object") return config;
   if (obsAuthSignature(configEnv) === obsAuthSignature(config)) return config; // identical — reuse base
   const merged = { ...config };
-  for (const k of OBS_AUTH_KEYS) {
+  for (const k of REQUEST_CONFIG_KEYS) {
     if (configEnv[k] !== undefined) merged[k] = configEnv[k];
   }
+  Object.assign(merged, loginEnforcement(merged.apiKey, merged.armoriqEnv === "local"));
   // verify-step endpoint derives from backendEndpoint; keep it consistent.
   if (configEnv.backendEndpoint) {
     merged.verifyStepEndpoint = `${configEnv.backendEndpoint}/iap/verify-step`;
@@ -307,9 +294,6 @@ async function flushAudit(reason, cfg = config) {
 
 async function enqueueAudit(dto) {
   if (!dto || typeof dto !== "object") return;
-  // Skip persistence entirely when audit shipping is disabled. The hook
-  // would just be writing rows to disk that no flush will ever pick up.
-  if (!config.auditEnabled) return;
   if (auditWal) {
     try {
       await auditWal.appendLine(dto);
