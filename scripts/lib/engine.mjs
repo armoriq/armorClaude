@@ -54,6 +54,7 @@ import {
   upsertSession,
 } from "./runtime-state.mjs";
 import { sha256Hex } from "./common.mjs";
+import { invokesPolicyAdmin, writesProtectedPath } from "./shell-guard.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
@@ -446,7 +447,7 @@ function notConnectedStart(config, loginNoticeDue) {
     ...(loginNoticeDue && { systemMessage: notice }),
     ...addPromptContext(
       `ArmorClaude installed but NOT connected.${staleNote}\n` +
-        `Running in MONITOR mode: observing only, your tools are not blocked.\n\n` +
+        `Running in MONITOR mode: tool calls are not checked against a plan.\n\n` +
         `${notice}\n` +
         `Once you sign in, ArmorClaude enforces automatically.\n` +
         `Type /armorclaude:armor for all commands.`,
@@ -752,22 +753,14 @@ export async function handlePreToolUse(input, config) {
   }
   if (norm === "bash") {
     const cmd = typeof toolInput?.command === "string" ? toolInput.command : "";
-    // Block direct invocation of the policy handler via Node/Bash.
-    // Claude could bypass the UserPromptSubmit hook by importing and calling
-    // handleArmorPolicyCommand directly --- this guard closes that vector.
-    if (
-      /armor-policy-commands|handleArmorPolicyCommand|armor-policy-cli|savePolicyState|writeJson|policy-pending|crypto-policy-state/i.test(
-        cmd
-      )
-    ) {
+    if (invokesPolicyAdmin(cmd)) {
       return denyPreTool(
         "policy_admin_command",
         "ArmorClaude: policy management is human-only. Type /armorclaude:armor policy in the terminal."
       );
     }
-    const WRITE_OPS =
-      /\b(>|>>|tee|mv|cp|rm|sed\s+-i|awk\s.*>|chmod|cat\s*<<|echo.*>|truncate|dd\b)/;
-    if (PROTECTED_PATHS.some((p) => cmd.includes(path.basename(p))) && WRITE_OPS.test(cmd)) {
+    const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
+    if (writesProtectedPath(cmd, cwd, PROTECTED_PATHS)) {
       return denyPreTool(
         "protected_policy_file",
         "ArmorClaude: shell write commands targeting policy files are blocked. Use /armorclaude:armor policy commands."
