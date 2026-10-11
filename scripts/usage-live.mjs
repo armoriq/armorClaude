@@ -3,6 +3,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { prepareUsage } from "./lib/usage-context.mjs";
 import { liveTranscript, projectsDir, tryFileLock } from "./lib/live-usage.mjs";
+import { postTurnLatency } from "./lib/turn-latency.mjs";
 import {
   captureChanges,
   clearQueue,
@@ -55,6 +56,7 @@ async function main() {
       while (existsSync(pendingPath)) {
         unlinkSync(pendingPath);
         await uploadOnce(job);
+        await postTurnLatency(job, log);
       }
     } finally {
       await release();
