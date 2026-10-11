@@ -106,11 +106,13 @@ test("runtime.json holding the prompt is owner-only", async () => {
   assert.equal(await modeOf(runtimeFile), 0o600);
 });
 
+const LOGIN = "0123456789abcdef";
+
 test("the audit WAL holding tool inputs and outputs is owner-only", async () => {
   const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
-  const wal = createAuditWal({ dataDir });
+  const wal = createAuditWal({ dataDir, login: LOGIN });
   await wal.appendLine({ tool: "Bash", input: { command: "ls" }, output: { stdout: "a\nb\n" } });
-  const audit = path.join(dataDir, "audit");
+  const audit = path.join(dataDir, "audit", LOGIN);
   const current = path.join(audit, "current.jsonl");
   assert.match(await readFile(current, "utf8"), /"stdout":"a\\nb\\n"/);
   assert.equal(await modeOf(current), 0o600);
@@ -124,7 +126,7 @@ test("the audit WAL holding tool inputs and outputs is owner-only", async () => 
 
 test("the audit WAL tightens a 0644 log, offset and archive left in 0755 dirs", async () => {
   const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
-  const audit = await openDir(path.join(dataDir, "audit"));
+  const audit = await openDir(path.join(await openDir(path.join(dataDir, "audit")), LOGIN));
   const archive = await openDir(path.join(audit, "archive"));
   const current = path.join(audit, "current.jsonl");
   const offset = path.join(audit, "shipped.offset");
@@ -133,7 +135,7 @@ test("the audit WAL tightens a 0644 log, offset and archive left in 0755 dirs", 
   await openFile(offset, "0");
   await openFile(segment, `${JSON.stringify({ tool: "Read" })}\n`);
 
-  const wal = createAuditWal({ dataDir });
+  const wal = createAuditWal({ dataDir, login: LOGIN });
   await wal.appendLine({ tool: "Write" });
   for (const file of [current, offset, segment]) assert.equal(await modeOf(file), 0o600, file);
   for (const dir of [dataDir, audit, archive]) assert.equal(await modeOf(dir), 0o700, dir);
@@ -142,11 +144,11 @@ test("the audit WAL tightens a 0644 log, offset and archive left in 0755 dirs", 
 
 test("a rotated audit segment stays owner-only", async () => {
   const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
-  const wal = createAuditWal({ dataDir, rotateBytes: 1 });
+  const wal = createAuditWal({ dataDir, login: LOGIN, rotateBytes: 1 });
   await wal.appendLine({ tool: "Bash" });
   const { endOffset } = await wal.readBatch();
   await wal.advanceOffset(endOffset);
-  const archive = path.join(dataDir, "audit", "archive");
+  const archive = path.join(dataDir, "audit", LOGIN, "archive");
   const segments = await readdir(archive);
   assert.equal(segments.length, 1);
   assert.equal(await modeOf(path.join(archive, segments[0])), 0o600);

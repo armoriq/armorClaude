@@ -22,7 +22,7 @@ import { createAuditWal } from "../scripts/lib/audit-wal.mjs";
 
 async function fixture() {
   const dir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-wal-"));
-  return { dir, wal: createAuditWal({ dataDir: dir }) };
+  return { dir, wal: createAuditWal({ dataDir: dir, login: "0123456789abcdef" }) };
 }
 
 test("appendLine + readBatch round-trip", async () => {
@@ -47,7 +47,7 @@ test("advanceOffset persists across new wal instance (restart)", async () => {
   await wal.advanceOffset(endOffset);
 
   // Simulate process restart: brand new wal handle, same dir.
-  const wal2 = createAuditWal({ dataDir: dir });
+  const wal2 = createAuditWal({ dataDir: dir, login: "0123456789abcdef" });
   const second = await wal2.readBatch();
   assert.equal(second.rows.length, 0, "shipped rows should not be re-read");
 
@@ -64,7 +64,7 @@ test("crash-replay: missing advance leaves rows for next read", async () => {
   // Read but don't advance — simulating crash between disk write and ack.
   await wal.readBatch();
 
-  const wal2 = createAuditWal({ dataDir: dir });
+  const wal2 = createAuditWal({ dataDir: dir, login: "0123456789abcdef" });
   const { rows } = await wal2.readBatch();
   assert.equal(rows.length, 2, "uncommitted rows are replayed");
   assert.deepEqual(
@@ -75,7 +75,7 @@ test("crash-replay: missing advance leaves rows for next read", async () => {
 
 test("rotation: oversize triggers archive + offset reset", async () => {
   const { dir } = await fixture();
-  const wal = createAuditWal({ dataDir: dir, rotateBytes: 200 });
+  const wal = createAuditWal({ dataDir: dir, login: "0123456789abcdef", rotateBytes: 200 });
 
   // Each row ~50 bytes; 6 rows ~= 300 bytes (over the 200-byte cap)
   for (let i = 0; i < 6; i++) {
@@ -157,7 +157,7 @@ test("concurrent appends from many writers do not interleave", async () => {
   const writers = [];
   for (let i = 0; i < N; i++) {
     // Each "writer" is a separate wal handle, simulating multiple hooks.
-    const w = createAuditWal({ dataDir: dir });
+    const w = createAuditWal({ dataDir: dir, login: "0123456789abcdef" });
     writers.push(w.appendLine({ id: i, action: "concurrent" }));
   }
   await Promise.all(writers);
@@ -183,7 +183,7 @@ test("pendingBytes shrinks after advanceOffset", async () => {
 
 test("pruneArchive keeps newest N segments", async () => {
   const { dir } = await fixture();
-  const wal = createAuditWal({ dataDir: dir, rotateBytes: 50 });
+  const wal = createAuditWal({ dataDir: dir, login: "0123456789abcdef", rotateBytes: 50 });
 
   // Force several rotations.
   for (let r = 0; r < 8; r++) {
