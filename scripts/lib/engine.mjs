@@ -415,18 +415,29 @@ function auditLink(config, sessionId, intentTokenRaw) {
   };
 }
 
-/**
- * Pick the best matching step index in the plan for a given tool call.
- * Prefers a step that matches BOTH tool name and parameters, falls back to
- * tool name only, then to step 0. Used to populate audit log step_index so
- * the backend can advance plan execution state to 'completed'.
- */
-function pickStepIndex(plan, toolName, toolInput, unmatched = 0) {
+function pickStepIndex(plan, toolName, toolInput, unmatched = 0, used = new Set()) {
   if (!plan || typeof plan !== "object") return unmatched;
   const { matches, paramMatches } = findPlanStepIndices(plan, toolName, toolInput);
-  if (paramMatches.length > 0) return paramMatches[0];
-  if (matches.length > 0) return matches[0];
-  return unmatched;
+  const unused = (indices) => indices.find((i) => !used.has(i));
+  return unused(paramMatches) ?? unused(matches) ?? paramMatches[0] ?? matches[0] ?? unmatched;
+}
+
+function auditedSteps(session, intentTokenRaw) {
+  const tracker = session.auditedSteps;
+  return tracker?.tokenHash === sha256Hex(intentTokenRaw) ? new Set(tracker.indices) : new Set();
+}
+
+async function claimAuditedStep(config, runtimeState, sessionId, toolName, inputs) {
+  const session = getSession(runtimeState, sessionId);
+  const used = auditedSteps(session, session.intentTokenRaw);
+  const step = pickStepIndex(session.plan, toolName, inputs, null, used);
+  if (step === null) return 0;
+  used.add(step);
+  upsertSession(runtimeState, sessionId, {
+    auditedSteps: { tokenHash: sha256Hex(session.intentTokenRaw), indices: [...used] },
+  });
+  await saveRuntimeState(config.runtimeFile, runtimeState);
+  return step;
 }
 
 // ---------------------------------------------------------------------------
@@ -1497,9 +1508,7 @@ export async function handlePostToolUse(input, config) {
 
     let dto;
     if (intentTokenRaw) {
-      // Compute the real step index from the registered plan so the backend's
-      // updateExecutionProgress can advance plan status to 'completed'.
-      const stepIdx = pickStepIndex(session.plan, toolName, inputs);
+      const stepIdx = await claimAuditedStep(config, runtimeState, sessionId, toolName, inputs);
       dto = {
         ...auditLink(config, sessionId, intentTokenRaw),
         step_index: stepIdx,
@@ -1576,7 +1585,8 @@ export async function handlePostToolUseFailure(input, config) {
     if (!intentTokenRaw) return null;
 
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs);
+    const used = auditedSteps(session, intentTokenRaw);
+    const stepIdx = pickStepIndex(session.plan, toolName, inputs, 0, used);
     const dto = {
       ...auditLink(config, sessionId, intentTokenRaw),
       step_index: stepIdx,
