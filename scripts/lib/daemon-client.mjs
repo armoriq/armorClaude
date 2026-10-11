@@ -23,6 +23,7 @@ import { capDaemonLog, daemonLogPath } from "./daemon-log.mjs";
 import { DAEMON_VERSION } from "./daemon-version.mjs";
 import { REQUEST_CONFIG_KEYS } from "./config.mjs";
 import { loginTag } from "./audit-wal.mjs";
+import { sanitizeParams } from "./common.mjs";
 
 const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if daemon is hung
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
@@ -231,7 +232,10 @@ export async function dispatchViaDaemon({ event, input, config }) {
     const configEnv = config
       ? Object.fromEntries(REQUEST_CONFIG_KEYS.map((k) => [k, config[k]]))
       : undefined;
-    const reply = await exchange(sock, { type: "hook", event, input, reqId, configEnv });
+    const sent = Object.hasOwn(input, "tool_response")
+      ? { ...input, tool_response: sanitizeParams(input.tool_response, config.sanitize) }
+      : input;
+    const reply = await exchange(sock, { type: "hook", event, input: sent, reqId, configEnv });
     if (debug) {
       const tDone = Date.now();
       process.stderr.write(
