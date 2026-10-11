@@ -5,6 +5,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
+import { waitFor } from "./helpers/hook-session.mjs";
 import { STAGING, tempHome, writeLoginProfiles } from "./helpers/login-profile.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -24,22 +25,20 @@ function pluginEnv(home, dataDir) {
   };
 }
 
-function runHook(env, input) {
-  return new Promise((resolve, reject) => {
+async function runHook(env, input) {
+  const { stdout, stderr } = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [hookRouter], { env, stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (c) => (stdout += c));
-    child.stderr.on("data", (c) => (stderr += c));
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (c) => (out += c));
+    child.stderr.on("data", (c) => (err += c));
     child.on("error", reject);
-    child.on("exit", () => {
-      const lines = stdout.trim().split("\n").filter(Boolean);
-      const output = lines.length ? JSON.parse(lines.at(-1)) : null;
-      assert.match(stderr, new RegExp(`daemon dispatch event=${input.hook_event_name}`), stderr);
-      resolve(output);
-    });
+    child.on("exit", () => resolve({ stdout: out, stderr: err }));
     child.stdin.end(JSON.stringify(input));
   });
+  assert.match(stderr, new RegExp(`daemon dispatch event=${input.hook_event_name}`), stderr);
+  const lines = stdout.trim().split("\n").filter(Boolean);
+  return lines.length ? JSON.parse(lines.at(-1)) : null;
 }
 
 const sessionStart = (env, sessionId) =>
@@ -138,8 +137,11 @@ test("a login after the daemon started puts the new user on audit rows", async (
     });
 
     const wal = path.join(dataDir, "audit", "current.jsonl");
-    for (const deadline = Date.now() + 5_000; !existsSync(wal) && Date.now() < deadline; )
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(
+      () => existsSync(wal) && readFileSync(wal, "utf8").endsWith("\n"),
+      5_000,
+      "the audit row"
+    );
     const rows = readFileSync(wal, "utf8")
       .trim()
       .split("\n")

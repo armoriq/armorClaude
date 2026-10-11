@@ -227,11 +227,6 @@ export async function dispatchViaDaemon({ event, input, config }) {
   const tConnected = debug ? Date.now() : 0;
   try {
     const reqId = makeReqId();
-    // Forward the obs/auth-relevant slice of THIS hook's freshly-loaded config
-    // so the long-lived daemon can serve observability + backend calls with the
-    // live session's credentials, even if the daemon was first spawned by an
-    // env-poor hook (the zero-traces root cause). The daemon merges this per
-    // request and refreshes its cached config when the signature changes.
     const configEnv = config
       ? Object.fromEntries(REQUEST_CONFIG_KEYS.map((k) => [k, config[k]]))
       : undefined;

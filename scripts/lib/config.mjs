@@ -58,8 +58,10 @@ export const REQUEST_CONFIG_KEYS = [
   "cryptoPolicyEnabled",
 ];
 
+const USABLE_KEY = /^ak_(test|live|claw)_/;
+
 export function loginEnforcement(apiKey, localMock) {
-  const connected = localMock || /^ak_(test|live|claw)_/.test(apiKey);
+  const connected = localMock || USABLE_KEY.test(apiKey);
   return {
     mode: connected ? "enforce" : "monitor",
     intentRequired: connected,
@@ -156,7 +158,7 @@ export function loadConfig(env = process.env) {
   //   • enforcing without a working key just hard-blocks every tool, bricking
   //     the session on a fresh `claude plugin install` (no onboarding ran).
   // So we drop an unusable key and fall into monitor mode (see loginEnforcement).
-  const keyLooksUsable = /^ak_(test|live|claw)_/.test(apiKey);
+  const keyLooksUsable = USABLE_KEY.test(apiKey);
   const hadUnusableKey = Boolean(apiKey) && !keyLooksUsable;
   if (hadUnusableKey) apiKey = "";
   // Effective key handed to the SDK. In local mock use a placeholder the SDK's

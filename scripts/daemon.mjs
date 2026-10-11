@@ -122,27 +122,13 @@ function cleanupPid() {
 claimPid();
 cleanupSocket();
 
-// ---- Per-request config adoption (D1 fix) --------------------------------
-// The daemon loads config ONCE at startup from its own (possibly env-poor)
-// process env. When a long-lived daemon was first spawned by a hook lacking
-// ARMORIQ_* / the plugin API key, its cached config disables observability and
-// backend shipping for EVERY session it serves. Each hook forwards the obs/auth
-// slice of its freshly-loaded config; when that slice differs from what the
-// daemon currently holds, adopt it. This keeps enforcement, audit, and obs on
-// the live session's credentials without forcing a respawn per session.
-function obsAuthSignature(cfg) {
+function requestConfigSignature(cfg) {
   return JSON.stringify(REQUEST_CONFIG_KEYS.map((k) => cfg?.[k] ?? ""));
 }
 
-// Build the EFFECTIVE config for one request by overlaying the caller's obs/auth
-// slice onto the daemon's startup base. Pure: returns a NEW object and never
-// mutates the shared `config`. This snapshot is threaded through dispatch,
-// audit flush, and observability for THIS request only, so concurrent requests
-// from different sessions cannot clobber each other's credentials (avoids the
-// TOCTOU race where a queued dispatch reads a mutated module-global).
 function effectiveConfigFor(configEnv) {
   if (!configEnv || typeof configEnv !== "object") return config;
-  if (obsAuthSignature(configEnv) === obsAuthSignature(config)) return config; // identical — reuse base
+  if (requestConfigSignature(configEnv) === requestConfigSignature(config)) return config;
   const merged = { ...config };
   for (const k of REQUEST_CONFIG_KEYS) {
     if (configEnv[k] !== undefined) merged[k] = configEnv[k];
@@ -455,14 +441,6 @@ async function handleLine(rawLine, socket) {
       const event = String(msg.event || "");
       const input = msg.input ?? {};
       const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-      // Per-request effective config (D1 fix): the daemon loads config ONCE at
-      // startup off its own env, which — for a long-lived process spawned by an
-      // env-poor hook — can lack the ARMORIQ_* / plugin key and silently disable
-      // observability + backend shipping. Each hook forwards its freshly-loaded
-      // obs/auth slice; we overlay it into a per-request snapshot (NO shared
-      // mutation) and thread that single snapshot through enforcement dispatch,
-      // audit gating, and observability so concurrent sessions never read each
-      // other's credentials.
       const effectiveConfig = effectiveConfigFor(msg.configEnv);
       const output = await withSessionLock(sessionId, async () =>
         withReloginNotice(
