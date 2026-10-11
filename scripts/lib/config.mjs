@@ -129,7 +129,6 @@ export function loadConfig(env = process.env) {
       : activeEnv === "production"
         ? "https://iap.armoriq.ai"
         : "https://iap-staging.armoriq.ai";
-  const useProduction = activeEnv === "production";
 
   const login = loadLoginContext({ backend: backendEndpoint, product: PRODUCT });
   const profile = login?.profile;
@@ -172,7 +171,6 @@ export function loadConfig(env = process.env) {
     policyFile,
     runtimeFile,
     armoriqEnv: activeEnv,
-    useProduction,
     backendEndpoint,
     csrgEndpoint,
     verifyStepEndpoint: `${backendEndpoint}/iap/verify-step`,
