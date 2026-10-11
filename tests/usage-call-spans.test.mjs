@@ -42,7 +42,17 @@ const BASE_MS = Date.parse("2026-10-11T10:00:00.000Z");
 const startMs = (span) => span.startTime[0] * 1000 + span.startTime[1] / 1e6;
 const spanIdOf = (key) => createHash("sha256").update(key).digest("hex").slice(0, 16);
 
-function harness() {
+const loginAt = (ms) => {
+  const at = new Date(ms).toISOString();
+  const loginHistory = {
+    id: "login-history",
+    origin: "fresh",
+    events: [{ sequence: 1, at, userId: "claude-user" }],
+  };
+  return { loggedInAt: at, loginHistory };
+};
+
+function harness(login = loginAt(BASE_MS - 3_600_000)) {
   __resetObsForTests();
   __setOtelTestHooksForTests({ leaseFetcher: stubLease });
   const dir = mkdtempSync(path.join(os.tmpdir(), "armorclaude-calls-"));
@@ -55,6 +65,7 @@ function harness() {
     userId: "claude-user",
     dataDir: path.join(dir, "data"),
     sanitize: { maxChars: 2000, maxDepth: 4, maxKeys: 50, maxItems: 50 },
+    ...login,
   };
   const spool = path.join(config.dataDir, "obs-spool");
   const spans = () =>
@@ -155,4 +166,37 @@ test("a session first seen after its first message starts its root there, and ea
   const gens = generations().sort((a, b) => startMs(a) - startMs(b));
   assert.deepEqual(gens.map(startMs), [BASE_MS, BASE_MS + 1000, BASE_MS + 2000]);
   for (const span of gens) assert.equal(span.attributes["armoriq.timing.provenance"], "reported");
+});
+
+test("messages from before the current login get no span, and the root starts at the first one after it", async () => {
+  const { dir, spans, generations, hook } = harness(loginAt(BASE_MS + 2_500));
+  const transcript_path = transcript(dir, "sess-login", messages("sess-login", 5));
+  await hook("UserPromptSubmit", "sess-login", { prompt: "go", transcript_path });
+  await hook("Stop", "sess-login", { transcript_path });
+  await hook("SessionEnd", "sess-login");
+  const ids = generations().map((s) => s.spanId);
+  assert.deepEqual(ids.sort(), [3, 4].map((n) => spanIdOf(`msg_${n}:req_${n}`)).sort());
+  const roots = spans().filter((s) => s.name === "armoriq.agent.run");
+  for (const root of roots) assert.equal(startMs(root), BASE_MS + 3_000);
+});
+
+test("a login without a usable login history sends no generation spans", async () => {
+  const { dir, generations, hook } = harness({ loggedInAt: "", loginHistory: null });
+  const transcript_path = transcript(dir, "sess-nohistory", messages("sess-nohistory", 3));
+  await hook("SessionStart", "sess-nohistory", { transcript_path });
+  await hook("Stop", "sess-nohistory", { transcript_path });
+  assert.equal(generations().length, 0);
+});
+
+test("a fork's copied lines, marked forkedFrom under the fork's own session id, get no span", async () => {
+  const { dir, generations, hook } = harness();
+  const forked = messages("sess-fork", 3).map((text) =>
+    JSON.stringify({ ...JSON.parse(text), forkedFrom: { sessionId: "sess-parent" } })
+  );
+  const fresh = messages("sess-fork", 2, { offset: 200 });
+  const transcript_path = transcript(dir, "sess-fork", [...forked, ...fresh]);
+  await hook("SessionStart", "sess-fork", { transcript_path });
+  await hook("Stop", "sess-fork", { transcript_path });
+  const ids = generations().map((s) => s.spanId);
+  assert.deepEqual(ids.sort(), [200, 201].map((n) => spanIdOf(`msg_${n}:req_${n}`)).sort());
 });

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 import { appendDaemonLog } from "./daemon-log.mjs";
 import { DECISION_CODE } from "./hook-output.mjs";
+import { loginCutoff } from "./live-usage.mjs";
 import { LEASE_MISS_TTL_MS, obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
 import {
   batchCalls,
@@ -96,17 +97,20 @@ function sessionRootIds(sessionId) {
   };
 }
 
-function rootClaimAt(record) {
+function rootClaimAt(record, config) {
   const transcriptPath = record.input?.transcript_path;
   if (typeof transcriptPath !== "string" || !transcriptPath) return record.at;
-  const first = firstMessageAt(transcriptPath, record.input.session_id);
-  return first !== undefined && first < record.at ? first : record.at;
+  const first = firstMessageAt(transcriptPath, record.input.session_id, loginCutoff(config));
+  return first < record.at ? first : record.at;
 }
 
+const claimRoot = (config, binding, record) =>
+  claimRootStart(config.dataDir, binding, record.input.session_id, () =>
+    rootClaimAt(record, config)
+  );
+
 async function rootStartTime(entry, config, record) {
-  return config.dataDir
-    ? claimRootStart(config.dataDir, entry.binding, entry.sessionId, () => rootClaimAt(record))
-    : null;
+  return config.dataDir ? claimRoot(config, entry.binding, record) : null;
 }
 
 const coveredEntries = (entry, calls) =>
@@ -616,8 +620,7 @@ function observe(event, input, output, config) {
 async function parkedWithoutLease(key, record, config, file) {
   const shipper = !sessions.has(key) && leasedShipper(config);
   if (!shipper || (await keyHoldsLease(shipper, record.replayedAt))) return false;
-  const { session_id: sessionId } = record.input;
-  await claimRootStart(config.dataDir, shipper.binding, sessionId, () => rootClaimAt(record));
+  await claimRoot(config, shipper.binding, record);
   await keepForReplay(shipper.binding, record, file, config);
   return true;
 }
@@ -819,7 +822,7 @@ async function obsUsageCalls(entry, config, record) {
   if (typeof transcriptPath !== "string" || !transcriptPath) return;
   const tracked = Boolean(config.dataDir) && !record.replayedAt;
   const sent = tracked ? await readSentCalls(config.dataDir, entry.binding, entry.sessionId) : [];
-  const calls = newUsageCalls(transcriptPath, entry.sessionId, sent);
+  const calls = newUsageCalls(transcriptPath, entry.sessionId, loginCutoff(config), sent);
   await recordUsageCallSpans(calls, entry.session);
   if (tracked && calls.length > 0) {
     const keys = [...sent, ...calls.map((call) => call.key)];

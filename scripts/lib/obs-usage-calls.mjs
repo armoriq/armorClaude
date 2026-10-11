@@ -21,31 +21,34 @@ function parse(text) {
   }
 }
 
-function copiedKeys(transcriptPath, sessionId) {
-  let raw;
+function jsonLines(transcriptPath) {
   try {
-    raw = readFileSync(transcriptPath, "utf8");
+    return readFileSync(transcriptPath, "utf8").split("\n").map(parse);
   } catch {
     return [];
   }
-  const keys = [];
-  for (const text of raw.split("\n")) {
-    const line = text.trim() ? parse(text) : null;
-    const id = line?.message?.id ?? line?.payload?.id;
-    if (typeof id === "string" && id && isCopied(line, sessionId)) {
-      keys.push(`${id}:${typeof line.requestId === "string" ? line.requestId : ""}`);
-    }
-  }
-  return keys;
 }
 
-export function newUsageCalls(transcriptPath, sessionId, sentKeys = []) {
+function lineKey(line) {
+  const id = line.message?.id ?? line.payload?.id;
+  if (typeof id !== "string" || !id) return null;
+  return `${id}:${typeof line.requestId === "string" ? line.requestId : ""}`;
+}
+
+const copiedKeys = (transcriptPath, sessionId) =>
+  jsonLines(transcriptPath)
+    .filter((line) => isCopied(line, sessionId))
+    .map(lineKey)
+    .filter(Boolean);
+
+export function newUsageCalls(transcriptPath, sessionId, cutoff, sentKeys = []) {
+  if (cutoff === null) return [];
   const seen = new Set([...copiedKeys(transcriptPath, sessionId), ...sentKeys]);
-  return sessionUsageCalls(transcriptPath, { seen });
+  return sessionUsageCalls(transcriptPath, { seen }).filter((call) => call.timestampMs >= cutoff);
 }
 
-export const firstMessageAt = (transcriptPath, sessionId) =>
-  newUsageCalls(transcriptPath, sessionId)[0]?.timestampMs;
+export const firstMessageAt = (transcriptPath, sessionId, cutoff) =>
+  newUsageCalls(transcriptPath, sessionId, cutoff)[0]?.timestampMs;
 
 function sentPath(dataDir, binding, sessionId) {
   const name = createHash("sha256").update(`${binding}\n${sessionId}`).digest("hex").slice(0, 32);

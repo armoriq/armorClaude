@@ -76,7 +76,7 @@ async function claim(dataDir, binding, sessionId, at) {
   await ensurePrivateDir(path.dirname(marker));
   const claimed = await readMarker(marker);
   if (claimed?.startTime) return claimed.startTime;
-  const startedAt = new Date(typeof at === "function" ? at() : at);
+  const startedAt = new Date(at());
   if (await linkMarker(marker, startedAt)) {
     await pruneOnce(path.dirname(marker)).catch(() => undefined);
     return startedAt;
@@ -89,7 +89,7 @@ async function claim(dataDir, binding, sessionId, at) {
   return recorded.writtenAt;
 }
 
-export function claimRootStart(dataDir, binding, sessionId, at = Date.now()) {
+export function claimRootStart(dataDir, binding, sessionId, at = Date.now) {
   return claim(dataDir, binding, sessionId, at).catch(() => null);
 }
 
