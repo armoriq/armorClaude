@@ -15,7 +15,8 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { tempHome } from "./helpers/login-profile.mjs";
+import { loadConfig } from "../scripts/lib/config.mjs";
+import { tempHome, withHome } from "./helpers/login-profile.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..");
@@ -29,9 +30,11 @@ function buildEnv(dataDir) {
     ARMORCLAUDE_POLICY_FILE: path.join(dataDir, "policy.json"),
     ARMORCLAUDE_DEBUG: "false",
     ARMORCLAUDE_USE_SDK_INTENT: "false",
-    HOME: tempHome(),
+    HOME: homes.get(dataDir) ?? homes.set(dataDir, tempHome()).get(dataDir),
   };
 }
+
+const homes = new Map();
 
 async function spawnDaemonChild(dataDir) {
   const env = buildEnv(dataDir);
@@ -64,13 +67,7 @@ async function killDaemon(child, dataDir) {
 
 async function loadConfigFor(dataDir) {
   const env = buildEnv(dataDir);
-  const oldEnv = { ...process.env };
-  Object.assign(process.env, env);
-  // Clear any stale module cache (ESM doesn't really support this so we
-  // just import freshly each time the test loads).
-  const mod = await import(`../scripts/lib/config.mjs?cache=${Date.now()}`);
-  Object.assign(process.env, oldEnv);
-  return mod.loadConfig(env);
+  return withHome(env.HOME, () => loadConfig(env));
 }
 
 test("daemon: ping responds with the plugin's package version + uptime", async () => {

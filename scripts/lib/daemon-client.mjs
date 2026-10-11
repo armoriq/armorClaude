@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { ensurePrivateDirSync, openPrivateSync } from "./fs-store.mjs";
 import { capDaemonLog, daemonLogPath } from "./daemon-log.mjs";
 import { DAEMON_VERSION } from "./daemon-version.mjs";
+import { REQUEST_CONFIG_KEYS } from "./config.mjs";
 
 const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if daemon is hung
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
@@ -226,25 +227,8 @@ export async function dispatchViaDaemon({ event, input, config }) {
   const tConnected = debug ? Date.now() : 0;
   try {
     const reqId = makeReqId();
-    // Forward the obs/auth-relevant slice of THIS hook's freshly-loaded config
-    // so the long-lived daemon can serve observability + backend calls with the
-    // live session's credentials, even if the daemon was first spawned by an
-    // env-poor hook (the zero-traces root cause). The daemon merges this per
-    // request and refreshes its cached config when the signature changes.
     const configEnv = config
-      ? {
-          armoriqEnv: config.armoriqEnv,
-          apiKey: config.apiKey,
-          orgId: config.orgId,
-          backendEndpoint: config.backendEndpoint,
-          observabilityEnabled: config.observabilityEnabled,
-          observabilityEndpoint: config.observabilityEndpoint,
-          observabilityProduct: config.observabilityProduct,
-          usageSyncEnabled: config.usageSyncEnabled,
-          auditEnabled: config.auditEnabled,
-          csrgVerifyEnabled: config.csrgVerifyEnabled,
-          cryptoPolicyEnabled: config.cryptoPolicyEnabled,
-        }
+      ? Object.fromEntries(REQUEST_CONFIG_KEYS.map((k) => [k, config[k]]))
       : undefined;
     const reply = await exchange(sock, { type: "hook", event, input, reqId, configEnv });
     if (debug) {
