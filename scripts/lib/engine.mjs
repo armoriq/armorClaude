@@ -6,6 +6,7 @@ import {
   sanitizeParams,
 } from "./common.mjs";
 import {
+  DECISION_CODE,
   addPromptContext,
   armorReply,
   askPreTool,
@@ -420,12 +421,12 @@ function auditLink(config, sessionId, intentTokenRaw) {
  * tool name only, then to step 0. Used to populate audit log step_index so
  * the backend can advance plan execution state to 'completed'.
  */
-function pickStepIndex(plan, toolName, toolInput) {
-  if (!plan || typeof plan !== "object") return 0;
+function pickStepIndex(plan, toolName, toolInput, unmatched = 0) {
+  if (!plan || typeof plan !== "object") return unmatched;
   const { matches, paramMatches } = findPlanStepIndices(plan, toolName, toolInput);
   if (paramMatches.length > 0) return paramMatches[0];
   if (matches.length > 0) return matches[0];
-  return 0;
+  return unmatched;
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +665,40 @@ export async function handleUserPromptSubmit(input, config) {
 // ---------------------------------------------------------------------------
 
 export async function handlePreToolUse(input, config) {
+  const output = await decidePreToolUse(input, config);
+  if (output?.hookSpecificOutput?.permissionDecision === "deny") {
+    await auditBlocked(input, config, output[DECISION_CODE]);
+  }
+  return output;
+}
+
+async function auditBlocked(input, config, code) {
+  if (!config.auditEnabled || !config.apiKey) return;
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
+  try {
+    const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
+    const inputs = sanitizeParams(input.tool_input, config.sanitize);
+    const dto = {
+      ...auditLink(config, sessionId, session.intentTokenRaw || ""),
+      step_index: pickStepIndex(session.plan, toolName, inputs, -1),
+      action: toolName,
+      tool: toolName,
+      input: redactSecrets(inputs),
+      output: null,
+      status: "blocked",
+      error_message: code,
+      executed_at: new Date().toISOString(),
+      duration_ms: 0,
+    };
+    const target = await emitAudit({ dto, config, iapService: createIapService(config) });
+    debugLog(config, `audit log (blocked) ${target} for ${toolName}`);
+  } catch (error) {
+    debugLog(config, `audit log (blocked) failed: ${error}`);
+  }
+}
+
+async function decidePreToolUse(input, config) {
   // Record start timestamp BEFORE any deny/early-return so even denied calls
   // have timing data available for PostToolUse/PostToolUseFailure.
   _recordToolStart(input);

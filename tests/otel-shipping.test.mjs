@@ -1562,12 +1562,19 @@ test("a deny-with-hint exports the rule's code and keeps the prompt and tool inp
     assert.match(stdout, /"permissionDecision":"deny".*PROMPT_SECRET_77/);
     assert.doesNotMatch(stdout, /intent_plan_missing/);
     const secret = /PROMPT_SECRET_77|TOOL_SECRET_41/;
-    const holders = filesUnder(dataDir).filter((file) => secret.test(readFileSync(file, "utf8")));
+    const holders = (pattern) =>
+      filesUnder(dataDir)
+        .filter((file) => pattern.test(readFileSync(file, "utf8")))
+        .map((file) => path.relative(dataDir, file))
+        .sort();
     assert.deepEqual(
-      holders.map((file) => path.relative(dataDir, file)),
+      holders(/PROMPT_SECRET_77/),
       ["runtime.json"],
       "only the session state keeps the prompt"
     );
+    const [walFile, ...others] = holders(/TOOL_SECRET_41/);
+    assert.match(walFile, /^audit\/[0-9a-f]{16}\/current\.jsonl$/);
+    assert.deepEqual(others, [], "only the blocked audit row keeps the tool input");
     await shipSpoolWithDaemon(env, dataDir);
     const [policy] = backend.exports.filter((s) => s.name === "armoriq.policy.evaluate");
     assert.equal(policy.attributes["armoriq.policy.decision"], "deny");
