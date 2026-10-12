@@ -12,6 +12,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "build": "echo 'no build step'",
+    "release:version": "node scripts/release-version.mjs",
     "prepare": "husky",
     "postinstall": "node scripts/install.mjs"
   },
@@ -19,7 +20,7 @@
     "node": ">=20.19.0"
   },
   "dependencies": {
-    "@armoriq/sdk-dev": "^0.8.15",
+    "@armoriq/sdk-dev": "^0.8.16",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.6.5"
   },

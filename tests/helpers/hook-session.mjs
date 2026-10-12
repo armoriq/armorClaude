@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { daemonSocketPath } from "../../scripts/lib/daemon-socket.mjs";
 import { writeLoginProfiles } from "./login-profile.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -31,7 +32,7 @@ export async function startBackend(routes = {}) {
       const text = Buffer.concat(chunks).toString("utf8");
       const body = text ? JSON.parse(text) : null;
       const route = `${req.method} ${req.url}`;
-      requests.push({ route, body });
+      requests.push({ route, body, client: req.headers["x-armoriq-client"] });
       if (route === "POST /iap/audit/batch") {
         auditRows.push(...body.rows);
         res.writeHead(200, { "content-type": "application/json" });
@@ -58,7 +59,8 @@ export async function startBackend(routes = {}) {
 
 export async function startHookSession(t, backend, extraEnv = {}) {
   const home = await mkdtemp(path.join(os.tmpdir(), "aq-hook-home-"));
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), "aq-hook-data-"));
+  const dataDir =
+    extraEnv.CLAUDE_PLUGIN_DATA ?? (await mkdtemp(path.join(os.tmpdir(), "aq-hook-data-")));
   writeLoginProfiles(home, [{ backend: backend.url, apiKey: API_KEY }]);
   const env = {
     PATH: process.env.PATH,
@@ -77,7 +79,7 @@ export async function startHookSession(t, backend, extraEnv = {}) {
     await exited;
     await backend.close();
   });
-  await waitFor(() => existsSync(path.join(dataDir, "daemon.sock")), 10_000, "the daemon socket");
+  await waitFor(() => existsSync(daemonSocketPath(dataDir)), 10_000, "the daemon socket");
   const sessionId = randomUUID();
   const hook = (payload) =>
     new Promise((resolve, reject) => {

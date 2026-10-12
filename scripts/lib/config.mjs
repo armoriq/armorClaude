@@ -8,6 +8,13 @@ import { parseBoolean } from "./common.mjs";
 const { loadLoginContext } = armoriqSdk;
 
 const PRODUCT = "armorclaude";
+const DEV_PLUGIN_DATA = `${PRODUCT}-dev-armoriq`;
+const PLUGIN_VERSION = createRequire(import.meta.url)("../../.claude-plugin/plugin.json").version;
+
+function clientIdentity(dataDir) {
+  const product = path.basename(dataDir) === DEV_PLUGIN_DATA ? `${PRODUCT}-dev` : PRODUCT;
+  return { product, version: PLUGIN_VERSION };
+}
 
 let cachedLoginCommand;
 
@@ -168,6 +175,7 @@ export function loadConfig(env = process.env) {
   return {
     // Paths / endpoints
     dataDir,
+    client: clientIdentity(dataDir),
     policyFile,
     runtimeFile,
     armoriqEnv: activeEnv,

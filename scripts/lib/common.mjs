@@ -1,4 +1,7 @@
+import armoriqSdk from "@armoriq/sdk-dev";
 import { createHash } from "node:crypto";
+
+const { clientHeaders } = armoriqSdk;
 
 export function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -224,7 +227,7 @@ export async function postJson(url, payload, headers, timeoutMs) {
 }
 
 export function buildAuthHeaders(config) {
-  const headers = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json", ...clientHeaders(config.client) };
   if (config.apiKey) {
     headers.Authorization = `Bearer ${config.apiKey}`;
     headers["x-api-key"] = config.apiKey;

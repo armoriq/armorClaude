@@ -24,12 +24,17 @@ export function backend() {
   const b = { batches, uploads, singles, latency, release, generation: GENERATION, onBatch: null };
   Object.assign(b, { requestId: null, reports: [], runs: new Map(), acked: new Map() });
   b.callKeys = new Set();
+  b.clients = [];
   const stale = (run) => run?.mode === "history" && run.requestId !== b.requestId;
   const server = createServer((req, res) => {
     let raw = "";
     req.on("data", (c) => (raw += c));
     req.on("end", async () => {
       const body = raw ? JSON.parse(raw) : {};
+      b.clients.push({
+        route: `${req.method} ${req.url}`,
+        client: req.headers["x-armoriq-client"],
+      });
       const reply = (status, data) => {
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(data));
