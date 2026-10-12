@@ -65,13 +65,13 @@ async function flush(job, run, found, generation) {
   if (found.snapshots.length) {
     const opened = run.sequence === 0 ? await report(job, run, "discovering") : { ok: true };
     if (!opened.ok) return opened;
-    const items = toItems(found.snapshots, { generation, ...job, runId: run.runId });
-    await enqueue(
-      job.queueDir,
-      items.map((i) => ({ ...i, admits: run.mode === "history" }))
-    );
     run.hours = [...new Set([...run.hours, ...found.snapshots.map(hourOf)])];
   }
+  const items = toItems(found, { generation, ...job, runId: run.runId });
+  await enqueue(
+    job.queueDir,
+    items.map((i) => ({ ...i, admits: run.mode === "history" }))
+  );
   Object.assign(job.state.seen, found.seen);
   run.scanned.push(...found.scanned);
   return null;
@@ -92,7 +92,7 @@ async function scan(job, run, sessions, generation, save) {
       .filter((i) => i.admits)
       .flatMap((i) => i.batch.snapshots.map((s) => s.sessionId))
   );
-  const found = { snapshots: [], seen: {}, scanned: [] };
+  const found = { snapshots: [], sessions: [], seen: {}, scanned: [] };
   let unread = 0;
   let finished = true;
   for (const session of sessions) {
@@ -105,6 +105,7 @@ async function scan(job, run, sessions, generation, save) {
     const taken = await captureChanges(job, { ...session, cutoff: plan.cutoff, generation });
     for (const p of taken.problems) log(`not read ${p.path} (${p.reason})`);
     found.snapshots.push(...taken.snapshots);
+    found.sessions.push(...taken.sessions);
     if (taken.problems.length) unread += 1;
     else if (plan.seen) found.seen[session.sessionId] = plan.seen;
     else if (history) found.scanned.push(session.sessionId);
