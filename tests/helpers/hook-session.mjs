@@ -11,7 +11,7 @@ import { writeLoginProfiles } from "./login-profile.mjs";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
 const daemonScript = path.join(repoRoot, "scripts", "daemon.mjs");
-const API_KEY = "ak_test_hooksession000000000000000000";
+export const API_KEY = "ak_test_hooksession000000000000000000";
 
 export async function waitFor(predicate, ms, what) {
   const until = Date.now() + ms;
@@ -56,7 +56,7 @@ export async function startBackend(routes = {}) {
   };
 }
 
-export async function startHookSession(t, backend) {
+export async function startHookSession(t, backend, extraEnv = {}) {
   const home = await mkdtemp(path.join(os.tmpdir(), "aq-hook-home-"));
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "aq-hook-data-"));
   writeLoginProfiles(home, [{ backend: backend.url, apiKey: API_KEY }]);
@@ -68,6 +68,7 @@ export async function startHookSession(t, backend) {
     ARMORIQ_BACKEND_URL: backend.url,
     ARMORIQ_CSRG_URL: backend.url,
     ...(process.env.NODE_OPTIONS ? { NODE_OPTIONS: process.env.NODE_OPTIONS } : {}),
+    ...extraEnv,
   };
   const daemon = spawn(process.execPath, [daemonScript], { env, stdio: "ignore", cwd: dataDir });
   const exited = new Promise((resolve) => daemon.once("exit", resolve));

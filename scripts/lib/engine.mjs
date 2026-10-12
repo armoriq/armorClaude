@@ -302,6 +302,17 @@ function denyOrAllow(config, code, reason) {
   return null;
 }
 
+async function tokenBlocked(config, tokenCheck) {
+  if (!tokenCheck.planCheckDenied) {
+    return denyOrAllow(config, "intent_token_blocked", tokenCheck.blockReason);
+  }
+  if (!shouldDeny(config)) {
+    const { appendDaemonLog } = await import("./daemon-log.mjs");
+    appendDaemonLog(config.dataDir, `[armorclaude] monitor: ${tokenCheck.blockReason}`);
+  }
+  return denyOrAllow(config, "plan_check_denied", tokenCheck.blockReason);
+}
+
 function policyDecisionRequiresApproval(policyDecision) {
   const action = policyDecision?.matchedRule?.action;
   const effect = policyDecision?.matchedRule?.effect;
@@ -1231,7 +1242,7 @@ async function decidePreToolUse(input, config) {
     if (tokenCheck.matched) {
       tokenCheckMatched = true;
       if (tokenCheck.blockReason && !allowAll) {
-        return denyOrAllow(config, "intent_token_blocked", tokenCheck.blockReason);
+        return tokenBlocked(config, tokenCheck);
       }
       localPlan = tokenCheck.plan || localPlan;
       remoteAllowed = true;

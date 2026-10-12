@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
 import { appendDaemonLog } from "./daemon-log.mjs";
 import { DECISION_CODE } from "./hook-output.mjs";
+import { loginCutoff } from "./live-usage.mjs";
 import { LEASE_MISS_TTL_MS, obsLeaseMiss, obsLeaseStore } from "./obs-lease-store.mjs";
 import {
   batchCalls,
@@ -31,9 +32,15 @@ import {
   writeSpoolBatch,
 } from "./obs-spool.mjs";
 import { claimRootStart, markRootEnded, rootEndedAt } from "./obs-root-marker.mjs";
+import {
+  firstMessageAt,
+  newUsageCalls,
+  readSentCalls,
+  writeSentCalls,
+} from "./obs-usage-calls.mjs";
 import { markReloginRequired } from "./relogin.mjs";
 
-const { ArmorIQTelemetryRuntime, OtelSession } = armoriqSdk;
+const { ArmorIQTelemetryRuntime, OtelSession, recordUsageCallSpans } = armoriqSdk;
 
 const HOOK_LEASE_WAIT_MS = 1_500;
 const REPLAY_SESSIONS = 16;
@@ -90,8 +97,20 @@ function sessionRootIds(sessionId) {
   };
 }
 
-async function rootStartTime(entry, config, at) {
-  return config.dataDir ? claimRootStart(config.dataDir, entry.binding, entry.sessionId, at) : null;
+function rootClaimAt(record, config) {
+  const transcriptPath = record.input?.transcript_path;
+  if (typeof transcriptPath !== "string" || !transcriptPath) return record.at;
+  const first = firstMessageAt(transcriptPath, record.input.session_id, loginCutoff(config));
+  return first < record.at ? first : record.at;
+}
+
+const claimRoot = (config, binding, record) =>
+  claimRootStart(config.dataDir, binding, record.input.session_id, () =>
+    rootClaimAt(record, config)
+  );
+
+async function rootStartTime(entry, config, record) {
+  return config.dataDir ? claimRoot(config, entry.binding, record) : null;
 }
 
 const coveredEntries = (entry, calls) =>
@@ -160,7 +179,7 @@ async function initEntry(key, record, config) {
   };
   entry.runtime = new ArmorIQTelemetryRuntime(runtimeOptionsFor(config, entry));
   entry.binding = entry.runtime.spoolBinding;
-  const startTime = await rootStartTime(entry, config, record.at);
+  const startTime = await rootStartTime(entry, config, record);
   entry.markerDir = startTime && config.dataDir;
   entry.session = new OtelSession(entry.runtime, {
     sessionId,
@@ -601,8 +620,7 @@ function observe(event, input, output, config) {
 async function parkedWithoutLease(key, record, config, file) {
   const shipper = !sessions.has(key) && leasedShipper(config);
   if (!shipper || (await keyHoldsLease(shipper, record.replayedAt))) return false;
-  const { session_id: sessionId } = record.input;
-  await claimRootStart(config.dataDir, shipper.binding, sessionId, record.at);
+  await claimRoot(config, shipper.binding, record);
   await keepForReplay(shipper.binding, record, file, config);
   return true;
 }
@@ -790,10 +808,25 @@ async function applyEvent(entry, record, config) {
       return obsReport(entry, config, record, "success");
     case "PostToolUseFailure":
       return obsReport(entry, config, record, "error");
+    case "Stop":
+      return obsUsageCalls(entry, config, record);
     case "SessionEnd":
       return obsEndSession(entry, config);
     default:
       break;
+  }
+}
+
+async function obsUsageCalls(entry, config, record) {
+  const transcriptPath = record.input.transcript_path;
+  if (typeof transcriptPath !== "string" || !transcriptPath) return;
+  const tracked = Boolean(config.dataDir) && !record.replayedAt;
+  const sent = tracked ? await readSentCalls(config.dataDir, entry.binding, entry.sessionId) : [];
+  const calls = newUsageCalls(transcriptPath, entry.sessionId, loginCutoff(config), sent);
+  await recordUsageCallSpans(calls, entry.session);
+  if (tracked && calls.length > 0) {
+    const keys = [...sent, ...calls.map((call) => call.key)];
+    await writeSentCalls(config.dataDir, entry.binding, entry.sessionId, keys);
   }
 }
 

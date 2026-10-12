@@ -99,7 +99,15 @@ export function extractPlanFromIntentToken(raw) {
     : isPlainObject(parsed.token) && Number.isFinite(parsed.token.expires_at)
       ? parsed.token.expires_at
       : undefined;
-  return { plan: planCandidate, expiresAt };
+  return { plan: planCandidate, expiresAt, planCheck: parsed.planCheck };
+}
+
+function planCheckDenial(planCheck, toolName) {
+  const tool = normalizeToolName(toolName);
+  const named = (entry) => normalizeToolName(String(entry).split(":")[0]) === tool;
+  if (!(planCheck?.deniedTools ?? []).some(named)) return null;
+  const reason = (planCheck.deniedReasons ?? []).find(named);
+  return `ArmorIQ plan check denied ${toolName}${reason ? ` (${reason})` : ""}`;
 }
 
 export function extractAllowedActions(plan) {
@@ -251,6 +259,10 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
         "ArmorIQ intent token expired — call register_intent_plan to refresh, then retry",
       plan: parsed.plan,
     };
+  }
+  const denial = planCheckDenial(parsed.planCheck, toolName);
+  if (denial) {
+    return { matched: true, blockReason: denial, planCheckDenied: true, plan: parsed.plan };
   }
   const allowedActions = extractAllowedActions(parsed.plan);
   if (!allowedActions.has(normalizeToolName(toolName))) {
@@ -561,7 +573,9 @@ export async function requestIntent(config, payload) {
   const sdkPolicy = payload.policy
     ? compilePolicyForSdkIntent(payload.policy, payload.policy_hash)
     : undefined;
-  const token = await client.getIntentToken(capture, sdkPolicy, payload.validitySeconds);
+  const token = await client.getIntentToken(capture, sdkPolicy, payload.validitySeconds, {
+    contextId: payload.session_id,
+  });
   const tokenRaw = JSON.stringify(token);
   const parsedFromToken = extractPlanFromIntentToken(tokenRaw);
   return {

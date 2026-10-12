@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { deviceIdentity } from "./device.mjs";
 import { ensurePrivateDirSync, openPrivateSync, writePrivateFileSync } from "./fs-store.mjs";
 import { isSessionId, liveDir, liveTranscript, projectsDir } from "./live-usage.mjs";
+import { turnStore } from "./turn-latency.mjs";
 import {
   anySessionAnswers,
   endSession,
@@ -97,14 +98,18 @@ async function startSession(config, sessionId) {
   ensureWorker(config, dir);
 }
 
-const TRACKED = new Set(["SessionStart", "SessionEnd"]);
+const TRACKED = {
+  SessionStart: startSession,
+  SessionEnd: (config, sessionId) => endSession(usageDir(config), sessionId),
+  UserPromptSubmit: (config, sessionId) => turnStore(usageDir(config)).start(sessionId, Date.now()),
+  Stop: (config, sessionId) => turnStore(usageDir(config)).stop(sessionId, Date.now()),
+};
 
 export async function trackUsageSession(event, input, config) {
-  if (!TRACKED.has(event) || !config?.usageSyncEnabled || !isSessionId(input?.session_id)) return;
+  const track = Object.hasOwn(TRACKED, event) ? TRACKED[event] : null;
+  if (!track || !config?.usageSyncEnabled || !isSessionId(input?.session_id)) return;
   try {
-    await (event === "SessionEnd"
-      ? endSession(usageDir(config), input.session_id)
-      : startSession(config, input.session_id));
+    await track(config, input.session_id);
   } catch (err) {
     process.stderr.write(`[armorclaude] usage session tracking failed: ${err?.message ?? err}\n`);
   }

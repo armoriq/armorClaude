@@ -17,9 +17,10 @@ export const isoAgo = (ms) => new Date(Date.now() - ms).toISOString();
 export function backend() {
   const batches = [];
   const singles = [];
+  const latency = [];
   let release;
   const released = new Promise((resolve) => (release = resolve));
-  const b = { batches, singles, release, generation: GENERATION, onBatch: null };
+  const b = { batches, singles, latency, release, generation: GENERATION, onBatch: null };
   Object.assign(b, { requestId: null, reports: [], runs: new Map(), acked: new Map() });
   const stale = (run) => run?.mode === "history" && run.requestId !== b.requestId;
   const server = createServer((req, res) => {
@@ -70,6 +71,10 @@ export function backend() {
             status: "applied",
           })),
         });
+      }
+      if (req.url === "/dashboard/token-usage/latency") {
+        latency.push(body);
+        return reply(201, { ok: true });
       }
       if (req.url === "/dashboard/token-usage") {
         singles.push(body);
