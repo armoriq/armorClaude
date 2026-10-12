@@ -1,11 +1,17 @@
 # Changelog
 
-Changes to the ArmorClaude plugin, newest first. An install picks up code only when the plugin version changes, so each pull request is listed under the first version that shipped it. Versions 0.2.3 to 0.2.9 shipped on the stable channel (`armorclaude`, from `main`); 0.2.9 to 0.2.18 on the dev channel (`armorclaude-dev`, from `dev`).
+Changes to the ArmorClaude plugin, newest first. An install picks up code only when the plugin version changes, so each pull request is listed under the first version that shipped it. Versions 0.2.3 to 0.2.9 shipped on the stable channel (`armorclaude`, from `main`); 0.2.9 to 0.2.19 on the dev channel (`armorclaude-dev`, from `dev`).
 
 ## [Unreleased]
 
 - Publish armorclaude-dev variant in the marketplace catalog (#142)
 - Track latest compatible SDK on both branches with Dependabot (#143)
+
+## [0.2.19] - 2026-10-12
+
+- docs: start a CHANGELOG with the changes since v0.2.2 (#419)
+- feat(release): bump the version in one step and publish GitHub releases from CHANGELOG (#420)
+- feat(client): send X-ArmorIQ-Client with the plugin's channel and version (#424)
 
 ## [0.2.18] - 2026-10-12
 
