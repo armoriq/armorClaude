@@ -15,6 +15,8 @@ import {
   withFileLock,
 } from "./live-usage.mjs";
 import { noteTokenUsageResult } from "./relogin.mjs";
+import { markTitle, sameTitle, sessionTitle, titleBatches } from "./session-titles.mjs";
+import { callBatches, callChange, noteCalls } from "./usage-call-records.mjs";
 
 const QUEUED = /^\d{16}-[0-9a-f-]{36}\.json$/;
 
@@ -55,62 +57,107 @@ export async function queued(queueDir) {
 
 export const settle = (file) => unlink(file).catch(() => {});
 
-export async function captureChanges(job, { sessionId, transcript, cutoff, generation }) {
-  const state = await readJson(sessionFile(job.dir, sessionId), {});
-  const revision = await allocateRevision(job.dir);
-  const taken = captureSession({
-    transcript,
-    sessionId,
-    cutoff: state.admitted ? -Infinity : cutoff,
+function updateSession(dir, sessionId, change) {
+  const file = sessionFile(dir, sessionId);
+  return withFileLock(path.join(dir, `${sessionId}.ack.lock`), async () => {
+    await writeJson(file, change(await readJson(file, {})));
   });
-  const pending = (await queued(job.queueDir)).map((q) => q.batch);
-  const known = knownDigests(state, generation, pending, sessionId);
-  return { ...taken, snapshots: changedSnapshots({ capture: taken, sessionId, revision, known }) };
 }
 
-export const toItems = (snapshots, { generation, deviceName, runId }) =>
-  packBatches(snapshots).map((group) => ({
-    batch: {
-      generation,
-      batchId: newBatchId(),
-      ...(runId ? { runId } : {}),
-      deviceName,
-      snapshots: group,
-    },
-  }));
+async function titleChange(dir, { sessionId, transcript }, state, pending) {
+  const title = sessionTitle(transcript, sessionId, state.title);
+  if (!title || (sameTitle(state.title, title) && state.title.sent)) return [];
+  if (pending.some((b) => (b.sessions ?? []).some((t) => sameTitle(t, title)))) return [];
+  if (!sameTitle(state.title, title)) {
+    const { title: text, titleUpdatedAt } = title;
+    await updateSession(dir, sessionId, (s) => ({ ...s, title: { title: text, titleUpdatedAt } }));
+  }
+  return [title];
+}
+
+export async function captureChanges(job, session) {
+  const { sessionId, transcript, cutoff, generation } = session;
+  const state = await readJson(sessionFile(job.dir, sessionId), {});
+  const revision = await allocateRevision(job.dir);
+  const from = state.admitted ? -Infinity : cutoff;
+  const taken = captureSession({ transcript, sessionId, cutoff: from });
+  const pending = (await queued(job.queueDir)).map((q) => q.batch);
+  const known = knownDigests(state, generation, pending, sessionId);
+  return {
+    ...taken,
+    snapshots: changedSnapshots({ capture: taken, sessionId, revision, known }),
+    sessions: await titleChange(job.dir, session, state, pending),
+    calls: callChange(session, state, { cutoff: from, generation, pending, repo: taken.repo }),
+  };
+}
+
+const newBatch = ({ generation, deviceName }, parts) => ({
+  batch: { generation, batchId: newBatchId(), deviceName, snapshots: [], ...parts },
+});
+
+export function toItems({ snapshots, sessions = [], calls = [] }, options) {
+  const run = options.runId ? { runId: options.runId } : {};
+  return [
+    ...packBatches(snapshots).map((group) => newBatch(options, { ...run, snapshots: group })),
+    ...titleBatches(sessions).map((group) => newBatch(options, { sessions: group })),
+    ...callBatches(calls).map((group) => newBatch(options, { ...run, calls: group })),
+  ];
+}
 
 async function updateSessions(dir, snapshots, change) {
   const bySession = new Map();
   for (const s of snapshots) bySession.set(s.sessionId, [...(bySession.get(s.sessionId) ?? []), s]);
   for (const [sessionId, own] of bySession) {
-    const file = sessionFile(dir, sessionId);
-    await withFileLock(path.join(dir, `${sessionId}.ack.lock`), async () => {
-      await writeJson(file, change(await readJson(file, {}), own));
-    });
+    await updateSession(dir, sessionId, (state) => change(state, own));
   }
 }
 
-const recordAcks = (dir, { batch, admits }) =>
-  updateSessions(dir, batch.snapshots, (state, own) => {
+async function settleParts(dir, batch) {
+  for (const title of batch.sessions ?? []) {
+    await updateSession(dir, title.sessionId, (state) => markTitle(state, title));
+  }
+  await updateSessions(dir, batch.calls ?? [], (state, own) =>
+    noteCalls(state, batch.generation, own)
+  );
+}
+
+async function recordAcks(dir, { batch, admits }) {
+  await updateSessions(dir, batch.snapshots, (state, own) => {
     const acked = acknowledge(state, batch.generation, own);
     return admits ? { ...acked, admitted: true } : acked;
   });
+  await settleParts(dir, batch);
+}
 
 async function setAside(job, { file, ...item }, result) {
   const refused = { status: result.status ?? null, reason: result.reason };
   await writeJson(path.join(job.queueDir, "refused", path.basename(file)), { ...item, refused });
   await updateSessions(job.dir, item.batch.snapshots, refuse);
+  await settleParts(job.dir, item.batch);
   await settle(file);
+  const records = (item.batch.calls ?? []).reduce((n, c) => n + c.records.length, 0);
   return {
-    note: `${item.batch.snapshots.length} session-hour(s), ${describe(result)}`,
+    note: `${item.batch.snapshots.length} session-hour(s), ${(item.batch.sessions ?? []).length} title(s), ${records} call(s), ${describe(result)}`,
     batch: item.batch,
   };
 }
 
+const units = (batch) => [
+  ...batch.snapshots.map((s) => ({ snapshots: [s] })),
+  ...(batch.sessions ?? []).map((t) => ({ snapshots: [], sessions: [t] })),
+  ...(batch.calls ?? []).map((c) => ({ snapshots: [], calls: [c] })),
+];
+
 async function retryAlone(job, { file, ...item }) {
-  const singles = item.batch.snapshots.map((s) => ({
+  const singles = units(item.batch).map((parts) => ({
     ...item,
-    batch: { ...item.batch, batchId: newBatchId(), snapshots: [s] },
+    batch: {
+      ...item.batch,
+      batchId: newBatchId(),
+      sessions: undefined,
+      calls: undefined,
+      ...parts,
+    },
   }));
   await enqueue(job.queueDir, singles);
   await settle(file);
@@ -130,7 +177,7 @@ async function retryAlone(job, { file, ...item }) {
 }
 
 async function refuseBatch(job, item, result) {
-  if (item.batch.snapshots.length > 1) return retryAlone(job, item);
+  if (units(item.batch).length > 1) return retryAlone(job, item);
   return { sent: 0, refused: [await setAside(job, item, result)] };
 }
 

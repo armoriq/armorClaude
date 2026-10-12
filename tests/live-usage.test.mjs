@@ -14,6 +14,7 @@ import {
   isoAgo,
   liveFiles,
   projectFile,
+  quiet,
   run,
   sessionBatches,
   settled,
@@ -76,6 +77,7 @@ for (const daemon of [false, true]) {
       assert.equal(b.batches.filter((x) => x.runId).flatMap((x) => x.snapshots).length, 30);
       for (const res of held) res.socket.destroy();
       await scan;
+      await quiet(h);
     } finally {
       for (const res of held) res.socket.destroy();
       await stopDaemon(h);
@@ -119,6 +121,7 @@ test("a session that spans the login posts only the part after it, also after th
       25
     );
     assert.ok(sessionBatches(b, id).at(-1).revision > sessionBatches(b, id)[0].revision);
+    await settled(h, id);
   } finally {
     b.server.closeAllConnections();
     await new Promise((r) => b.server.close(r));
@@ -199,10 +202,16 @@ for (const loss of ["the upload is killed", "the response is lost"]) {
         process.kill(pid, "SIGKILL");
         await until(() => !alive(pid), "the killed upload to exit");
         held.socket.destroy();
-        assert.equal(liveFiles(h, id).queued().length, 1);
       } else {
-        assert.equal((await settled(h, id)).queued().length, 1);
+        await settled(h, id);
       }
+      const committed = b.batches[0].batchId;
+      assert.equal(
+        liveFiles(h, id)
+          .queued()
+          .filter((n) => n.includes(committed)).length,
+        1
+      );
       appendFileSync(projectFile(h, id), usageLine(id, "b", isoAgo(30_000), { input_tokens: 3 }));
       await stop(h, b.url, false, id);
       await until(() => b.batches.length === 3, "the replay and the next capture");
