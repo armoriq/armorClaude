@@ -46,6 +46,7 @@ export function getSdkClient(config) {
     timeout: config.timeoutMs,
     maxRetries: config.maxRetries,
     verifySsl: config.verifySsl,
+    client: config.client,
   });
   sdkClientCache.set(key, client);
   return client;

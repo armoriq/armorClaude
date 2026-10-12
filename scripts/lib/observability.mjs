@@ -152,6 +152,7 @@ function runtimeOptionsFor(config, entry, leaseStore) {
     backendEndpoint: config.observabilityEndpoint,
     apiKey: config.apiKey,
     sdkVersion,
+    client: config.client,
     options: { serviceName: config.observabilityProduct || "armorclaude" },
   };
   if (config.dataDir) Object.assign(runtimeOptions, dataDirOptions(config, entry, leaseStore));
@@ -367,8 +368,8 @@ function runInBackground(script, input) {
   child.unref();
 }
 
-function fetchLeaseInBackground({ dataDir, observabilityEndpoint, apiKey }) {
-  runInBackground(LEASE_FETCHER, { dataDir, observabilityEndpoint, apiKey });
+function fetchLeaseInBackground({ dataDir, observabilityEndpoint, apiKey, client }) {
+  runInBackground(LEASE_FETCHER, { dataDir, observabilityEndpoint, apiKey, client });
 }
 
 export async function obsFetchLease(config) {
@@ -378,8 +379,14 @@ export async function obsFetchLease(config) {
 
 async function shipSpoolInBackground(config, binding) {
   if (await shipperRunning(config.dataDir, binding)) return;
-  const { dataDir, observabilityEndpoint, apiKey, observabilityProduct } = config;
-  runInBackground(SPOOL_SHIPPER, { dataDir, observabilityEndpoint, apiKey, observabilityProduct });
+  const { dataDir, observabilityEndpoint, apiKey, observabilityProduct, client } = config;
+  runInBackground(SPOOL_SHIPPER, {
+    dataDir,
+    observabilityEndpoint,
+    apiKey,
+    observabilityProduct,
+    client,
+  });
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

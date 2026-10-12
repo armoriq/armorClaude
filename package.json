@@ -20,7 +20,7 @@
     "node": ">=20.19.0"
   },
   "dependencies": {
-    "@armoriq/sdk-dev": "^0.8.15",
+    "@armoriq/sdk-dev": "^0.8.16",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.6.5"
   },

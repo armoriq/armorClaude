@@ -19,6 +19,9 @@ const NEWER_EXPORTS = [
 async function pluginWithOlderSdk() {
   const root = await mkdtemp(path.join(os.tmpdir(), "ac-older-sdk-"));
   await cp(path.join(repoRoot, "scripts"), path.join(root, "scripts"), { recursive: true });
+  await cp(path.join(repoRoot, ".claude-plugin"), path.join(root, ".claude-plugin"), {
+    recursive: true,
+  });
   await cp(path.join(repoRoot, "package.json"), path.join(root, "package.json"));
   const modules = path.join(repoRoot, "node_modules");
   await mkdir(path.join(root, "node_modules", "@armoriq", "sdk-dev"), { recursive: true });
