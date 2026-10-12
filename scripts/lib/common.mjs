@@ -227,7 +227,6 @@ export function buildAuthHeaders(config) {
   const headers = { "Content-Type": "application/json" };
   if (config.apiKey) {
     headers.Authorization = `Bearer ${config.apiKey}`;
-    headers["X-API-Key"] = config.apiKey;
     headers["x-api-key"] = config.apiKey;
   }
   return headers;

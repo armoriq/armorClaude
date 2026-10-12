@@ -11,7 +11,7 @@ import { writeLoginProfiles } from "./login-profile.mjs";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
 const daemonScript = path.join(repoRoot, "scripts", "daemon.mjs");
-const API_KEY = "ak_test_hooksession000000000000000000";
+export const API_KEY = "ak_test_hooksession000000000000000000";
 
 export async function waitFor(predicate, ms, what) {
   const until = Date.now() + ms;
