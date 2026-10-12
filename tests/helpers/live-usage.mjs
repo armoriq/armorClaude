@@ -16,12 +16,14 @@ export const isoAgo = (ms) => new Date(Date.now() - ms).toISOString();
 
 export function backend() {
   const batches = [];
+  const uploads = [];
   const singles = [];
   const latency = [];
   let release;
   const released = new Promise((resolve) => (release = resolve));
-  const b = { batches, singles, latency, release, generation: GENERATION, onBatch: null };
+  const b = { batches, uploads, singles, latency, release, generation: GENERATION, onBatch: null };
   Object.assign(b, { requestId: null, reports: [], runs: new Map(), acked: new Map() });
+  b.callKeys = new Set();
   const stale = (run) => run?.mode === "history" && run.requestId !== b.requestId;
   const server = createServer((req, res) => {
     let raw = "";
@@ -56,13 +58,19 @@ export function backend() {
           return reply(409, { message: "Unknown usage sync run" });
         if (stale(b.runs.get(body.runId)))
           return reply(409, { message: "History request is no longer current" });
-        batches.push(body);
-        if (b.onBatch?.(res, body)) return;
+        uploads.push(body);
+        if (body.snapshots.length) batches.push(body);
+        if (body.snapshots.length && b.onBatch?.(res, body)) return;
         if (body.runId) {
           const hours = b.acked.get(body.runId) ?? new Set();
           for (const s of body.snapshots) hours.add(`${s.sessionId}|${s.usageDate}|${s.usageHour}`);
           b.acked.set(body.runId, hours);
         }
+        const keys = (body.calls ?? []).flatMap((c) =>
+          c.records.map((r) => `${body.generation}|${c.sessionId}|${r.key}`)
+        );
+        const duplicates = keys.filter((k) => b.callKeys.has(k)).length;
+        for (const k of keys) b.callKeys.add(k);
         return reply(200, {
           results: body.snapshots.map((s) => ({
             sessionId: s.sessionId,
@@ -70,6 +78,7 @@ export function backend() {
             usageHour: s.usageHour,
             status: "applied",
           })),
+          ...(keys.length ? { calls: { stored: keys.length - duplicates, duplicates } } : {}),
         });
       }
       if (req.url === "/dashboard/token-usage/latency") {
@@ -247,12 +256,23 @@ export async function settled(h, sessionId) {
   return files;
 }
 
+const UPLOAD_FILE = /^[0-9a-f-]{36}\.(lock|pending)$/;
+
+export async function quiet(h) {
+  const root = path.join(h, "data", "usage-live");
+  const busy = () =>
+    existsSync(root) &&
+    readdirSync(root).some((d) => readdirSync(path.join(root, d)).some((n) => UPLOAD_FILE.test(n)));
+  await until(() => !busy(), "every live upload to finish");
+}
+
 export async function withSession(fn) {
   const b = await backend();
   b.release();
   const h = home(b.url, isoAgo(3 * 3_600_000));
   try {
     await fn(b, h, randomUUID());
+    await quiet(h);
   } finally {
     b.server.closeAllConnections();
     await new Promise((r) => b.server.close(r));

@@ -28,9 +28,9 @@ const titleLine = (sessionId, customTitle) => ({ type: "custom-title", customTit
 const appendTitle = (h, id, title) =>
   appendFileSync(projectFile(h, id), `${JSON.stringify(titleLine(id, title))}\n`);
 const titlesOf = (b, id) =>
-  b.batches.flatMap((x) => x.sessions ?? []).filter((s) => s.sessionId === id);
+  b.uploads.flatMap((x) => x.sessions ?? []).filter((s) => s.sessionId === id);
 const titled = (b, id) =>
-  b.batches.filter((x) => (x.sessions ?? []).some((s) => s.sessionId === id));
+  b.uploads.filter((x) => (x.sessions ?? []).some((s) => s.sessionId === id));
 
 test("a Stop sends the session's title once, timed when the plugin first saw it, and again after a rename", async () => {
   await withSession(async (b, h, id) => {
