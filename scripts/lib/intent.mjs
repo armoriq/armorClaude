@@ -561,7 +561,9 @@ export async function requestIntent(config, payload) {
   const sdkPolicy = payload.policy
     ? compilePolicyForSdkIntent(payload.policy, payload.policy_hash)
     : undefined;
-  const token = await client.getIntentToken(capture, sdkPolicy, payload.validitySeconds);
+  const token = await client.getIntentToken(capture, sdkPolicy, payload.validitySeconds, {
+    contextId: payload.session_id,
+  });
   const tokenRaw = JSON.stringify(token);
   const parsedFromToken = extractPlanFromIntentToken(tokenRaw);
   return {
