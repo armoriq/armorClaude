@@ -37,6 +37,14 @@ test("a short data dir keeps its socket inside the data dir", () => {
   );
 });
 
+test("on Windows the daemon listens on a named pipe keyed by the data dir", () => {
+  const dir = "C:\\Users\\u\\.claude\\plugins\\data\\armorclaude-inline";
+  const pipe = daemonSocketPath(dir, "win32");
+  assert.match(pipe, /^\\\\\.\\pipe\\armorclaude-[0-9a-f]{16}$/);
+  assert.equal(daemonSocketPath(dir, "win32"), pipe);
+  assert.notEqual(daemonSocketPath(`${dir}x`, "win32"), pipe);
+});
+
 test("a long data dir gets a short per-user socket path keyed by the dir", async () => {
   const dir = await longDataDir();
   assert.ok(Buffer.byteLength(path.join(dir, "daemon.sock")) > MAX_SOCKET_PATH_BYTES);
