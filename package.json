@@ -22,7 +22,7 @@
   "dependencies": {
     "@armoriq/sdk-dev": "^0.8.16",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "eslint": "^9.0.0",
