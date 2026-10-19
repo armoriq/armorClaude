@@ -1,19 +1,8 @@
 import { loadConfig } from "./lib/config.mjs";
 import { denyPreTool } from "./lib/hook-output.mjs";
-import {
-  handlePreToolUse,
-  handlePostToolUse,
-  handlePostToolUseFailure,
-  handleSessionEnd,
-  handleSessionStart,
-  handleStop,
-  handleUserPromptExpansion,
-  handleUserPromptSubmit,
-} from "./lib/engine.mjs";
 import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 import { appendDaemonLog } from "./lib/daemon-log.mjs";
 import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
-import { observeHook, obsFlush } from "./lib/observability.mjs";
 import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
 import { withReloginNotice } from "./lib/relogin.mjs";
 
@@ -37,14 +26,14 @@ function debugLog(config, message) {
 }
 
 const HANDLERS = {
-  SessionStart: handleSessionStart,
-  UserPromptSubmit: handleUserPromptSubmit,
-  UserPromptExpansion: handleUserPromptExpansion,
-  PreToolUse: handlePreToolUse,
-  PostToolUse: handlePostToolUse,
-  PostToolUseFailure: handlePostToolUseFailure,
-  Stop: handleStop,
-  SessionEnd: handleSessionEnd,
+  SessionStart: "handleSessionStart",
+  UserPromptSubmit: "handleUserPromptSubmit",
+  UserPromptExpansion: "handleUserPromptExpansion",
+  PreToolUse: "handlePreToolUse",
+  PostToolUse: "handlePostToolUse",
+  PostToolUseFailure: "handlePostToolUseFailure",
+  Stop: "handleStop",
+  SessionEnd: "handleSessionEnd",
 };
 
 function logDaemonFallback(event, err, config) {
@@ -96,11 +85,15 @@ async function main() {
 
   if (config.daemonEnabled && (await dispatchInDaemon(event, input, config))) return;
 
-  const handler = Object.hasOwn(HANDLERS, event) ? HANDLERS[event] : null;
-  if (!handler) {
+  if (!Object.hasOwn(HANDLERS, event)) {
     debugLog(config, `unhandled hook event: ${event}`);
     return;
   }
+  // The engine and observability take ~150 ms to import, longer than a whole
+  // daemon round trip, so only the in-process fallback loads them.
+  const engine = await import("./lib/engine.mjs");
+  const { observeHook, obsFlush } = await import("./lib/observability.mjs");
+  const handler = engine[HANDLERS[event]];
   const output = await withReloginNotice(event, input, config, await handler(input, config));
 
   if (output) {
