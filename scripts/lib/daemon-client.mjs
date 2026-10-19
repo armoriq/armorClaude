@@ -63,7 +63,7 @@ function connectOnce(socketPath) {
   });
 }
 
-async function spawnDaemon(socketPath, dataDir, config) {
+async function spawnDaemon(socketPath, dataDir, config, onSpawn) {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const daemonScript = path.resolve(here, "..", "daemon.mjs");
   // Pass the resolved dataDir explicitly so the spawned daemon writes its
@@ -101,6 +101,7 @@ async function spawnDaemon(socketPath, dataDir, config) {
     );
   });
   child.unref();
+  onSpawn?.();
 
   const deadline = Date.now() + DAEMON_START_TIMEOUT_MS;
   for (;;) {
@@ -138,13 +139,13 @@ async function shutdownDaemon(socketPath) {
   }
 }
 
-async function ensureFreshDaemonSocket(socketPath, config) {
+async function ensureFreshDaemonSocket(socketPath, config, onSpawn) {
   let sock;
   try {
     sock = await connectOnce(socketPath);
   } catch (err) {
     if (err?.code === "ENOENT" || err?.code === "ECONNREFUSED") {
-      return spawnDaemon(socketPath, config.dataDir, config);
+      return spawnDaemon(socketPath, config.dataDir, config, onSpawn);
     }
     throw err;
   }
@@ -169,7 +170,7 @@ async function ensureFreshDaemonSocket(socketPath, config) {
     /* noop */
   }
   await shutdownDaemon(socketPath);
-  return spawnDaemon(socketPath, config.dataDir, config);
+  return spawnDaemon(socketPath, config.dataDir, config, onSpawn);
 }
 
 /**
@@ -221,11 +222,11 @@ function exchange(sock, payload) {
  * Throws if the daemon is unreachable. Caller (hook-router.mjs) is expected
  * to fall back to in-process dispatch on throw.
  */
-export async function dispatchViaDaemon({ event, input, config }) {
+export async function dispatchViaDaemon({ event, input, config, onSpawn }) {
   const socketPath = daemonSocketPath(config.dataDir);
   const debug = !!config?.debug;
   const t0 = debug ? Date.now() : 0;
-  const sock = await ensureFreshDaemonSocket(socketPath, config);
+  const sock = await ensureFreshDaemonSocket(socketPath, config, onSpawn);
   const tConnected = debug ? Date.now() : 0;
   try {
     const reqId = makeReqId();

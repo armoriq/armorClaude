@@ -49,9 +49,21 @@ function logDaemonFallback(event, err, config) {
   }
 }
 
+// The engine and observability take ~150 ms to import, longer than a whole
+// daemon round trip, so only the in-process fallback loads them. A daemon that
+// has to be spawned may die before answering, so start the import alongside it.
+let inProcess;
+function loadInProcess() {
+  if (!inProcess) {
+    inProcess = Promise.all([import("./lib/engine.mjs"), import("./lib/observability.mjs")]);
+    inProcess.catch(() => {});
+  }
+  return inProcess;
+}
+
 async function dispatchInDaemon(event, input, config) {
   try {
-    const output = await dispatchViaDaemon({ event, input, config });
+    const output = await dispatchViaDaemon({ event, input, config, onSpawn: loadInProcess });
     if (output) emitJson(output);
     return true;
   } catch (err) {
@@ -89,10 +101,7 @@ async function main() {
     debugLog(config, `unhandled hook event: ${event}`);
     return;
   }
-  // The engine and observability take ~150 ms to import, longer than a whole
-  // daemon round trip, so only the in-process fallback loads them.
-  const engine = await import("./lib/engine.mjs");
-  const { observeHook, obsFlush } = await import("./lib/observability.mjs");
+  const [engine, { observeHook, obsFlush }] = await loadInProcess();
   const handler = engine[HANDLERS[event]];
   const output = await withReloginNotice(event, input, config, await handler(input, config));
 

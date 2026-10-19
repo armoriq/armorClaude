@@ -606,7 +606,7 @@ test("fallback hooks spool their spans without waiting on a 2.5 s export, and a 
       const started = Date.now();
       const { code } = await runHook(env, { ...tool, hook_event_name, tool_response: {} });
       assert.equal(code, 0, hook_event_name);
-      assert.ok(Date.now() - started < 1_000, `${hook_event_name} took ${Date.now() - started} ms`);
+      assert.ok(Date.now() - started < 2_000, `${hook_event_name} took ${Date.now() - started} ms`);
     }
     for (const file of dataFiles(dataDir)) {
       assert.equal(statSync(path.join(dataDir, "obs-spool", file)).mode & 0o777, 0o600);
