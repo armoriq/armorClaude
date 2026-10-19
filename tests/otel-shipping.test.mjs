@@ -410,7 +410,12 @@ async function stopDaemon(dataDir) {
   const pidFile = path.join(dataDir, "daemon.pid");
   if (!existsSync(pidFile)) return;
   const pid = Number(readFileSync(pidFile, "utf8"));
-  process.kill(pid, "SIGTERM");
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (err) {
+    if (err.code === "ESRCH") return;
+    throw err;
+  }
   await waitFor(
     () => {
       try {
@@ -441,9 +446,12 @@ test("one session stores the same trace with the daemon up and with it down (#17
   const daemonDir = await tempDir("aq-up-");
   const fallbackDir = await tempDir("aq-down-");
   try {
-    await runSession(pluginEnv(home, daemonDir, daemonBackend.url), randomUUID());
+    const daemonEnv = pluginEnv(home, daemonDir, daemonBackend.url);
+    await runSession(daemonEnv, randomUUID());
     assert.ok(existsSync(path.join(daemonDir, "daemon.pid")), "a daemon served these hooks");
     await stopDaemon(daemonDir);
+    // A SessionEnd export still in flight at SIGTERM is spooled for the next daemon.
+    await shipSpoolWithDaemon(daemonEnv, daemonDir);
 
     await withoutDaemon(fallbackDir);
     const fallbackEnv = pluginEnv(home, fallbackDir, fallbackBackend.url);
