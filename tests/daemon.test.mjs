@@ -405,7 +405,9 @@ test("hook-router: a daemon-answered hook loads neither the engine nor the SDK r
     const code = await new Promise((r) => router.on("close", r));
     assert.equal(code, 0, stderr);
     assert.equal(stdout, "", `read should fast-path through the daemon; got ${stdout}`);
-    assert.doesNotMatch(stderr, /loaded |in-process/);
+    assert.doesNotMatch(stderr, /loaded /);
+    const log = path.join(dataDir, "daemon.log");
+    assert.doesNotMatch(existsSync(log) ? readFileSync(log, "utf8") : "", /in-process/);
   } finally {
     await killDaemon(child, dataDir);
   }
