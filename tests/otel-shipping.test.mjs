@@ -200,6 +200,13 @@ async function withoutDaemon(dataDir) {
   await writeFile(path.join(dataDir, "profiles"), "not a directory");
 }
 
+function fallbackStartedAt(dataDir, event) {
+  const lines = readFileSync(path.join(dataDir, "daemon.log"), "utf8").split("\n");
+  const line = lines.findLast((l) => l.includes(`handling ${event} in-process`));
+  assert.ok(line, `no in-process line for ${event} in daemon.log`);
+  return Date.parse(line.match(/ at=(\S+Z):/)[1]);
+}
+
 function pluginEnv(home, dataDir, backendUrl) {
   writeLoginProfiles(home, [{ backend: backendUrl, apiKey: API_KEY }]);
   return {
@@ -611,10 +618,12 @@ test("fallback hooks spool their spans without waiting on a 2.5 s export, and a 
     const session_id = randomUUID();
     const tool = { session_id, tool_name: "Bash", tool_input: { command: "ls" } };
     for (const hook_event_name of ["PreToolUse", "PostToolUse", "SessionEnd"]) {
-      const started = Date.now();
       const { code } = await runHook(env, { ...tool, hook_event_name, tool_response: {} });
       assert.equal(code, 0, hook_event_name);
-      assert.ok(Date.now() - started < 2_000, `${hook_event_name} took ${Date.now() - started} ms`);
+      // Time from the fallback starting, so a slow runner spawning the doomed
+      // daemon cannot hide a hook that waits out HOOK_LEASE_WAIT_MS (1.5 s).
+      const took = Date.now() - fallbackStartedAt(dataDir, hook_event_name);
+      assert.ok(took < 1_000, `${hook_event_name} spent ${took} ms in-process`);
     }
     for (const file of dataFiles(dataDir)) {
       assert.equal(statSync(path.join(dataDir, "obs-spool", file)).mode & 0o777, 0o600);
