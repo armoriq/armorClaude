@@ -56,7 +56,7 @@ import {
   obsRetryBacklog,
   obsServeAsDaemon,
 } from "./lib/observability.mjs";
-import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
+import { DAEMON_PROTOCOL, DAEMON_VERSION } from "./lib/daemon-version.mjs";
 import { launchLiveUsage } from "./lib/usage-sync-launch.mjs";
 import { withReloginNotice } from "./lib/relogin.mjs";
 
@@ -376,8 +376,13 @@ async function handleLine(rawLine, socket) {
   switch (msg?.type) {
     case "ping": {
       socket.write(
-        JSON.stringify({ reqId, ok: true, version: DAEMON_VERSION, uptime: process.uptime() }) +
-          "\n"
+        JSON.stringify({
+          reqId,
+          ok: true,
+          version: DAEMON_VERSION,
+          protocol: DAEMON_PROTOCOL,
+          uptime: process.uptime(),
+        }) + "\n"
       );
       return;
     }

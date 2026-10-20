@@ -1316,14 +1316,11 @@ async function decidePreToolUse(input, config) {
 }
 
 export async function storeRegisteredPlan(registration, config) {
-  const { sessionId, plan, tokenRaw } = registration;
+  const { sessionId } = registration;
   const runtimeState = await loadRuntimeState(config.runtimeFile);
-  if (config.autoReanchor) {
-    await reanchorPriorPlan(runtimeState, sessionId, plan, tokenRaw, config);
-  }
   upsertSession(runtimeState, sessionId, {
-    intentTokenRaw: tokenRaw,
-    plan,
+    intentTokenRaw: registration.tokenRaw,
+    plan: registration.plan,
     planCaptured: false,
     allowedActions: registration.allowedActions,
     expiresAt: registration.expiresAt,
@@ -1331,6 +1328,7 @@ export async function storeRegisteredPlan(registration, config) {
     intentPolicyCompilerVersion: INTENT_POLICY_COMPILER_VERSION,
     intentExecution: undefined,
   });
+  if (registration.trustOp) appendTrustOp(runtimeState, sessionId, registration.trustOp);
   await saveRuntimeState(config.runtimeFile, runtimeState);
 }
 
@@ -1368,13 +1366,12 @@ function logReanchor(config, result, priorHash, nextHash) {
   }
 }
 
-async function reanchorPriorPlan(runtimeState, sessionId, plan, tokenRaw, config) {
-  const prior = getSession(runtimeState, sessionId);
+export async function reanchorPriorPlan(prior, plan, tokenRaw, config) {
   const priorToken = prior?.plan ? parseToken(prior.intentTokenRaw) : null;
-  if (!priorToken) return;
+  if (!priorToken) return undefined;
   const priorHash = sha256Hex(JSON.stringify(prior.plan));
   const nextHash = sha256Hex(JSON.stringify(plan));
-  if (priorHash === nextHash) return;
+  if (priorHash === nextHash) return undefined;
   const result = await reanchorViaSdk({
     getClient: getSdkClient,
     config,
@@ -1382,12 +1379,8 @@ async function reanchorPriorPlan(runtimeState, sessionId, plan, tokenRaw, config
     updatedPlan: plan,
     reason: "armorclaude:plan-delta",
   });
-  appendTrustOp(
-    runtimeState,
-    sessionId,
-    reanchorOp(result, priorToken, tokenRaw, priorHash, nextHash)
-  );
   logReanchor(config, result, priorHash, nextHash);
+  return reanchorOp(result, priorToken, tokenRaw, priorHash, nextHash);
 }
 
 // ---------------------------------------------------------------------------

@@ -11,9 +11,11 @@ import {
   handlePostToolUse,
   handlePostToolUseFailure,
   handlePreToolUse,
+  reanchorPriorPlan,
   storeRegisteredPlan,
 } from "../scripts/lib/engine.mjs";
 import {
+  getSession,
   upsertSession,
   loadRuntimeState,
   saveRuntimeState,
@@ -311,11 +313,15 @@ test("registering a plan that differs from the cached one appends a ReAnchor tru
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
+  const plan = { goal: "g2", steps: [{ action: "echo" }, { action: "add_step" }] };
+  const tokenRaw = JSON.stringify({ tokenId: "tok_new", plan: { steps: [] } });
+  const prior = getSession(await loadRuntimeState(config.runtimeFile), "sess-trust-1");
   await storeRegisteredPlan(
     {
       sessionId: "sess-trust-1",
-      plan: { goal: "g2", steps: [{ action: "echo" }, { action: "add_step" }] },
-      tokenRaw: JSON.stringify({ tokenId: "tok_new", plan: { steps: [] } }),
+      plan,
+      tokenRaw,
+      trustOp: await reanchorPriorPlan(prior, plan, tokenRaw, config),
       allowedActions: ["echo", "add_step"],
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
     },
@@ -345,11 +351,15 @@ test("registering the same plan again records no ReAnchor", async () => {
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
+  const plan = samePlan;
+  const tokenRaw = JSON.stringify({ tokenId: "tok_same" });
+  const prior = getSession(await loadRuntimeState(config.runtimeFile), "sess-trust-2");
   await storeRegisteredPlan(
     {
       sessionId: "sess-trust-2",
-      plan: samePlan,
-      tokenRaw: JSON.stringify({ tokenId: "tok_same" }),
+      plan,
+      tokenRaw,
+      trustOp: await reanchorPriorPlan(prior, plan, tokenRaw, config),
       allowedActions: ["echo"],
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
     },
