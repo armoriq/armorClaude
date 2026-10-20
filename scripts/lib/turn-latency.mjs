@@ -1,12 +1,14 @@
 import path from "node:path";
-import armoriqSdk from "@armoriq/sdk-dev";
 import { readJson, writeJson } from "./fs-store.mjs";
+import { sdkModule } from "./sdk.mjs";
 
-const { TurnTimingStore, claudeTurnLatencies, turnLatencyPayloads } = armoriqSdk;
-
-export const turnStore = (dir) => new TurnTimingStore(path.join(dir, "turns"));
+export function turnStore(dir) {
+  const { TurnTimingStore } = sdkModule("turn_latency");
+  return new TurnTimingStore(path.join(dir, "turns"));
+}
 
 function turnSamples(dir, { sessionId, transcript }, cutoff) {
+  const { claudeTurnLatencies } = sdkModule("turn_latency");
   const native = claudeTurnLatencies(transcript);
   const samples = native.length ? native : turnStore(dir).samples(sessionId);
   return samples.filter((sample) => sample.startedAtMs >= cutoff);
@@ -14,6 +16,7 @@ function turnSamples(dir, { sessionId, transcript }, cutoff) {
 
 export async function postTurnLatency(job, log) {
   const { dir, client, config, deviceId, deviceName, session } = job;
+  const { turnLatencyPayloads } = sdkModule("turn_latency");
   const identity = {
     product: config.productSlug,
     sessionId: session.sessionId,

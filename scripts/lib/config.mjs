@@ -1,11 +1,9 @@
-import armoriqSdk from "@armoriq/sdk-dev";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean } from "./common.mjs";
-
-const { loadLoginContext } = armoriqSdk;
+import { sdkModule } from "./sdk.mjs";
 
 const PRODUCT = "armorclaude";
 const DEV_PLUGIN_DATA = `${PRODUCT}-dev-armoriq`;
@@ -137,7 +135,10 @@ export function loadConfig(env = process.env) {
         ? "https://iap.armoriq.ai"
         : "https://iap-staging.armoriq.ai";
 
-  const login = loadLoginContext({ backend: backendEndpoint, product: PRODUCT });
+  const login = sdkModule("credentials").loadLoginContext({
+    backend: backendEndpoint,
+    product: PRODUCT,
+  });
   const profile = login?.profile;
   let apiKey = profile?.apiKey ?? "";
   const orgId = profile?.orgId ?? "";

@@ -4,18 +4,11 @@ import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import armoriqSdk from "@armoriq/sdk-dev";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
 import { validHistory } from "./login-ownership.mjs";
+import { sdkModule } from "./sdk.mjs";
 import { isAlive } from "./usage-sync-launch.mjs";
 
-const {
-  MAX_BATCH_BYTES,
-  MAX_BATCH_ENTRIES,
-  MAX_BATCH_SNAPSHOTS,
-  sessionTranscriptPaths,
-  snapshotSessionUsage,
-} = armoriqSdk;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LOCK_WAIT_MS = 5_000;
 
@@ -54,10 +47,12 @@ export async function listSessions(root) {
 }
 
 export function sessionFingerprint(transcript, cutoff) {
-  const files = sessionTranscriptPaths(transcript).map((file) => {
-    const st = statSync(file, { throwIfNoEntry: false });
-    return [file, st?.size ?? null, st?.mtimeMs ?? null];
-  });
+  const files = sdkModule("session_transcripts")
+    .sessionTranscriptPaths(transcript)
+    .map((file) => {
+      const st = statSync(file, { throwIfNoEntry: false });
+      return [file, st?.size ?? null, st?.mtimeMs ?? null];
+    });
   return digest([cutoff, files]);
 }
 
@@ -125,7 +120,7 @@ const hourKey = (h) => `${h.usageDate}T${String(h.usageHour).padStart(2, "0")}`;
 const digest = (entries) => createHash("sha256").update(JSON.stringify(entries)).digest("hex");
 
 export function captureSession({ transcript, sessionId, cutoff }) {
-  return snapshotSessionUsage(transcript, {
+  return sdkModule("session_snapshot").snapshotSessionUsage(transcript, {
     sessionId,
     include: (timestampMs) => timestampMs >= cutoff,
   });
@@ -175,6 +170,7 @@ export function packBatches(snapshots, overheadBytes = 512) {
   let current = [];
   let entries = 0;
   let bytes = overheadBytes;
+  const { MAX_BATCH_BYTES, MAX_BATCH_ENTRIES, MAX_BATCH_SNAPSHOTS } = sdkModule("usage_sync");
   for (const s of snapshots) {
     const size = encoded(s) + 1;
     const full =

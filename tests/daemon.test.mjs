@@ -372,3 +372,43 @@ test("daemon: a server error exits 1 and removes the PID file", async () => {
   assert.match(stderr, /\[armorclaude-daemon\] server error:/);
   assert.equal(existsSync(path.join(dataDir, "daemon.pid")), false);
 });
+
+test("hook-router: a daemon-answered hook loads neither the engine nor the SDK root", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-router-"));
+  const { child } = await spawnDaemonChild(dataDir);
+  try {
+    const loadHook = `export async function load(u,c,n){if(/\\/lib\\/(engine|observability)\\.mjs$/.test(u))process.stderr.write("loaded "+u+"\\n");return n(u,c)}`;
+    const reportCjs = `process.on("exit",()=>{for(const k of Object.keys(Module._cache))if(/@armoriq\\/sdk-dev\\/dist\\/index\\.js$/.test(k))process.stderr.write("loaded "+k+"\\n")});`;
+    const trace = `data:text/javascript,${encodeURIComponent(
+      `import Module,{register}from"node:module";register(${JSON.stringify("data:text/javascript," + encodeURIComponent(loadHook))});${reportCjs}`
+    )}`;
+    const router = spawn(
+      process.execPath,
+      ["--import", trace, path.join(repoRoot, "scripts", "hook-router.mjs")],
+      {
+        env: buildEnv(dataDir),
+        cwd: dataDir,
+      }
+    );
+    let stdout = "";
+    let stderr = "";
+    router.stdout.on("data", (c) => (stdout += c));
+    router.stderr.on("data", (c) => (stderr += c));
+    router.stdin.end(
+      JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: "sess-router-1",
+        tool_name: "read",
+        tool_input: { file_path: "x.txt" },
+      })
+    );
+    const code = await new Promise((r) => router.on("close", r));
+    assert.equal(code, 0, stderr);
+    assert.equal(stdout, "", `read should fast-path through the daemon; got ${stdout}`);
+    assert.doesNotMatch(stderr, /loaded /);
+    const log = path.join(dataDir, "daemon.log");
+    assert.doesNotMatch(existsSync(log) ? readFileSync(log, "utf8") : "", /in-process/);
+  } finally {
+    await killDaemon(child, dataDir);
+  }
+});
