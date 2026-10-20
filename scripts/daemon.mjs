@@ -47,6 +47,7 @@ import {
   handlePostToolUseFailure,
   handleStop,
   handleSessionEnd,
+  storeRegisteredPlan,
 } from "./lib/engine.mjs";
 import {
   journalHook,
@@ -348,6 +349,19 @@ const server = createServer((socket) => {
   });
 });
 
+async function registerPlan(msg) {
+  const registration = msg.registration ?? {};
+  if (typeof registration.sessionId !== "string" || !registration.sessionId) {
+    return { error: "register_plan needs a session id" };
+  }
+  const effectiveConfig = effectiveConfigFor(msg.configEnv);
+  const stored = await withSessionLock(registration.sessionId, async () => {
+    await storeRegisteredPlan(registration, effectiveConfig);
+    return true;
+  });
+  return stored ? { ok: true } : { error: "register_plan failed" };
+}
+
 async function handleLine(rawLine, socket) {
   bumpActivity();
   if (!rawLine.trim()) return;
@@ -378,6 +392,10 @@ async function handleLine(rawLine, socket) {
         if (config.debug)
           process.stderr.write(`[daemon] enqueueAudit failed: ${err?.message ?? err}\n`);
       }
+      return;
+    }
+    case "register_plan": {
+      socket.write(JSON.stringify({ reqId, ...(await registerPlan(msg)) }) + "\n");
       return;
     }
     case "shutdown": {

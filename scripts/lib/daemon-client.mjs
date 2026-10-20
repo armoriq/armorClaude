@@ -298,6 +298,21 @@ export async function enqueueAuditViaDaemon({ dto, config }) {
   }
 }
 
+export async function registerPlanViaDaemon({ registration, config }) {
+  const sock = await ensureFreshDaemonSocket(daemonSocketPath(config.dataDir), config);
+  try {
+    const reply = await exchange(sock, {
+      type: "register_plan",
+      registration,
+      reqId: makeReqId(),
+      configEnv: Object.fromEntries(REQUEST_CONFIG_KEYS.map((k) => [k, config[k]])),
+    });
+    if (reply?.error) throw new Error(`daemon error: ${reply.error}`);
+  } finally {
+    sock.destroy();
+  }
+}
+
 /** Liveness probe — used by daemon-supervisor and tests. */
 export async function pingDaemon(config) {
   const socketPath = daemonSocketPath(config.dataDir);

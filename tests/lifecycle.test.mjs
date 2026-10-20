@@ -11,8 +11,8 @@ import {
   handlePostToolUse,
   handlePostToolUseFailure,
   handlePreToolUse,
+  storeRegisteredPlan,
 } from "../scripts/lib/engine.mjs";
-import { writeFile, mkdir } from "node:fs/promises";
 import {
   upsertSession,
   loadRuntimeState,
@@ -294,7 +294,7 @@ test("handlePostToolUseFailure logs failed status", async () => {
 // Phase 3 — Trust Update integration: auto-reanchor + auto-revoke
 // ---------------------------------------------------------------------------
 
-test("PreToolUse appends ReAnchor trust op when pending plan differs from cached", async () => {
+test("registering a plan that differs from the cached one appends a ReAnchor trust op", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-trust-"));
   // useSdkIntent stays false so the wrapper short-circuits with ok=false.
   // We're verifying the *integration* — that engine.mjs detected the plan
@@ -311,24 +311,13 @@ test("PreToolUse appends ReAnchor trust op when pending plan differs from cached
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
-  // Stage a new (different) plan via pending-plan.json — same shape the
-  // register_intent_plan MCP tool writes.
-  await writeFile(
-    path.join(tmp, "pending-plan.json"),
-    JSON.stringify({
+  await storeRegisteredPlan(
+    {
+      sessionId: "sess-trust-1",
       plan: { goal: "g2", steps: [{ action: "echo" }, { action: "add_step" }] },
       tokenRaw: JSON.stringify({ tokenId: "tok_new", plan: { steps: [] } }),
       allowedActions: ["echo", "add_step"],
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
-    })
-  );
-
-  await handlePreToolUse(
-    {
-      hook_event_name: "PreToolUse",
-      session_id: "sess-trust-1",
-      tool_name: "echo",
-      tool_input: { text: "hi" },
     },
     config
   );
@@ -343,7 +332,7 @@ test("PreToolUse appends ReAnchor trust op when pending plan differs from cached
   assert.equal(ops[0].ok, false, "ok=false because useSdkIntent disabled");
 });
 
-test("PreToolUse does NOT record ReAnchor when pending plan matches cached", async () => {
+test("registering the same plan again records no ReAnchor", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-trust-nodrift-"));
   const config = buildConfig(tmp, { autoReanchor: true, useSdkIntent: false });
 
@@ -356,22 +345,13 @@ test("PreToolUse does NOT record ReAnchor when pending plan matches cached", asy
   });
   await saveRuntimeState(config.runtimeFile, priorState);
 
-  await writeFile(
-    path.join(tmp, "pending-plan.json"),
-    JSON.stringify({
+  await storeRegisteredPlan(
+    {
+      sessionId: "sess-trust-2",
       plan: samePlan,
       tokenRaw: JSON.stringify({ tokenId: "tok_same" }),
       allowedActions: ["echo"],
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
-    })
-  );
-
-  await handlePreToolUse(
-    {
-      hook_event_name: "PreToolUse",
-      session_id: "sess-trust-2",
-      tool_name: "echo",
-      tool_input: {},
     },
     config
   );

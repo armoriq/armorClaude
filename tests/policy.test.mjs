@@ -4,7 +4,11 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { handlePreToolUse, handleUserPromptSubmit } from "../scripts/lib/engine.mjs";
+import {
+  handlePreToolUse,
+  handleUserPromptSubmit,
+  storeRegisteredPlan,
+} from "../scripts/lib/engine.mjs";
 import { checkToolAgainstPlan } from "../scripts/lib/intent.mjs";
 import {
   computePolicyHash,
@@ -818,7 +822,7 @@ test("handlePreToolUse denies drift when local plan exists (no backend)", async 
   );
 });
 
-test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", async () => {
+test("a newly registered plan replaces the stale local plan", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
   const { writeFile } = await import("node:fs/promises");
@@ -836,16 +840,16 @@ test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", 
     }),
     "utf8"
   );
-  // Drop a NEW pending plan that allows Bash (simulates register_intent_plan)
-  await writeFile(
-    path.join(tmp, "pending-plan.json"),
-    JSON.stringify({
+  const policyHash = computePolicyHash((await loadPolicyState(config.policyFile)).policy);
+  await storeRegisteredPlan(
+    {
+      sessionId: "multi-1",
       plan: { steps: [{ action: "Bash" }], metadata: { goal: "list etc" } },
       tokenRaw: "",
       allowedActions: ["bash"],
-      registeredAt: Date.now(),
-    }),
-    "utf8"
+      policyHash,
+    },
+    config
   );
   const output = await handlePreToolUse(
     {
@@ -858,8 +862,7 @@ test("handlePreToolUse replaces stale local plan with fresh pending-plan.json", 
   );
   assert.equal(output, null, "Bash should be allowed under the freshly registered plan");
   const runtime = await readJson(config.runtimeFile, {});
-  assert.equal(typeof runtime.sessions["multi-1"].policyHash, "string");
-  assert.ok(runtime.sessions["multi-1"].policyHash.length > 20);
+  assert.equal(runtime.sessions["multi-1"].policyHash, policyHash);
 });
 
 test("handleUserPromptSubmit no longer injects policy_update hints (removed for security)", async () => {
