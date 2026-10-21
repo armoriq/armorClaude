@@ -26,10 +26,6 @@ function bundleCache(config) {
   return caches.get(key);
 }
 
-export function resetV2DecisionState() {
-  caches.clear();
-}
-
 // The cache asks for an axios-shaped client; this one sends the plugin's own
 // auth and client headers like every other backend call.
 function bundleHttpClient(config) {
