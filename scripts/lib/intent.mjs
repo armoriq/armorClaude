@@ -59,7 +59,7 @@ function buildFallbackPlan(payload) {
     plan.steps.push({
       action: payload.toolName.trim(),
       mcp: payload.mcpName || "claude-code",
-      metadata: isPlainObject(payload.toolInput) ? { inputs: payload.toolInput } : {},
+      arguments: isPlainObject(payload.toolInput) ? payload.toolInput : {},
     });
   }
   return plan;
@@ -154,9 +154,6 @@ function findPlanStep(plan, toolName) {
 
 function getStepInputCandidates(step) {
   const candidates = [];
-  if (isPlainObject(step.metadata) && isPlainObject(step.metadata.inputs)) {
-    candidates.push(step.metadata.inputs);
-  }
   if (isPlainObject(step.params)) {
     candidates.push(step.params);
   }
@@ -234,7 +231,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput, strict = false
       return { allowed: true };
     }
   }
-  // Permissive by default: declared metadata.inputs are advisory, not contractual.
+  // Permissive by default: declared step arguments are advisory, not contractual.
   // LLM plans are predictions; treating exact param mismatch as a security
   // violation produces too many false positives (see live screenshot from the
   // user's other Claude Code session). Set strict=true (or

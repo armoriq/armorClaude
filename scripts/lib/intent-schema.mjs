@@ -10,14 +10,10 @@ import { z } from "zod";
 export const PLAN_STEP_SCHEMA = z.object({
   action: z.string().min(1).describe("Tool name (e.g. Read, Edit, Bash, mcp__server__tool)"),
   description: z.string().optional().describe("Why this step is needed"),
-  metadata: z
-    .object({
-      inputs: z
-        .record(z.string(), z.unknown())
-        .optional()
-        .describe("Expected tool parameters for enforcement"),
-    })
-    .optional(),
+  arguments: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe("The tool parameters you expect to pass"),
 });
 
 export const INTENT_PLAN_ZOD = z.object({
@@ -38,7 +34,7 @@ export const INTENT_PLAN_FORMAT = `{
     {
       "action": "<ToolName e.g. Read, Edit, Bash, Grep, Glob, Write, WebFetch>",
       "description": "<why this step is needed>",
-      "metadata": { "inputs": { /* expected tool parameters, optional */ } }
+      "arguments": { /* expected tool parameters, optional */ }
     }
   ]
 }`;
@@ -58,7 +54,7 @@ export function normalizeIntentPlan(parsed) {
       tool: s.action,
       mcp: "claude-code",
       description: s.description || "",
-      metadata: s.metadata || {},
+      arguments: s.arguments || {},
     })),
     metadata: {
       goal: parsed.goal,
