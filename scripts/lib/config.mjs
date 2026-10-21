@@ -234,6 +234,7 @@ export function loadConfig(env = process.env) {
     llmId: "claude-code",
     mcpName: "claude-code",
     userId: profile?.userId ?? "",
+    userEmail: profile?.email ?? "",
     loggedInAt: profile?.loggedInAt ?? "",
     loginHistory: login?.loginHistory ?? null,
     agentId: "claude-code",

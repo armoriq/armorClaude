@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_V2_POLICY_BACKEND } from "./helpers/v2-bundle.mjs";
 import assert from "node:assert/strict";
 import path from "node:path";
 import os from "node:os";
@@ -7,7 +8,7 @@ import { handlePreToolUse } from "../scripts/lib/engine.mjs";
 import { computePolicyHash, loadPolicyState, savePolicyState } from "../scripts/lib/policy.mjs";
 
 const PLAN = {
-  steps: [{ action: "Bash", mcp: "claude-code", metadata: { inputs: { command: "ls" } } }],
+  steps: [{ action: "Bash", mcp: "claude-code", arguments: { command: "ls" } }],
 };
 const BASH = {
   hook_event_name: "PreToolUse",
@@ -22,7 +23,7 @@ function buildConfig(tmpDir, overrides) {
     dataDir: tmpDir,
     policyFile: path.join(tmpDir, "policy.json"),
     runtimeFile: path.join(tmpDir, "runtime.json"),
-    backendEndpoint: "http://127.0.0.1:9",
+    backendEndpoint: NO_V2_POLICY_BACKEND,
     csrgEndpoint: "http://127.0.0.1:9",
     apiKey: "ak_test_12345678",
     verifyStepEndpoint: "",

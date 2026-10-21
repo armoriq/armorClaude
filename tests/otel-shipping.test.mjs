@@ -154,6 +154,11 @@ async function startBackend({
         else setTimeout(answer, exportDelayMs);
         return;
       }
+      if (req.method === "GET" && req.url.startsWith("/policy/bundles/current")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ orgId: "org-test", agents: [] }));
+        return;
+      }
       res.writeHead(404, { "content-type": "application/json" });
       res.end("{}");
     });

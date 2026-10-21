@@ -9,7 +9,7 @@ const PLAN_ID = randomUUID();
 const PLAN = {
   goal: "inspect the repo",
   steps: [
-    { action: "Bash", mcp: "claude-code", metadata: { inputs: { command: "ls" } } },
+    { action: "Bash", mcp: "claude-code", arguments: { command: "ls" } },
     { action: "Bash", mcp: "claude-code" },
     { action: "Skill", mcp: "claude-code" },
   ],
