@@ -4,8 +4,27 @@
     "correctness": "off"
   },
   "env": {
-    "builtin": true,
-    "node": true
+    "builtin": true
+  },
+  "globals": {
+    "process": "readonly",
+    "Buffer": "readonly",
+    "__dirname": "readonly",
+    "__filename": "readonly",
+    "fetch": "readonly",
+    "AbortController": "readonly",
+    "setTimeout": "readonly",
+    "clearTimeout": "readonly",
+    "setInterval": "readonly",
+    "clearInterval": "readonly",
+    "Response": "readonly",
+    "Request": "readonly",
+    "Headers": "readonly",
+    "URL": "readonly",
+    "URLSearchParams": "readonly",
+    "console": "readonly",
+    "structuredClone": "readonly",
+    "TextEncoder": "readonly"
   },
   "ignorePatterns": ["node_modules/", "dist/"],
   "rules": {
