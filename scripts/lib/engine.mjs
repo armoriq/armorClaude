@@ -41,8 +41,8 @@ import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
 import { notSignedIn } from "./config.mjs";
-import { readJson, writePrivateFile } from "./fs-store.mjs";
-import { stat, unlink } from "node:fs/promises";
+import { writePrivateFile } from "./fs-store.mjs";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import { homedir } from "node:os";
 import {
@@ -912,109 +912,6 @@ async function decidePreToolUse(input, config) {
     }
   }
 
-  // --- Consume pending plan from register_intent_plan MCP tool ---
-  // Always consume if a pending file exists — the MCP handler only writes
-  // it when Claude has registered a NEW plan, and stale plans must be
-  // overwritten so each prompt gets its own plan boundary.
-  const sessionPendingPath = sessionId
-    ? path.join(config.dataDir, `pending-plan.${sessionId}.json`)
-    : null;
-  const legacyPendingPath = path.join(config.dataDir, "pending-plan.json");
-  let pendingPath = sessionPendingPath;
-  let pending = sessionPendingPath ? await readJson(sessionPendingPath, null) : null;
-  if (!pending) {
-    pending = await readJson(legacyPendingPath, null);
-    pendingPath = legacyPendingPath;
-  }
-  if (pending && (pending.tokenRaw || pending.plan)) {
-    const pendingPolicyState = await loadPolicyState(config.policyFile);
-    const pendingPolicyHash = computePolicyHash(pendingPolicyState.policy);
-    // --- Auto-reanchor (Phase 3): if the previous plan + token exist for
-    // this session and the new plan hash differs, sign a ReAnchor delta
-    // *before* overwriting the cached plan. The audit log now reads
-    // Commit → ReAnchor → ... instead of orphan Commits.
-    if (config.autoReanchor && pending.plan) {
-      const priorSession = getSession(runtimeState, sessionId);
-      const priorTokenRaw = priorSession?.intentTokenRaw;
-      const priorPlan = priorSession?.plan;
-      if (priorTokenRaw && priorPlan) {
-        const localPriorHash = sha256Hex(JSON.stringify(priorPlan));
-        const localNextHash = sha256Hex(JSON.stringify(pending.plan));
-        if (localPriorHash !== localNextHash) {
-          let priorTokenObj;
-          try {
-            priorTokenObj = JSON.parse(priorTokenRaw);
-          } catch {
-            priorTokenObj = null;
-          }
-          if (priorTokenObj) {
-            const canonicalPriorHash =
-              priorTokenObj?.planHash || priorTokenObj?.rawToken?.token?.plan_hash || "";
-            // Prefer the canonical planHash from pending.tokenRaw (if a new
-            // token was minted alongside the new plan) so trustOpsLog hashes
-            // stay cross-referencable with backend trust_deltas rows even
-            // when the SDK reanchor call fails. sha256(JSON.stringify(plan))
-            // is a last-resort identifier — different from the CSRG canonical
-            // hash and therefore not auditable against TrustDelta.payload.
-            let canonicalNextHash = "";
-            if (pending.tokenRaw && typeof pending.tokenRaw === "string") {
-              try {
-                const pendingTokenObj = JSON.parse(pending.tokenRaw);
-                canonicalNextHash =
-                  pendingTokenObj?.planHash || pendingTokenObj?.rawToken?.token?.plan_hash || "";
-              } catch {
-                // ignore — fall through to localNextHash below
-              }
-            }
-            const result = await reanchorViaSdk({
-              getClient: getSdkClient,
-              config,
-              intentToken: priorTokenObj,
-              updatedPlan: pending.plan,
-              reason: "armorclaude:plan-delta",
-            });
-            appendTrustOp(runtimeState, sessionId, {
-              operation: "ReAnchor",
-              trustId: result.trustId,
-              fromHash: result.fromHash || canonicalPriorHash || localPriorHash,
-              toHash: result.toHash || canonicalNextHash || localNextHash,
-              reason: "plan delta detected at PreToolUse",
-              ok: result.ok,
-            });
-            debugLog(
-              config,
-              `[trust] auto-reanchor ${result.ok ? "ok" : "failed"} prior=${localPriorHash.slice(0, 12)} new=${localNextHash.slice(0, 12)} trustId=${result.trustId || "n/a"}`
-            );
-            if (!result.ok) {
-              debugLog(
-                config,
-                `[trust] reanchor error: ${result.error || "unknown"}${result.status ? ` status=${result.status}` : ""}${result.body ? ` body=${JSON.stringify(result.body).slice(0, 300)}` : ""}`
-              );
-            }
-          }
-        }
-      }
-    }
-
-    upsertSession(runtimeState, sessionId, {
-      intentTokenRaw:
-        pending.intentPolicyCompilerVersion === INTENT_POLICY_COMPILER_VERSION
-          ? pending.tokenRaw || ""
-          : "",
-      plan: pending.plan,
-      planCaptured: false,
-      allowedActions: Array.isArray(pending.allowedActions) ? pending.allowedActions : [],
-      expiresAt: pending.expiresAt,
-      policyHash: pending.policyHash || pendingPolicyHash,
-      intentPolicyCompilerVersion: INTENT_POLICY_COMPILER_VERSION,
-      // Reset per-token execution tracking when a new plan replaces the old.
-      intentExecution: undefined,
-    });
-    await saveRuntimeState(config.runtimeFile, runtimeState);
-    await unlink(pendingPath).catch(() => {});
-    debugLog(config, "consumed pending plan from register_intent_plan");
-  }
-
   // --- Static policy evaluation ---
   const policyState = await loadPolicyState(config.policyFile);
   const currentPolicyHash = computePolicyHash(policyState.policy);
@@ -1444,6 +1341,74 @@ async function decidePreToolUse(input, config) {
   }
   // Allowed. Surface the one-time upgrade nudge if we degraded the remote layer.
   return billingNotice ? allowWithNotice(billingNotice) : null;
+}
+
+export async function storeRegisteredPlan(registration, config) {
+  const { sessionId } = registration;
+  const runtimeState = await loadRuntimeState(config.runtimeFile);
+  upsertSession(runtimeState, sessionId, {
+    intentTokenRaw: registration.tokenRaw,
+    plan: registration.plan,
+    planCaptured: false,
+    allowedActions: registration.allowedActions,
+    expiresAt: registration.expiresAt,
+    policyHash: registration.policyHash,
+    intentPolicyCompilerVersion: INTENT_POLICY_COMPILER_VERSION,
+    intentExecution: undefined,
+  });
+  if (registration.trustOp) appendTrustOp(runtimeState, sessionId, registration.trustOp);
+  await saveRuntimeState(config.runtimeFile, runtimeState);
+}
+
+function parseToken(tokenRaw) {
+  try {
+    return JSON.parse(tokenRaw);
+  } catch {
+    return null;
+  }
+}
+
+const canonicalPlanHash = (token) => token?.planHash || token?.rawToken?.token?.plan_hash || "";
+
+function reanchorOp(result, priorToken, tokenRaw, priorHash, nextHash) {
+  return {
+    operation: "ReAnchor",
+    trustId: result.trustId,
+    fromHash: result.fromHash || canonicalPlanHash(priorToken) || priorHash,
+    toHash: result.toHash || canonicalPlanHash(parseToken(tokenRaw)) || nextHash,
+    reason: "plan delta detected at register_intent_plan",
+    ok: result.ok,
+  };
+}
+
+function logReanchor(config, result, priorHash, nextHash) {
+  debugLog(
+    config,
+    `[trust] auto-reanchor ${result.ok ? "ok" : "failed"} prior=${priorHash.slice(0, 12)} new=${nextHash.slice(0, 12)} trustId=${result.trustId || "n/a"}`
+  );
+  if (!result.ok) {
+    debugLog(
+      config,
+      `[trust] reanchor error: ${result.error || "unknown"}${result.status ? ` status=${result.status}` : ""}${result.body ? ` body=${JSON.stringify(result.body).slice(0, 300)}` : ""}`
+    );
+  }
+}
+
+export async function reanchorPriorPlan(prior, plan, tokenRaw, config) {
+  const priorToken = prior?.plan ? parseToken(prior.intentTokenRaw) : null;
+  if (!priorToken) return undefined;
+  const priorHash = sha256Hex(JSON.stringify(prior.plan));
+  const nextHash = sha256Hex(JSON.stringify(plan));
+  if (priorHash === nextHash) return undefined;
+  const result = await reanchorViaSdk({
+    getClient: getSdkClient,
+    config,
+    intentToken: priorToken,
+    updatedPlan: plan,
+    reason: "armorclaude:plan-delta",
+  });
+  logReanchor(config, result, priorHash, nextHash);
+  return reanchorOp(result, priorToken, tokenRaw, priorHash, nextHash);
 }
 
 // ---------------------------------------------------------------------------

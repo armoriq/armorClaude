@@ -20,7 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensurePrivateDirSync, openPrivateSync } from "./fs-store.mjs";
 import { capDaemonLog, daemonLogPath } from "./daemon-log.mjs";
-import { DAEMON_VERSION } from "./daemon-version.mjs";
+import { DAEMON_PROTOCOL, DAEMON_VERSION } from "./daemon-version.mjs";
 import { REQUEST_CONFIG_KEYS } from "./config.mjs";
 import { loginTag } from "./audit-wal.mjs";
 import { sanitizeParams } from "./common.mjs";
@@ -138,6 +138,9 @@ async function shutdownDaemon(socketPath) {
   }
 }
 
+const isCurrentDaemon = (ping) =>
+  ping?.version === DAEMON_VERSION && ping?.protocol === DAEMON_PROTOCOL;
+
 async function ensureFreshDaemonSocket(socketPath, config) {
   let sock;
   try {
@@ -151,7 +154,7 @@ async function ensureFreshDaemonSocket(socketPath, config) {
 
   try {
     const ping = await exchange(sock, { type: "ping", reqId: makeReqId() });
-    if (ping?.version === DAEMON_VERSION) {
+    if (isCurrentDaemon(ping)) {
       return sock;
     }
   } catch {
@@ -295,6 +298,27 @@ export async function enqueueAuditViaDaemon({ dto, config }) {
     } catch {
       /* empty */
     }
+  }
+}
+
+export async function registerPlanViaDaemon({ registration, config }) {
+  let sock;
+  try {
+    sock = await ensureFreshDaemonSocket(daemonSocketPath(config.dataDir), config);
+  } catch (err) {
+    return { stored: false, reason: err?.message ?? String(err) };
+  }
+  try {
+    const reply = await exchange(sock, {
+      type: "register_plan",
+      registration,
+      reqId: makeReqId(),
+      configEnv: Object.fromEntries(REQUEST_CONFIG_KEYS.map((k) => [k, config[k]])),
+    });
+    if (reply?.error) throw new Error(`the daemon could not store the plan: ${reply.error}`);
+    return { stored: true };
+  } finally {
+    sock.destroy();
   }
 }
 

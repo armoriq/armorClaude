@@ -1,9 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import path from "node:path";
 import { z } from "zod";
 import { loadConfig } from "./lib/config.mjs";
-import { ensurePrivateDir, writeJson } from "./lib/fs-store.mjs";
+import { ensurePrivateDir } from "./lib/fs-store.mjs";
+import { appendDaemonLog } from "./lib/daemon-log.mjs";
+import { registerPlanViaDaemon } from "./lib/daemon-client.mjs";
+import { reanchorPriorPlan, storeRegisteredPlan } from "./lib/engine.mjs";
 import { extractAllowedActions, getSdkClient, requestIntent } from "./lib/intent.mjs";
 import { delegateSubtreeViaSdk, reanchorViaSdk, revokeViaSdk } from "./lib/iap-service.mjs";
 import {
@@ -11,11 +13,82 @@ import {
   appendTrustOp,
   saveRuntimeState,
   getActiveSessionId,
+  getSession,
 } from "./lib/runtime-state.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { computePolicyHash, loadPolicyState } from "./lib/policy.mjs";
 
-const INTENT_POLICY_COMPILER_VERSION = "sdk-csrg-policy-v1";
+function noteInProcessStore(config, reason) {
+  try {
+    appendDaemonLog(
+      config.dataDir,
+      `[armorclaude] daemon unreachable, storing the registered plan in-process pid=${process.pid} at=${new Date().toISOString()}: ${reason}`
+    );
+  } catch (err) {
+    process.stderr.write(`[armorclaude] daemon.log write failed: ${err?.message ?? err}\n`);
+  }
+}
+
+async function storePlan(registration, config) {
+  if (config.daemonEnabled) {
+    const viaDaemon = await registerPlanViaDaemon({ registration, config });
+    if (viaDaemon.stored) return;
+    noteInProcessStore(config, viaDaemon.reason);
+  }
+  await storeRegisteredPlan(registration, config);
+}
+
+// Resolve the ACTIVE Claude Code session id. Claude Code does not expose
+// session_id to MCP servers (no env var, no .mcp.json interpolation), so
+// read the pointer the engine stamps into runtime.json on every hook.
+// Honor CLAUDE_CODE_SESSION_ID first in case a future Claude Code sets it.
+async function resolveSessionId(config) {
+  if (process.env.CLAUDE_CODE_SESSION_ID) return process.env.CLAUDE_CODE_SESSION_ID;
+  try {
+    return getActiveSessionId(await loadRuntimeState(config.runtimeFile));
+  } catch {
+    return "";
+  }
+}
+
+async function mintIntent(config, payload) {
+  if (!config.apiKey) return { skipped: true };
+  try {
+    return await requestIntent(config, payload);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[armorclaude] intent capture in register_intent_plan: ${msg}\n`);
+    return { skipped: true };
+  }
+}
+
+async function buildRegistration(config, goal, plan, sessionId) {
+  const policyState = await loadPolicyState(config.policyFile);
+  const policyHash = computePolicyHash(policyState.policy);
+  const intentResult = await mintIntent(config, {
+    prompt: goal,
+    plan,
+    session_id: sessionId,
+    policy_hash: policyHash,
+    policy: policyState.policy,
+    validitySeconds: config.validitySeconds,
+    metadata: { source: "claude-code", planning: "claude-registered" },
+  });
+  const registeredPlan = intentResult.plan || plan;
+  const tokenRaw = intentResult.tokenRaw || "";
+  const prior = config.autoReanchor
+    ? getSession(await loadRuntimeState(config.runtimeFile), sessionId)
+    : undefined;
+  return {
+    sessionId,
+    plan: registeredPlan,
+    tokenRaw,
+    allowedActions: Array.from(extractAllowedActions(registeredPlan)),
+    expiresAt: intentResult.expiresAt,
+    policyHash,
+    trustOp: await reanchorPriorPlan(prior, registeredPlan, tokenRaw, config),
+  };
+}
 
 function toTextResult(text, extra = {}) {
   return {
@@ -147,56 +220,16 @@ async function run() {
       const config = loadConfig();
       const plan = normalizeIntentPlan(parsed.data);
 
-      // Resolve the ACTIVE Claude Code session id. Claude Code does not expose
-      // session_id to MCP servers (no env var, no .mcp.json interpolation), so
-      // read the pointer the engine stamps into runtime.json on every hook.
-      // Honor CLAUDE_CODE_SESSION_ID first in case a future Claude Code sets it.
-      let sessionId = process.env.CLAUDE_CODE_SESSION_ID || "";
+      const sessionId = await resolveSessionId(config);
       if (!sessionId) {
-        try {
-          const rs = await loadRuntimeState(config.runtimeFile);
-          sessionId = getActiveSessionId(rs);
-        } catch {
-          /* runtime file unreadable — fall back to session-less pending file */
-        }
+        return toTextResult(
+          "Plan rejected: no active ArmorClaude session. Send a prompt in Claude Code first, then register the plan again."
+        );
       }
+      const registration = await buildRegistration(config, parsed.data.goal, plan, sessionId);
+      await storePlan(registration, config);
 
-      // Send to ArmorIQ for signed intent token (if SDK/endpoint configured)
-      let intentResult = { skipped: true };
-      let policyHash = "";
-      if (config.apiKey) {
-        try {
-          const policyState = await loadPolicyState(config.policyFile);
-          policyHash = computePolicyHash(policyState.policy);
-          intentResult = await requestIntent(config, {
-            prompt: parsed.data.goal,
-            plan,
-            session_id: sessionId || "mcp",
-            policy_hash: policyHash,
-            policy: policyState.policy,
-            validitySeconds: config.validitySeconds,
-            metadata: { source: "claude-code", planning: "claude-registered" },
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          process.stderr.write(`[armorclaude] intent capture in register_intent_plan: ${msg}\n`);
-        }
-      }
-
-      const pendingFile = sessionId ? `pending-plan.${sessionId}.json` : "pending-plan.json";
-      const pendingPath = path.join(config.dataDir, pendingFile);
-      await writeJson(pendingPath, {
-        sessionId: sessionId || undefined,
-        plan: intentResult.plan || plan,
-        tokenRaw: intentResult.tokenRaw || "",
-        allowedActions: Array.from(extractAllowedActions(intentResult.plan || plan)),
-        expiresAt: intentResult.expiresAt,
-        policyHash,
-        intentPolicyCompilerVersion: INTENT_POLICY_COMPILER_VERSION,
-        registeredAt: Date.now(),
-      });
-
-      const tokenInfo = intentResult.tokenRaw
+      const tokenInfo = registration.tokenRaw
         ? `Token valid ${config.validitySeconds}s.`
         : "No ArmorIQ backend configured — plan stored locally.";
 
@@ -220,11 +253,6 @@ async function run() {
     const runtimeState = await loadRuntimeState(config.runtimeFile);
     const sessions = runtimeState.sessions || {};
 
-    // Prefer the current Claude Code window's session id when set. With
-    // multiple concurrent windows the "most-recent updatedAt" heuristic
-    // would route trust_revoke / trust_reanchor / trust_delegate against
-    // the wrong window's token. CLAUDE_CODE_SESSION_ID is stamped on the
-    // per-session pending-plan file (#43) and is reliable here.
     // Prefer an explicit env var (future-proofing), then the active-session
     // pointer the engine stamps into runtime.json on every hook. Claude Code
     // does not expose session_id to MCP servers, so the pointer is the reliable

@@ -47,6 +47,7 @@ import {
   handlePostToolUseFailure,
   handleStop,
   handleSessionEnd,
+  storeRegisteredPlan,
 } from "./lib/engine.mjs";
 import {
   journalHook,
@@ -55,7 +56,7 @@ import {
   obsRetryBacklog,
   obsServeAsDaemon,
 } from "./lib/observability.mjs";
-import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
+import { DAEMON_PROTOCOL, DAEMON_VERSION } from "./lib/daemon-version.mjs";
 import { launchLiveUsage } from "./lib/usage-sync-launch.mjs";
 import { withReloginNotice } from "./lib/relogin.mjs";
 
@@ -348,6 +349,19 @@ const server = createServer((socket) => {
   });
 });
 
+async function registerPlan(msg) {
+  const registration = msg.registration ?? {};
+  if (typeof registration.sessionId !== "string" || !registration.sessionId) {
+    return { error: "register_plan needs a session id" };
+  }
+  const effectiveConfig = effectiveConfigFor(msg.configEnv);
+  const stored = await withSessionLock(registration.sessionId, async () => {
+    await storeRegisteredPlan(registration, effectiveConfig);
+    return true;
+  });
+  return stored ? { ok: true } : { error: "register_plan failed" };
+}
+
 async function handleLine(rawLine, socket) {
   bumpActivity();
   if (!rawLine.trim()) return;
@@ -362,8 +376,13 @@ async function handleLine(rawLine, socket) {
   switch (msg?.type) {
     case "ping": {
       socket.write(
-        JSON.stringify({ reqId, ok: true, version: DAEMON_VERSION, uptime: process.uptime() }) +
-          "\n"
+        JSON.stringify({
+          reqId,
+          ok: true,
+          version: DAEMON_VERSION,
+          protocol: DAEMON_PROTOCOL,
+          uptime: process.uptime(),
+        }) + "\n"
       );
       return;
     }
@@ -378,6 +397,10 @@ async function handleLine(rawLine, socket) {
         if (config.debug)
           process.stderr.write(`[daemon] enqueueAudit failed: ${err?.message ?? err}\n`);
       }
+      return;
+    }
+    case "register_plan": {
+      socket.write(JSON.stringify({ reqId, ...(await registerPlan(msg)) }) + "\n");
       return;
     }
     case "shutdown": {
