@@ -9,6 +9,11 @@ function hasBackend(config) {
   return Boolean(config.apiKey && config.backendEndpoint);
 }
 
+/** One call's v2 decision from the backend, which also spends an approved hold. */
+export async function enforceCall(config, body) {
+  return jsonRequest(config, "POST", "/iap/sdk/enforce", body);
+}
+
 export async function autoRegisterMcp(config, serverName) {
   if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
   try {

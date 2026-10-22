@@ -58,6 +58,7 @@ import { sha256Hex } from "./common.mjs";
 import { invokesPolicyAdmin, writesProtectedPath } from "./shell-guard.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
+import { decideV2, resolveV2Hold } from "./v2-decision.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
 
@@ -854,8 +855,18 @@ async function decidePreToolUse(input, config) {
     return null;
   }
 
+  // --- Policy v2: the org's verdict for this exact call, from the raw input
+  //     (sanitizeParams truncates long values, which a rule could miss). ---
+  const v2 = config.apiKey ? await decideV2(config, toolName, input.tool_input) : null;
+  if (v2?.action === "block") {
+    const reason = `ArmorIQ policy blocked ${toolName} (${v2.reason})`;
+    if (shouldDeny(config)) return denyPreTool("policy_v2_block", reason);
+    const { appendDaemonLog } = await import("./daemon-log.mjs");
+    appendDaemonLog(config.dataDir, `[armorclaude] monitor: ${reason}`);
+  }
+
   const readOnlyPolicyTools = new Set(["read", "grep", "glob", "websearch", "webfetch"]);
-  if (readOnlyPolicyTools.has(norm)) {
+  if (readOnlyPolicyTools.has(norm) && v2?.action !== "hold") {
     const safePolicyState = await loadPolicyState(config.policyFile);
     const safePolicyDecision = await evaluateConfiguredPolicy(
       config,
@@ -1337,7 +1348,7 @@ async function decidePreToolUse(input, config) {
   // --- Local plan enforcement (no backend / no token) ---
   // When a plan was registered via register_intent_plan but ArmorIQ is not
   // configured, enforce the plan locally: tool must be in plan, and params
-  // (if declared in step.metadata.inputs) must match.
+  // (if declared in step.arguments) must match.
   let localPlanMatched = false;
   if (!intentTokenRaw && localPlan && typeof localPlan === "object") {
     const localCheck = checkToolAgainstPlan({
@@ -1400,6 +1411,23 @@ async function decidePreToolUse(input, config) {
   // --- Record tool for discovery ---
   upsertDiscoveredTool(runtimeState, toolName);
   await saveRuntimeState(config.runtimeFile, runtimeState);
+  if (v2?.action === "hold") {
+    const v2Session = getSession(runtimeState, sessionId) || {};
+    const held = await resolveV2Hold(config, {
+      intentTokenRaw,
+      toolName,
+      toolArgs: input.tool_input,
+      session: v2Session,
+    });
+    if (v2Session.v2Delegations) {
+      upsertSession(runtimeState, sessionId, { v2Delegations: v2Session.v2Delegations });
+      await saveRuntimeState(config.runtimeFile, runtimeState);
+    }
+    if (held.action === "block" && shouldDeny(config)) {
+      return denyPreTool("policy_v2_block", held.reason);
+    }
+    if (held.action === "hold") return askPreTool("policy_v2_hold", held.reason);
+  }
   if (mcpApprovalReason) {
     return askPreTool("mcp_server_unapproved", mcpApprovalReason);
   }
