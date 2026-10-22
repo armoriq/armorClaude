@@ -8,7 +8,7 @@
   "scripts": {
     "test": "node --test --import ./tests/setup/no-network.mjs",
     "check": "node --test --import ./tests/setup/no-network.mjs",
-    "lint": "eslint .",
+    "lint": "oxlint --report-unused-disable-directives",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "build": "echo 'no build step'",
@@ -25,10 +25,9 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "eslint": "^9.0.0",
-    "eslint-config-prettier": "^9.1.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
     "husky": "^9.1.7",
-    "prettier": "^3.2.0",
-    "@opentelemetry/sdk-trace-node": "^2.10.0"
+    "oxlint": "1.89.0",
+    "prettier": "^3.2.0"
   }
 }
