@@ -39,7 +39,12 @@ export async function startBackend(routes = {}) {
         res.end(JSON.stringify({ written: body.rows.length, failures: [] }));
         return;
       }
-      const [status, reply] = routes[route]?.(body) ?? [404, {}];
+      const handler = routes[route] ?? routes[`${req.method} ${req.url.split("?")[0]}`];
+      const [status, reply] =
+        handler?.(body, req) ??
+        (route.startsWith("GET /policy/bundles/current")
+          ? [200, { orgId: "org-test", agents: [] }]
+          : [404, {}]);
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(reply));
     });

@@ -28,7 +28,7 @@ export const askPreTool = (code, reason) => preToolDecision(code, "ask", reason)
  * @param {string} reason            free-form explanation
  * @param {object} args
  * @param {string} args.toolName     the tool that was blocked (will end up in the suggested plan)
- * @param {object} [args.toolInput]  the exact arguments — will be embedded into metadata.inputs
+ * @param {object} [args.toolInput]  the exact arguments — will be embedded as the step's arguments
  * @param {string} [args.goal]       inferred goal from session.lastPrompt or the tool name
  * @param {object} [args.knownPlan]  the currently-cached plan (if any) — we'll suggest extending it
  */
@@ -39,9 +39,9 @@ export function denyPreToolWithHint(code, reason, args = {}) {
     description: `Use ${toolName} to ${goal || "make progress on the user's task"}`,
   };
   if (toolInput && typeof toolInput === "object" && Object.keys(toolInput).length > 0) {
-    // Don't pin params strictly — Phase 3 made metadata.inputs advisory.
-    // Include them for documentation only.
-    newStep.metadata = { inputs: toolInput };
+    // Plan arguments are advisory to the local plan check; the backend's
+    // v2 plan check reads them.
+    newStep.arguments = toolInput;
   }
   let suggestedPlan;
   if (knownPlan && Array.isArray(knownPlan.steps) && knownPlan.steps.length > 0) {

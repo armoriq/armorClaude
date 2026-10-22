@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_V2_POLICY_BACKEND } from "./helpers/v2-bundle.mjs";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
@@ -26,7 +27,7 @@ function buildConfig(tmpDir, overrides = {}) {
     dataDir: tmpDir,
     policyFile: path.join(tmpDir, "policy.json"),
     runtimeFile: path.join(tmpDir, "runtime.json"),
-    backendEndpoint: "http://127.0.0.1:1",
+    backendEndpoint: NO_V2_POLICY_BACKEND,
     csrgEndpoint: "http://127.0.0.1:1",
     apiKey: "test-key",
     useSdkIntent: false,

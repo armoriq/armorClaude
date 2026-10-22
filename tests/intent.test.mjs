@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_V2_POLICY_BACKEND } from "./helpers/v2-bundle.mjs";
 import assert from "node:assert/strict";
 import path from "node:path";
 import os from "node:os";
@@ -20,7 +21,7 @@ function buildConfig(tmpDir, overrides = {}) {
     dataDir: tmpDir,
     policyFile: path.join(tmpDir, "policy.json"),
     runtimeFile: path.join(tmpDir, "runtime.json"),
-    backendEndpoint: "http://127.0.0.1:3000",
+    backendEndpoint: NO_V2_POLICY_BACKEND,
     csrgEndpoint: "http://127.0.0.1:8000",
     apiKey: "ak_test_12345678",
     useSdkIntent: false,
@@ -68,8 +69,8 @@ test("parseCsrgProofHeaders rejects invalid JSON proof header", () => {
 test("resolveCsrgProofsFromToken selects param-matched step for duplicate tools", () => {
   const plan = {
     steps: [
-      { action: "write", metadata: { inputs: { file_path: "a.txt" } } },
-      { action: "write", metadata: { inputs: { file_path: "b.txt" } } },
+      { action: "write", arguments: { file_path: "a.txt" } },
+      { action: "write", arguments: { file_path: "b.txt" } },
     ],
   };
   const token = {
@@ -185,7 +186,7 @@ test("checkIntentTokenPlan: parameter mismatch is advisory by default (Phase 3 h
   // the LLM couldn't guess exact bash commands. We now allow by default.
   const token = {
     plan: {
-      steps: [{ action: "Write", metadata: { inputs: { file_path: "allowed.txt" } } }],
+      steps: [{ action: "Write", arguments: { file_path: "allowed.txt" } }],
     },
     expiresAt: Math.floor(Date.now() / 1000) + 600,
   };
@@ -201,7 +202,7 @@ test("checkIntentTokenPlan: parameter mismatch is advisory by default (Phase 3 h
 test("checkToolAgainstPlan with strict=true blocks param mismatch (opt-in)", async () => {
   const { checkToolAgainstPlan } = await import("../scripts/lib/intent.mjs");
   const plan = {
-    steps: [{ action: "Bash", metadata: { inputs: { command: "npm test" } } }],
+    steps: [{ action: "Bash", arguments: { command: "npm test" } }],
   };
   const lax = checkToolAgainstPlan({ plan, toolName: "Bash", toolInput: { command: "rm -rf /" } });
   assert.equal(lax.allowed, true, "default lax mode allows mismatched params");
@@ -293,8 +294,8 @@ test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplic
     jwtToken: "jwt-token-xyz",
     plan: {
       steps: [
-        { action: "write", metadata: { inputs: { file_path: "a.txt" } } },
-        { action: "write", metadata: { inputs: { file_path: "b.txt" } } },
+        { action: "write", arguments: { file_path: "a.txt" } },
+        { action: "write", arguments: { file_path: "b.txt" } },
       ],
     },
     step_proofs: [
@@ -326,7 +327,8 @@ test("handlePreToolUse resolves CSRG proofs from token step_proofs across duplic
 
   const originalFetch = globalThis.fetch;
   const seenStepIndices = [];
-  globalThis.fetch = async (_url, options) => {
+  globalThis.fetch = async (url, options) => {
+    if (!String(url).endsWith("/iap/verify-step")) return originalFetch(url, options);
     const payload = JSON.parse(options.body);
     seenStepIndices.push(payload.step_index);
     return new Response(JSON.stringify({ allowed: true, reason: "ok" }), {

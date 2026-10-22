@@ -11,7 +11,7 @@ test("INTENT_PLAN_ZOD accepts valid plan", () => {
     goal: "Read and summarize",
     steps: [
       { action: "Read", description: "Read the file" },
-      { action: "Edit", description: "Edit it", metadata: { inputs: { file_path: "a.txt" } } },
+      { action: "Edit", description: "Edit it", arguments: { file_path: "a.txt" } },
     ],
   });
   assert.ok(result.success);
@@ -51,7 +51,7 @@ test("normalizeIntentPlan produces correct shape", () => {
   assert.equal(plan.steps[0].action, "Bash");
   assert.equal(plan.steps[0].mcp, "claude-code");
   assert.equal(plan.steps[1].action, "Read");
-  assert.deepEqual(plan.steps[1].metadata, {});
+  assert.deepEqual(plan.steps[1].arguments, {});
 });
 
 test("INTENT_PLAN_FORMAT is a non-empty string", () => {
