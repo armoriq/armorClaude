@@ -443,7 +443,7 @@ async function claimAuditedStep(config, runtimeState, sessionId, toolName, input
   const session = getSession(runtimeState, sessionId);
   const used = auditedSteps(session, session.intentTokenRaw);
   const step = pickStepIndex(session.plan, toolName, inputs, null, used);
-  if (step === null) return 0;
+  if (step === null) return null;
   used.add(step);
   upsertSession(runtimeState, sessionId, {
     auditedSteps: { tokenHash: sha256Hex(session.intentTokenRaw), indices: [...used] },
@@ -1625,7 +1625,7 @@ export async function handlePostToolUseFailure(input, config) {
 
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
     const used = auditedSteps(session, intentTokenRaw);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs, 0, used);
+    const stepIdx = pickStepIndex(session.plan, toolName, inputs, null, used);
     const dto = {
       ...auditLink(config, sessionId, intentTokenRaw),
       step_index: stepIdx,
