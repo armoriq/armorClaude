@@ -106,13 +106,7 @@ test(
     );
     assert.equal(code, 0, out);
     const log = readFileSync(calls, "utf8");
-    assert.match(
-      log,
-      new RegExp(
-        `^armoriq-dev HOME=${home} login --product armorclaude --backend https://api.armoriq.ai$`,
-        "m"
-      )
-    );
+    assert.match(log, new RegExp(`^armoriq-dev HOME=${home} login --product armorclaude$`, "m"));
     assert.match(log, /^npm HOME=\S+ install -g @armoriq\/sdk-dev@latest /m);
     assert.doesNotMatch(log, /^armoriq HOME=/m);
     assert.match(out, /armoriq-dev CLI ready/);
@@ -123,10 +117,7 @@ test("the installer points at armoriq-dev when it cannot prompt", async () => {
   const { home, calls, env } = sandbox();
   const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
   assert.equal(code, 0, out);
-  assert.match(
-    out,
-    /Run armoriq-dev login --product armorclaude --backend https:\/\/api\.armoriq\.ai to connect later\./
-  );
+  assert.match(out, /Run armoriq-dev login --product armorclaude to connect later\./);
   assert.doesNotMatch(out, /\barmoriq login\b/);
   assert.doesNotMatch(readFileSync(calls, "utf8"), /^armoriq(-dev)? HOME=/m);
 });

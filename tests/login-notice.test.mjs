@@ -16,7 +16,7 @@ import {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
 const loginLine = (backend) =>
-  `No ArmorClaude login for ${backend}. Run: armoriq-dev login --product armorclaude --backend ${backend}`;
+  `No ArmorClaude login for ${backend}. Run: armoriq-dev login --product armorclaude`;
 
 function pluginEnv(home, dataDir, backend) {
   const target =

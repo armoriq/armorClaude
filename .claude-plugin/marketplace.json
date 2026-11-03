@@ -29,7 +29,7 @@
         "url": "https://github.com/armoriq/armorClaude.git",
         "ref": "dev"
       },
-      "description": "Intent-based security enforcement for Claude Code, dev variant. Talks to the production backend (api.armoriq.ai) by default; ARMORIQ_ENV=staging or ARMORIQ_ENV=development switch to staging or a local stack. Tracks the dev branch HEAD; install only if you're contributing to armorClaude or running a local stack.",
+      "description": "Intent-based security enforcement for Claude Code — dev variant. Staging/local toggleable via ARMORIQ_ENV (development → 127.0.0.1; default → staging-api.armoriq.ai). Tracks the dev branch HEAD; install only if you're contributing to armorClaude or running a local stack.",
       "category": "security",
       "tags": ["security", "policy", "audit", "intent", "armoriq", "mcp", "dev"],
       "homepage": "https://armoriq.ai/tools/armorclaude",
