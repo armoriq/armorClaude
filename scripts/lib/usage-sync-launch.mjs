@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { deviceIdentity } from "./device.mjs";
 import { ensurePrivateDirSync, openPrivateSync, writePrivateFileSync } from "./fs-store.mjs";
+import { claudeConfigDir } from "./claude-paths.mjs";
 import { isSessionId, liveDir, liveTranscript, projectsDir } from "./live-usage.mjs";
 import { turnStore } from "./turn-latency.mjs";
 import {
@@ -51,6 +52,8 @@ function childEnv(config) {
     CLAUDE_PLUGIN_OPTION_API_KEY: config.apiKey,
     ARMORIQ_ENV: config.armoriqEnv,
     ARMORIQ_BACKEND_URL: config.backendEndpoint,
+    // Children run from dataDir, so a relative value would resolve elsewhere.
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR?.trim() && claudeConfigDir(),
   };
   const env = { ...process.env };
   for (const [key, value] of Object.entries(overrides)) if (value) env[key] = value;
