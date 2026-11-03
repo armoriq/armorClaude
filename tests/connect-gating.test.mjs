@@ -9,7 +9,7 @@ import { handleSessionStart } from "../scripts/lib/engine.mjs";
 import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
 
 const PROD = "https://api.armoriq.ai";
-const LOGIN_LINE = `No ArmorClaude login for ${PROD}. Run: armoriq-dev login --product armorclaude`;
+const LOGIN_LINE = `No ArmorClaude login for ${PROD}. Run: armoriq-dev login --product armorclaude --backend ${PROD}`;
 
 // ---------------------------------------------------------------------------
 // Enforcement is gated on being "connected" (a usable, SDK-format API key).
@@ -98,6 +98,10 @@ test("the login command names the CLI the installed SDK package declares", () =>
   const { bin } = createRequire(import.meta.url)("@armoriq/sdk-dev/package.json");
   assert.deepEqual(Object.keys(bin), ["armoriq-dev"]);
   assert.equal(loginCommand(), "armoriq-dev login --product armorclaude");
+  assert.equal(
+    loginCommand(PROD),
+    "armoriq-dev login --product armorclaude --backend https://api.armoriq.ai"
+  );
 });
 
 test("the SDK package must declare exactly one CLI by name, or the login command fails", () => {

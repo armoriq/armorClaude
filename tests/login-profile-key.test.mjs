@@ -12,6 +12,7 @@ import {
   copyGoldenCredentials,
   GOLDEN_CREDENTIALS,
   loadConfigWithLogins,
+  PRODUCTION,
   STAGING,
   tempHome,
   withHome,
@@ -24,8 +25,8 @@ const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
 const usageWorker = path.join(repoRoot, "scripts", "usage-worker.mjs");
 const golden = JSON.parse(readFileSync(GOLDEN_CREDENTIALS, "utf8")).profiles;
 const LOGIN_KEY = "ak_live_loginprofile00000000000000";
-const RELOGIN_NOTICE =
-  "ArmorIQ: sign in again to keep sending armorclaude data. Run: armoriq-dev login --product armorclaude --force";
+const reloginNotice = (backend) =>
+  `ArmorIQ: sign in again to keep sending armorclaude data. Run: armoriq-dev login --product armorclaude --backend ${backend} --force`;
 
 test("ARMORIQ_API_KEY and the API_KEY plugin option are not key sources", () => {
   const env = {
@@ -35,13 +36,13 @@ test("ARMORIQ_API_KEY and the API_KEY plugin option are not key sources", () => 
   const signedOut = loadConfigWithLogins([], env);
   assert.equal(signedOut.apiKey, "");
   assert.equal(signedOut.unconfigured, true);
-  const signedIn = loadConfigWithLogins([{ backend: STAGING, apiKey: LOGIN_KEY }], env);
+  const signedIn = loadConfigWithLogins([{ backend: PRODUCTION, apiKey: LOGIN_KEY }], env);
   assert.equal(signedIn.apiKey, LOGIN_KEY);
 });
 
 test("ARMORIQ_ORG_ID does not change the org sent with the login key", () => {
   const config = loadConfigWithLogins(
-    [{ backend: STAGING, apiKey: LOGIN_KEY, orgId: "org-of-the-key" }],
+    [{ backend: PRODUCTION, apiKey: LOGIN_KEY, orgId: "org-of-the-key" }],
     { ARMORIQ_ORG_ID: "org-other" }
   );
   assert.equal(config.apiKey, LOGIN_KEY);
@@ -59,7 +60,12 @@ test("a credentials file in the old single-login shape is not used", () => {
   const file = path.join(home, ".armoriq", "credentials.json");
   writeFileSync(
     file,
-    JSON.stringify({ apiKey: LOGIN_KEY, orgId: "org-1", product: "armorclaude", backend: STAGING })
+    JSON.stringify({
+      apiKey: LOGIN_KEY,
+      orgId: "org-1",
+      product: "armorclaude",
+      backend: PRODUCTION,
+    })
   );
   const config = withHome(home, () => loadConfig({}));
   assert.equal(config.apiKey, "");
@@ -69,14 +75,15 @@ test("a credentials file in the old single-login shape is not used", () => {
 
 test("only the armorclaude profile for the backend armorClaude calls is used", () => {
   const home = copyGoldenCredentials(tempHome());
-  const staging = withHome(home, () => loadConfig({}));
+  const production = withHome(home, () => loadConfig({}));
+  assert.equal(production.backendEndpoint, PRODUCTION);
+  assert.equal(production.apiKey, "", "the staging armorclaude key is not sent to production");
+  assert.equal(production.unconfigured, true);
+
+  const staging = withHome(home, () => loadConfig({ ARMORIQ_ENV: "staging" }));
   assert.equal(staging.backendEndpoint, STAGING);
   assert.equal(staging.apiKey, golden["armorclaude@staging-api.armoriq.ai"].apiKey);
   assert.equal(staging.orgId, golden["armorclaude@staging-api.armoriq.ai"].orgId);
-
-  const production = withHome(home, () => loadConfig({ ARMORIQ_ENV: "production" }));
-  assert.equal(production.apiKey, "", "the staging armorclaude key is not sent to production");
-  assert.equal(production.unconfigured, true);
 
   const local = withHome(home, () =>
     loadConfig({ ARMORIQ_ENV: "local", ARMORIQ_BACKEND_URL: "http://localhost:3000" })
@@ -85,7 +92,7 @@ test("only the armorclaude profile for the backend armorClaude calls is used", (
   assert.equal(local.orgId, "");
 
   const codexOnly = writeLoginProfiles(tempHome(), [
-    { backend: STAGING, product: "armorcodex", apiKey: LOGIN_KEY },
+    { backend: PRODUCTION, product: "armorcodex", apiKey: LOGIN_KEY },
   ]);
   assert.equal(withHome(codexOnly, () => loadConfig({})).apiKey, "");
 });
@@ -94,7 +101,7 @@ test("armorclaude and armorcodex profiles in one file both load, and loading cha
   const home = copyGoldenCredentials(tempHome());
   const file = path.join(home, ".armoriq", "credentials.json");
   const before = readFileSync(file);
-  const claude = withHome(home, () => loadConfig({}));
+  const claude = withHome(home, () => loadConfig({ ARMORIQ_ENV: "staging" }));
   const codex = withHome(home, () => loadProfile({ backend: STAGING, product: "armorcodex" }));
   assert.equal(claude.apiKey, golden["armorclaude@staging-api.armoriq.ai"].apiKey);
   assert.equal(codex.apiKey, golden["armorcodex@staging-api.armoriq.ai"].apiKey);
@@ -264,7 +271,7 @@ async function notices(run, sessionId, events) {
       transcript_path: run.transcript,
     });
     assert.equal(code, 0, hook_event_name);
-    shown.push(output?.systemMessage?.includes(RELOGIN_NOTICE) ?? false);
+    shown.push(output?.systemMessage?.includes(reloginNotice(run.backend.url)) ?? false);
   }
   return shown;
 }
@@ -335,7 +342,7 @@ test("a 403 with another error on the lease, the span export or token usage prin
     const id = randomUUID();
     const shown = await notices(run, id, ["SessionStart", "UserPromptSubmit", "Stop", "Stop"]);
     const sync = await runScript(usageWorker, run.env, "");
-    assert.ok(!sync.stderr.includes(RELOGIN_NOTICE), sync.stderr);
+    assert.ok(!sync.stderr.includes(reloginNotice(run.backend.url)), sync.stderr);
     shown.push(...(await notices(run, id, ["Stop"])));
     assert.deepEqual(shown, [false, false, false, false, false]);
     assert.ok(run.backend.calls.some((c) => c.route === "lease"));
@@ -349,7 +356,11 @@ test("config exposes identity and complete history from its accepted login", () 
   const doc = JSON.parse(readFileSync(GOLDEN_CREDENTIALS, "utf8"));
   const expected = doc.profiles["armorclaude@staging-api.armoriq.ai"];
   const config = withHome(home, () =>
-    loadConfig({ ARMORCLAUDE_USER_ID: "other", ARMORIQ_API_KEY: "ak_test_other" })
+    loadConfig({
+      ARMORIQ_ENV: "staging",
+      ARMORCLAUDE_USER_ID: "other",
+      ARMORIQ_API_KEY: "ak_test_other",
+    })
   );
   assert.equal(config.userId, expected.userId);
   assert.equal(config.loggedInAt, expected.loggedInAt);
@@ -363,7 +374,7 @@ test("config refuses missing or invalid login timestamps without savedAt inferen
     const doc = JSON.parse(readFileSync(file, "utf8"));
     doc.profiles["armorclaude@staging-api.armoriq.ai"].loggedInAt = timestamp;
     writeFileSync(file, JSON.stringify(doc));
-    const config = withHome(home, () => loadConfig({}));
+    const config = withHome(home, () => loadConfig({ ARMORIQ_ENV: "staging" }));
     assert.equal(config.apiKey, "");
     assert.equal(config.userId, "");
     assert.equal(config.loggedInAt, "");

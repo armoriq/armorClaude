@@ -23,16 +23,18 @@ export function declaredCli({ name, bin }) {
   return clis[0];
 }
 
-export function loginCommand() {
+// @armoriq/sdk-dev logs in to staging unless told otherwise, so name the
+// backend this plugin reads its key from.
+export function loginCommand(backend) {
   if (!cachedLoginCommand) {
     const sdkPackage = createRequire(import.meta.url)("@armoriq/sdk-dev/package.json");
     cachedLoginCommand = `${declaredCli(sdkPackage)} login --product ${PRODUCT}`;
   }
-  return cachedLoginCommand;
+  return backend ? `${cachedLoginCommand} --backend ${backend}` : cachedLoginCommand;
 }
 
 export const notSignedIn = (backend) =>
-  `No ArmorClaude login for ${backend}. Run: ${loginCommand()}`;
+  `No ArmorClaude login for ${backend}. Run: ${loginCommand(backend)}`;
 
 /**
  * Read a config value from CLAUDE_PLUGIN_OPTION_* (injected by Claude Code
@@ -93,13 +95,12 @@ function normalizeArmoriqEnv(value) {
  *   env vars                → paths + debug
  *   everything else         → hardcoded to the tested-good default
  *
- * Dev-branch default: staging. Main must keep production-hardcoded behavior
- * before release, but the dev plugin must never send staging keys to the
- * production API by accident.
+ * Dev-branch default: production, the same as main. Login profiles are keyed
+ * per backend, so a key saved for one backend is never sent to another.
  *
  * ARMORIQ_ENV:
- *   staging/default -> staging-api.armoriq.ai + iap-staging.armoriq.ai
- *   production/prod -> api.armoriq.ai + iap.armoriq.ai
+ *   production/default -> api.armoriq.ai + iap.armoriq.ai
+ *   staging/stage -> staging-api.armoriq.ai + iap-staging.armoriq.ai
  *   development/local/test -> local URLs, overridable for local stacks only
  */
 export function loadConfig(env = process.env) {
@@ -116,7 +117,7 @@ export function loadConfig(env = process.env) {
   // File-based flag avoids shell env var gymnastics on Windows.
   // Delete ~/.armoriq/local-mode to restore production mode.
   const localModeFile = path.join(homedir(), ".armoriq", "local-mode");
-  const requestedEnv = normalizeArmoriqEnv(env.ARMORIQ_ENV) || "staging";
+  const requestedEnv = normalizeArmoriqEnv(env.ARMORIQ_ENV) || "production";
   const localMock =
     parseBoolean(env.ARMORIQ_LOCAL_MOCK, false) ||
     existsSync(localModeFile) ||
