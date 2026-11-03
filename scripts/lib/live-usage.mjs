@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { claudeConfigDir } from "./claude-paths.mjs";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
 import { validHistory } from "./login-ownership.mjs";
 import { sdkModule } from "./sdk.mjs";
@@ -12,7 +12,7 @@ import { isAlive } from "./usage-sync-launch.mjs";
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LOCK_WAIT_MS = 5_000;
 
-export const projectsDir = () => path.join(homedir(), ".claude", "projects");
+export const projectsDir = (env = process.env) => path.join(claudeConfigDir(env), "projects");
 
 export function loginCutoff(config) {
   const history = config.loginHistory;

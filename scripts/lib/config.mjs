@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { claudeConfigDir } from "./claude-paths.mjs";
 import { parseBoolean } from "./common.mjs";
 import { signedOut } from "./backend-posture.mjs";
 import { sdkModule } from "./sdk.mjs";
@@ -115,7 +116,7 @@ export function loadConfig(env = process.env) {
   const dataDir =
     env.CLAUDE_PLUGIN_DATA?.trim() ||
     env.ARMORCLAUDE_DATA_DIR?.trim() ||
-    path.join(homedir(), ".claude", "armorclaude");
+    path.join(claudeConfigDir(env), "armorclaude");
   const policyFile = env.ARMORCLAUDE_POLICY_FILE?.trim() || path.join(dataDir, "policy.json");
   const runtimeFile = env.ARMORCLAUDE_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 

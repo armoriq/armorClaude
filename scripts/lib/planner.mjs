@@ -12,6 +12,8 @@
  */
 
 import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { claudeConfigDir } from "./claude-paths.mjs";
 import { normalizeToolName } from "./common.mjs";
 
 // ---------------------------------------------------------------------------
@@ -53,7 +55,7 @@ export function extractPlanJsonBlock(markdown) {
 
 /**
  * Parse a Claude plan markdown file into a structured plan.
- * The plan file is at ~/.claude/plans/<session-name>.md.
+ * The plan file is at <Claude config dir>/plans/<session-name>.md.
  */
 export async function parsePlanFile(planFilePath) {
   if (!planFilePath) return null;
@@ -161,7 +163,7 @@ function extractToolFromStepText(text) {
 
 /**
  * Resolve the plan file path for the current session.
- * Claude Code writes plans to ~/.claude/plans/<session-name>.md
+ * Claude Code writes plans to <Claude config dir>/plans/<session-name>.md
  */
 export function resolvePlanFilePath(input) {
   const transcriptPath = typeof input?.transcript_path === "string" ? input.transcript_path : "";
@@ -169,10 +171,7 @@ export function resolvePlanFilePath(input) {
   const sessionMatch = transcriptPath.match(/sessions\/([^/]+?)(?:\.jsonl)?$/);
   const sessionName = sessionMatch ? sessionMatch[1] : null;
 
-  if (sessionName) {
-    const homeDir = process.env.HOME || process.env.USERPROFILE || "/tmp";
-    return `${homeDir}/.claude/plans/${sessionName}.md`;
-  }
+  if (sessionName) return path.join(claudeConfigDir(), "plans", `${sessionName}.md`);
 
   return null;
 }
