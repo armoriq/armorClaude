@@ -40,7 +40,8 @@ import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs
 import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
-import { notSignedIn } from "./config.mjs";
+import { localOnly, notSignedIn, withBackendPosture } from "./config.mjs";
+import { capabilityOf } from "./backend-posture.mjs";
 import { readJson, writePrivateFile } from "./fs-store.mjs";
 import { stat, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -379,7 +380,7 @@ async function emitAudit({ dto: row, config, iapService }) {
   const { createAuditWal, fitAuditRow, loginTag } = await import("./audit-wal.mjs");
   let dto;
   try {
-    dto = fitAuditRow(row);
+    dto = fitAuditRow({ ...row, capability: capabilityOf(row.tool) });
   } catch (err) {
     const { appendDaemonLog } = await import("./daemon-log.mjs");
     appendDaemonLog(
@@ -690,7 +691,7 @@ export async function handleUserPromptSubmit(input, config) {
 export async function handlePreToolUse(input, config) {
   const output = await decidePreToolUse(input, config);
   if (output?.hookSpecificOutput?.permissionDecision === "deny") {
-    await auditBlocked(input, config, output[DECISION_CODE]);
+    await auditBlocked(input, withBackendPosture(config), output[DECISION_CODE]);
   }
   return output;
 }
@@ -858,6 +859,8 @@ async function decidePreToolUse(input, config) {
   // --- Policy v2: the org's verdict for this exact call, from the raw input
   //     (sanitizeParams truncates long values, which a rule could miss). ---
   const v2 = config.apiKey ? await decideV2(config, toolName, input.tool_input) : null;
+  if (v2?.code === "backend_unreachable") return denyPreTool("backend_unreachable", v2.reason);
+  if (v2?.reason === "signed_out") config = localOnly(config);
   if (v2?.action === "block") {
     const reason = `ArmorIQ policy blocked ${toolName} (${v2.reason})`;
     if (shouldDeny(config)) return denyPreTool("policy_v2_block", reason);

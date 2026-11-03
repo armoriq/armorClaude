@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { claudeConfigDir } from "./claude-paths.mjs";
 import { parseBoolean } from "./common.mjs";
+import { signedOut } from "./backend-posture.mjs";
 import { sdkModule } from "./sdk.mjs";
 
 const PRODUCT = "armorclaude";
@@ -32,6 +33,10 @@ export function loginCommand(backend) {
     cachedLoginCommand = `${declaredCli(sdkPackage)} login --product ${PRODUCT}`;
   }
   return backend ? `${cachedLoginCommand} --backend ${backend}` : cachedLoginCommand;
+}
+
+export function statusCommand() {
+  return `${loginCommand().split(" ")[0]} status`;
 }
 
 export const notSignedIn = (backend) =>
@@ -64,6 +69,7 @@ export const REQUEST_CONFIG_KEYS = [
   "auditEnabled",
   "csrgVerifyEnabled",
   "cryptoPolicyEnabled",
+  "signedOut",
 ];
 
 const USABLE_KEY = /^ak_(test|live|claw)_/;
@@ -176,7 +182,7 @@ export function loadConfig(env = process.env) {
   // keys off "do we have a working credential" uses this.
   const effectiveApiKey = apiKey || (localMock ? "ak_test_localmock000000000000" : "");
 
-  return {
+  const config = {
     // Paths / endpoints
     dataDir,
     client: clientIdentity(dataDir),
@@ -257,4 +263,23 @@ export function loadConfig(env = process.env) {
 
     debug: parseBoolean(env.ARMORCLAUDE_DEBUG, false),
   };
+  return withBackendPosture(config);
+}
+
+/** Signed out: what a session without a login gets, so nothing is sent with a rejected key. */
+export function localOnly(config) {
+  return {
+    ...config,
+    apiKey: "",
+    auditEnabled: false,
+    observabilityEnabled: false,
+    usageSyncEnabled: false,
+    cryptoPolicyEnabled: false,
+    signedOut: true,
+    ...loginEnforcement("", false),
+  };
+}
+
+export function withBackendPosture(config) {
+  return signedOut(config) ? localOnly(config) : config;
 }

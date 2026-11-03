@@ -139,7 +139,7 @@ test("a v2 hold asks, files one delegation request without an amount, and the ap
 });
 
 test("in enforce mode a call is denied when the v2 bundle cannot be fetched", async (t) => {
-  const backend = await v2Backend(randomUUID(), { bundle: () => [503, { message: "down" }] });
+  const backend = await v2Backend(randomUUID(), { bundle: () => [403, { message: "forbidden" }] });
   const { hook } = await startHookSession(t, backend);
   const output = await hook({
     hook_event_name: "PreToolUse",
