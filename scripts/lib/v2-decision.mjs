@@ -3,6 +3,16 @@ import { enforceCall } from "./backend-client.mjs";
 import { getSdkClient } from "./intent.mjs";
 import { sdkModule } from "./sdk.mjs";
 import { parseToolIdentity } from "./tool-registry.mjs";
+import { statusCommand } from "./config.mjs";
+import {
+  BACKEND_TIMEOUT_MS,
+  UNREACHABLE_FOR_MS,
+  backendUnreachable,
+  capabilityOf,
+  noteBackendStatus,
+  noteBackendUnreachable,
+  signedOut,
+} from "./backend-posture.mjs";
 
 // One cache per backend, key and agent. In the daemon it lives for the whole
 // session, so the org's v2 bundle is fetched once and revalidated by ETag.
@@ -27,19 +37,24 @@ function bundleCache(config) {
 }
 
 // The cache asks for an axios-shaped client; this one sends the plugin's own
-// auth and client headers like every other backend call.
+// auth and client headers like every other backend call. Its answer, or the
+// lack of one within BACKEND_TIMEOUT_MS, sets the backend posture.
 function bundleHttpClient(config) {
   return {
-    async get(url, { params = {}, headers = {}, timeout = 10_000 } = {}) {
+    async get(url, { params = {}, headers = {} } = {}) {
       const target = new URL(url);
       for (const [name, value] of Object.entries(params)) target.searchParams.set(name, value);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeout);
+      const timer = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
       try {
         const res = await fetch(target, {
           headers: { ...buildAuthHeaders(config), ...headers },
           signal: controller.signal,
+        }).catch((err) => {
+          noteBackendUnreachable(config);
+          throw err;
         });
+        noteBackendStatus(config, res.status);
         const data = res.status === 200 ? await res.json() : undefined;
         return { status: res.status, data, headers: { etag: res.headers.get("etag") ?? "" } };
       } finally {
@@ -58,9 +73,20 @@ export function v2Call(toolName) {
     : { tool: toolName, mcpServer: undefined };
 }
 
+export function unreachableReason(config, toolName) {
+  return (
+    `ArmorIQ backend ${config.backendEndpoint} is unreachable (backend_unreachable), so ${toolName} ` +
+    `waits until it answers again; it is rechecked every ${UNREACHABLE_FOR_MS / 1000} seconds and reads still run. ` +
+    `Check the connection: ${statusCommand()}`
+  );
+}
+
 /**
  * The org's v2 verdict for one call, decided locally from the policy bundle.
- * A bundle that cannot be fetched, or is older than the SDK's stale limit,
+ * Anything but a read confirms the bundle with the backend at least every
+ * UNREACHABLE_FOR_MS, so a backend that stopped answering blocks it with
+ * `backend_unreachable`; a read runs on the cached bundle, or none. Otherwise
+ * a bundle that cannot be fetched, or is older than the SDK's stale limit,
  * decides `block`.
  */
 export async function decideV2(config, toolName, toolArgs) {
@@ -73,9 +99,29 @@ export async function decideV2(config, toolName, toolArgs) {
       reason: "policy-bundle-unavailable: the installed @armoriq/sdk-dev has no v2 evaluator",
     };
   }
-  const { BUNDLE_REVALIDATE_MS } = sdkModule("policy-bundle");
-  if (cache.state().status === "current") cache.refresh(BUNDLE_REVALIDATE_MS).catch(() => {});
-  else await cache.refresh(0);
+  const read = capabilityOf(toolName) === "read";
+  if (!backendUnreachable(config)) {
+    const { BUNDLE_REVALIDATE_MS } = sdkModule("policy-bundle");
+    if (read && cache.state().status === "current") {
+      cache.refresh(BUNDLE_REVALIDATE_MS).catch(() => {});
+    } else {
+      await cache.refresh(read ? 0 : UNREACHABLE_FOR_MS);
+    }
+  }
+  if (signedOut(config)) return { allowed: true, action: "allow", reason: "signed_out" };
+  if (backendUnreachable(config)) {
+    if (!read) {
+      return {
+        allowed: false,
+        action: "block",
+        code: "backend_unreachable",
+        reason: unreachableReason(config, toolName),
+      };
+    }
+    if (cache.state().status !== "current") {
+      return { allowed: true, action: "allow", reason: "backend_unreachable" };
+    }
+  }
   const state = cache.state();
   if (state.status === "current" && !state.agent) {
     return { allowed: true, action: "allow", reason: "no_v2_policy" };
