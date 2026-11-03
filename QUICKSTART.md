@@ -89,7 +89,7 @@ List the active policy:
 Sign in from a terminal and approve the request in your browser:
 
 ```
-armoriq-dev login --product armorclaude
+armoriq-dev login --product armorclaude --backend https://api.armoriq.ai
 ```
 
 ArmorClaude picks the key up on its next hook and switches to `enforce`.
