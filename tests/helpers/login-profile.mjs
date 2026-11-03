@@ -15,6 +15,7 @@ import { loadConfig } from "../../scripts/lib/config.mjs";
 
 const { profileName } = armoriqSdk;
 
+export const PRODUCTION = "https://api.armoriq.ai";
 export const STAGING = "https://staging-api.armoriq.ai";
 export const GOLDEN_CREDENTIALS = new URL("../fixtures/golden-credentials.json", import.meta.url);
 

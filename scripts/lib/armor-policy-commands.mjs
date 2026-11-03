@@ -2539,7 +2539,8 @@ export async function handleArmorPolicyCommand(prompt, config) {
     }
 
     case "profile-push": {
-      if (!config.apiKey) return `Profile push needs a sign-in. Run: ${loginCommand()}`;
+      if (!config.apiKey)
+        return `Profile push needs a sign-in. Run: ${loginCommand(config.backendEndpoint)}`;
       const profile = await loadProfile(config, parsed.name);
       if (!profile) return `Profile not found: ${parsed.name}`;
       const result = await pushProfileToBackend(config, profile);
@@ -2549,7 +2550,8 @@ export async function handleArmorPolicyCommand(prompt, config) {
     }
 
     case "profile-pull": {
-      if (!config.apiKey) return `Profile pull needs a sign-in. Run: ${loginCommand()}`;
+      if (!config.apiKey)
+        return `Profile pull needs a sign-in. Run: ${loginCommand(config.backendEndpoint)}`;
       const result = await pullProfilesFromBackend(config);
       if (!result.ok) return `Failed to pull profiles: ${result.reason || `HTTP ${result.status}`}`;
       if (!result.profiles.length) return "No org profiles found on backend.";
@@ -2590,7 +2592,8 @@ export async function handleArmorPolicyCommand(prompt, config) {
     }
 
     case "sync": {
-      if (!config.apiKey) return `Sync needs a sign-in. Run: ${loginCommand()}`;
+      if (!config.apiKey)
+        return `Sync needs a sign-in. Run: ${loginCommand(config.backendEndpoint)}`;
       const state = await loadPolicyState(config.policyFile);
       const result = await syncPolicyToBackend(config, state);
       if (!result.ok) return `Sync failed: ${result.reason || `HTTP ${result.status}`}`;
