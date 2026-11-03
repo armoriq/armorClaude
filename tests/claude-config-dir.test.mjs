@@ -86,12 +86,17 @@ async function withConfigHome(fn) {
   }
 }
 
-for (const daemon of [false, true]) {
-  const via = daemon ? "through the daemon" : "without the daemon";
+for (const [daemon, relative] of [
+  [false, false],
+  [true, false],
+  [false, true],
+]) {
+  const via = `${daemon ? "through" : "without"} the daemon${relative ? ", given relative" : ""}`;
   test(`a Stop uploads a transcript kept under CLAUDE_CONFIG_DIR, ${via}`, async () => {
-    await withConfigHome(async (b, h, configDir) => {
+    await withConfigHome(async (b, h, absolute) => {
+      const configDir = relative ? path.relative(process.cwd(), absolute) : absolute;
       const id = randomUUID();
-      const transcript = writeConfigSession(configDir, id, { input_tokens: 9, output_tokens: 2 });
+      const transcript = writeConfigSession(absolute, id, { input_tokens: 9, output_tokens: 2 });
       const stop = JSON.stringify({
         hook_event_name: "Stop",
         session_id: id,
