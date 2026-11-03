@@ -44,7 +44,8 @@ const CLAUDE_STUB = `#!/bin/sh
 case "$*" in
   --version) echo "2.0.0 (Claude Code)" ;;
   "plugin install armorclaude-dev@armoriq")
-    mkdir -p "$HOME/.claude/plugins/cache/armoriq/armorclaude-dev/0.0.0" ;;
+    dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/armoriq/armorclaude-dev/0.0.0"
+    mkdir -p "$dir/scripts" && : > "$dir/scripts/bootstrap.mjs" ;;
   "plugin list") printf 'armorclaude-dev@armoriq\\n  Status: enabled\\n' ;;
   "mcp list") echo "plugin:armorclaude:armorclaude-policy: node - Connected" ;;
 esac
@@ -121,3 +122,14 @@ test("the installer points at armoriq-dev when it cannot prompt", async () => {
   assert.doesNotMatch(out, /\barmoriq login\b/);
   assert.doesNotMatch(readFileSync(calls, "utf8"), /^armoriq(-dev)? HOME=/m);
 });
+
+for (const configDir of [undefined, ".claude-second"]) {
+  const where = configDir ? "under CLAUDE_CONFIG_DIR" : "under ~/.claude";
+  test(`the installer warms the plugin Claude Code installed ${where}`, async () => {
+    const { home, env } = sandbox();
+    if (configDir) env.CLAUDE_CONFIG_DIR = path.join(home, configDir);
+    const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
+    assert.equal(code, 0, out);
+    assert.match(out, /dependencies ready/);
+  });
+}
