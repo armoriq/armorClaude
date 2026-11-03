@@ -36,13 +36,13 @@ test("ARMORIQ_API_KEY and the API_KEY plugin option are not key sources", () => 
   const signedOut = loadConfigWithLogins([], env);
   assert.equal(signedOut.apiKey, "");
   assert.equal(signedOut.unconfigured, true);
-  const signedIn = loadConfigWithLogins([{ backend: PRODUCTION, apiKey: LOGIN_KEY }], env);
+  const signedIn = loadConfigWithLogins([{ backend: STAGING, apiKey: LOGIN_KEY }], env);
   assert.equal(signedIn.apiKey, LOGIN_KEY);
 });
 
 test("ARMORIQ_ORG_ID does not change the org sent with the login key", () => {
   const config = loadConfigWithLogins(
-    [{ backend: PRODUCTION, apiKey: LOGIN_KEY, orgId: "org-of-the-key" }],
+    [{ backend: STAGING, apiKey: LOGIN_KEY, orgId: "org-of-the-key" }],
     { ARMORIQ_ORG_ID: "org-other" }
   );
   assert.equal(config.apiKey, LOGIN_KEY);
@@ -75,15 +75,15 @@ test("a credentials file in the old single-login shape is not used", () => {
 
 test("only the armorclaude profile for the backend armorClaude calls is used", () => {
   const home = copyGoldenCredentials(tempHome());
-  const production = withHome(home, () => loadConfig({}));
-  assert.equal(production.backendEndpoint, PRODUCTION);
-  assert.equal(production.apiKey, "", "the staging armorclaude key is not sent to production");
-  assert.equal(production.unconfigured, true);
-
-  const staging = withHome(home, () => loadConfig({ ARMORIQ_ENV: "staging" }));
+  const staging = withHome(home, () => loadConfig({}));
   assert.equal(staging.backendEndpoint, STAGING);
   assert.equal(staging.apiKey, golden["armorclaude@staging-api.armoriq.ai"].apiKey);
   assert.equal(staging.orgId, golden["armorclaude@staging-api.armoriq.ai"].orgId);
+
+  const production = withHome(home, () => loadConfig({ ARMORIQ_ENV: "production" }));
+  assert.equal(production.backendEndpoint, PRODUCTION);
+  assert.equal(production.apiKey, "", "the staging armorclaude key is not sent to production");
+  assert.equal(production.unconfigured, true);
 
   const local = withHome(home, () =>
     loadConfig({ ARMORIQ_ENV: "local", ARMORIQ_BACKEND_URL: "http://localhost:3000" })
@@ -92,7 +92,7 @@ test("only the armorclaude profile for the backend armorClaude calls is used", (
   assert.equal(local.orgId, "");
 
   const codexOnly = writeLoginProfiles(tempHome(), [
-    { backend: PRODUCTION, product: "armorcodex", apiKey: LOGIN_KEY },
+    { backend: STAGING, product: "armorcodex", apiKey: LOGIN_KEY },
   ]);
   assert.equal(withHome(codexOnly, () => loadConfig({})).apiKey, "");
 });

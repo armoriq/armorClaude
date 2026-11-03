@@ -95,12 +95,13 @@ function normalizeArmoriqEnv(value) {
  *   env vars                → paths + debug
  *   everything else         → hardcoded to the tested-good default
  *
- * Dev-branch default: production, the same as main. Login profiles are keyed
- * per backend, so a key saved for one backend is never sent to another.
+ * Dev-branch default: staging. Main must keep production-hardcoded behavior
+ * before release, but the dev plugin must never send staging keys to the
+ * production API by accident.
  *
  * ARMORIQ_ENV:
- *   production/default -> api.armoriq.ai + iap.armoriq.ai
- *   staging/stage -> staging-api.armoriq.ai + iap-staging.armoriq.ai
+ *   staging/default -> staging-api.armoriq.ai + iap-staging.armoriq.ai
+ *   production/prod -> api.armoriq.ai + iap.armoriq.ai
  *   development/local/test -> local URLs, overridable for local stacks only
  */
 export function loadConfig(env = process.env) {
@@ -117,7 +118,7 @@ export function loadConfig(env = process.env) {
   // File-based flag avoids shell env var gymnastics on Windows.
   // Delete ~/.armoriq/local-mode to restore production mode.
   const localModeFile = path.join(homedir(), ".armoriq", "local-mode");
-  const requestedEnv = normalizeArmoriqEnv(env.ARMORIQ_ENV) || "production";
+  const requestedEnv = normalizeArmoriqEnv(env.ARMORIQ_ENV) || "staging";
   const localMock =
     parseBoolean(env.ARMORIQ_LOCAL_MOCK, false) ||
     existsSync(localModeFile) ||

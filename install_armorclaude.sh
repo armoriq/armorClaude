@@ -21,7 +21,6 @@ N=$'\033[0m'
 MARKETPLACE_REPO="${ARMORCLAUDE_MARKETPLACE_REPO:-armoriq/armorClaude}"
 PLUGIN_REF="armorclaude-dev@armoriq"
 DASHBOARD_URL="https://tools.armoriq.ai"
-BACKEND="https://api.armoriq.ai"
 
 # Recover if the caller launched the installer from a directory that was deleted.
 if ! pwd >/dev/null 2>&1; then
@@ -177,23 +176,23 @@ connect_to_armoriq() {
 EOF
 
   if ! is_promptable; then
-    printf "  Run ${G}${B}armoriq-dev login --product armorclaude --backend ${BACKEND}${N} to connect later.\n\n"
+    printf "  Run ${G}${B}armoriq-dev login --product armorclaude${N} to connect later.\n\n"
     return 0
   fi
 
   if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
     echo
-    printf "  No problem. Run ${G}${B}armoriq-dev login --product armorclaude --backend ${BACKEND}${N} anytime to connect.\n\n"
+    printf "  No problem. Run ${G}${B}armoriq-dev login --product armorclaude${N} anytime to connect.\n\n"
     return 0
   fi
 
   echo
   if command -v armoriq-dev >/dev/null 2>&1; then
-    armoriq-dev login --product armorclaude --backend "$BACKEND"
+    armoriq-dev login --product armorclaude
   elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk-dev login --product armorclaude --backend "$BACKEND"
+    npx @armoriq/sdk-dev login --product armorclaude
   else
-    warn "armoriq-dev CLI not found. Run ${B}npx @armoriq/sdk-dev login --product armorclaude --backend ${BACKEND}${N} manually."
+    warn "armoriq-dev CLI not found. Run ${B}npx @armoriq/sdk-dev login --product armorclaude${N} manually."
     return 0
   fi
 
