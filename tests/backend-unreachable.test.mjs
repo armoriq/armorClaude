@@ -27,7 +27,8 @@ async function switchableBackend() {
       };
       if (backend.mode === "503") return reply(503, { message: "down" });
       if (backend.mode === "401") return reply(401, { message: "Invalid or expired API key" });
-      if (route.startsWith("GET /policy/bundles/current")) return reply(200, { orgId: "o", agents: [] });
+      if (route.startsWith("GET /policy/bundles/current"))
+        return reply(200, { orgId: "o", agents: [] });
       if (route === "POST /iap/audit/batch") {
         const { rows } = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         auditRows.push(...rows);
@@ -96,7 +97,8 @@ test("capability follows the published table", () => {
 test("a backend that stops answering blocks Write after the 2 second timeout, blocks MCP, runs Read, and ships the queued rows once it is back", async (t) => {
   const backend = await switchableBackend();
   const { hook, dataDir } = await startHookSession(t, backend);
-  const pre = (tool_name, tool_input) => hook({ hook_event_name: "PreToolUse", tool_name, tool_input });
+  const pre = (tool_name, tool_input) =>
+    hook({ hook_event_name: "PreToolUse", tool_name, tool_input });
   backend.mode = "stall";
 
   const write = await timed(() => pre("Write", { file_path: "/tmp/x.txt", content: "x" }));
@@ -136,7 +138,8 @@ test("a backend that stops answering blocks Write after the 2 second timeout, bl
 test("a 5xx marks the backend unreachable without waiting out the timeout", async (t) => {
   const backend = await switchableBackend();
   const { hook } = await startHookSession(t, backend);
-  const bash = () => hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
+  const bash = () =>
+    hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
 
   backend.mode = "503";
   const failed = await timed(bash);
@@ -149,7 +152,8 @@ test("a backend nobody listens on blocks Bash with backend_unreachable and lets 
   const backend = await switchableBackend();
   const { hook } = await startHookSession(t, backend);
   await backend.close();
-  const pre = (tool_name, tool_input) => hook({ hook_event_name: "PreToolUse", tool_name, tool_input });
+  const pre = (tool_name, tool_input) =>
+    hook({ hook_event_name: "PreToolUse", tool_name, tool_input });
 
   const read = await pre("Read", { file_path: "/tmp/x.txt" });
   assert.equal(decisionOf(read), "allow", JSON.stringify(read));
@@ -161,7 +165,8 @@ test("a backend nobody listens on blocks Bash with backend_unreachable and lets 
 test("a 401 signs the plugin out instead of marking the backend unreachable", async (t) => {
   const backend = await switchableBackend();
   const { hook, dataDir } = await startHookSession(t, backend);
-  const bash = () => hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
+  const bash = () =>
+    hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
 
   backend.mode = "401";
   const first = await bash();
@@ -173,6 +178,10 @@ test("a 401 signs the plugin out instead of marking the backend unreachable", as
   assert.equal(decisionOf(second), "allow", JSON.stringify(second));
   const start = await hook({ hook_event_name: "SessionStart", source: "startup" });
   assert.match(JSON.stringify(start), /No ArmorClaude login/);
-  assert.deepEqual(backend.requests.slice(sent), [], "a signed-out plugin still called the backend");
+  assert.deepEqual(
+    backend.requests.slice(sent),
+    [],
+    "a signed-out plugin still called the backend"
+  );
   assert.deepEqual(queuedRows(dataDir, backend), []);
 });
