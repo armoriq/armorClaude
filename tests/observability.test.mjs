@@ -229,6 +229,27 @@ test("PostToolUseFailure records a failed tool span", async () => {
   await provider.shutdown();
 });
 
+test("PostToolUseFailure passes the hook's error to the tool span", async () => {
+  installHooks();
+  const config = testConfig();
+  await observeHook(
+    "PostToolUseFailure",
+    {
+      session_id: "sess-toolerr",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      error: "Exit code 1: 3 tests failed",
+    },
+    null,
+    config
+  );
+  await observeHook("SessionEnd", { session_id: "sess-toolerr" }, null, config);
+  const tools = spansByName("armoriq.tool");
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].attributes["error.type"], "Error");
+  await provider.shutdown();
+});
+
 test("MCP tools are bucketed as mcp operations", async () => {
   installHooks();
   const config = testConfig();
