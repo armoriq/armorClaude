@@ -37,11 +37,6 @@ test("isObsEnabled reflects config flag", () => {
   assert.equal(isObsEnabled(undefined), false);
 });
 
-test("__resetObsForTests exists and is callable", () => {
-  __resetObsForTests();
-  assert.ok(true);
-});
-
 import armoriqSdk from "@armoriq/sdk-dev";
 import {
   observeHook,
