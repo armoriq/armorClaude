@@ -7,20 +7,6 @@ import path from "node:path";
 import { handlePreToolUse } from "../scripts/lib/engine.mjs";
 import { writeJson } from "../scripts/lib/fs-store.mjs";
 
-// Regression cover for a drift bypass that only appeared once an API key was
-// configured — i.e. exactly the paying-customer path.
-//
-// handlePreToolUse used to mint an intent token before checking the registered
-// plan, and the mint payload carried toolName/toolInput but not the plan. The
-// backend therefore built a plan around the very call being checked, the
-// registered plan was overwritten in runtime.json, and the call was validated
-// against a plan derived from itself. A session whose plan declared only Read
-// would run Bash without complaint.
-//
-// These tests need no backend: the guard must reject before any mint is
-// attempted, so a bare api key with no reachable server is sufficient. If the
-// guard regresses, the SDK call is attempted and the assertions fail.
-
 function buildConfig(tmpDir, overrides = {}) {
   return {
     mode: "enforce",
@@ -54,9 +40,6 @@ function buildConfig(tmpDir, overrides = {}) {
   };
 }
 
-// An all-allow policy switches the plugin to frictionless mode and disables
-// intent entirely, so the fixture needs at least one forbid statement for
-// intent enforcement to be active at all.
 async function writeEnforcingPolicy(config) {
   await writeJson(config.policyFile, {
     version: 1,

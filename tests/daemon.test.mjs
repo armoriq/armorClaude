@@ -1,11 +1,4 @@
 /* eslint-disable */
-/**
- * Phase 4 Tier B daemon tests.
- *
- * These spawn the actual daemon as a child process and exercise it through
- * the daemon-client. Each test uses a unique tmpdir so the socket + PID
- * file don't collide. Cleanup is in `afterEach`.
- */
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -45,7 +38,6 @@ async function spawnDaemonChild(dataDir) {
     cwd: dataDir,
   });
   child.unref();
-  // Poll for socket to appear
   const socketPath = path.join(dataDir, "daemon.sock");
   for (let i = 0; i < 30; i++) {
     if (existsSync(socketPath)) return { child, socketPath };
@@ -58,7 +50,6 @@ async function killDaemon(child, dataDir) {
   try {
     process.kill(child.pid, "SIGTERM");
   } catch {}
-  // give it a moment to clean up
   await new Promise((r) => setTimeout(r, 200));
   try {
     process.kill(child.pid, "SIGKILL");
@@ -93,8 +84,6 @@ test("daemon: PreToolUse roundtrip returns null for fast-path tool", async () =>
   try {
     const config = await loadConfigFor(dataDir);
     const { dispatchViaDaemon } = await import("../scripts/lib/daemon-client.mjs");
-    // 'read' is in the Phase 4 A1 fast-path allowlist --- should be allowed
-    // without any plan / token / backend, regardless of intentRequired.
     const output = await dispatchViaDaemon({
       event: "PreToolUse",
       input: {
@@ -141,7 +130,6 @@ test("daemon: roundtrip latency p95 < 50ms (over Unix socket)", async () => {
     const config = await loadConfigFor(dataDir);
     const { dispatchViaDaemon } = await import("../scripts/lib/daemon-client.mjs");
     const samples = [];
-    // Warm up — first call sometimes pays connection-establish cost.
     await dispatchViaDaemon({
       event: "PreToolUse",
       input: {
@@ -184,9 +172,6 @@ test("daemon: concurrent hooks for SAME session serialize (runtime-state stays c
   try {
     const config = await loadConfigFor(dataDir);
     const { dispatchViaDaemon } = await import("../scripts/lib/daemon-client.mjs");
-    // Fire SessionStart 10× concurrently for the same session_id.
-    // Per-session lock should serialize them; final runtime.json should
-    // have a single sess-conc-1 entry, not corrupted.
     const calls = Array.from({ length: 10 }, () =>
       dispatchViaDaemon({
         event: "SessionStart",
@@ -202,7 +187,6 @@ test("daemon: concurrent hooks for SAME session serialize (runtime-state stays c
     for (const r of results) {
       assert.ok(r?.hookSpecificOutput?.additionalContext);
     }
-    // Read the runtime file directly and assert it's valid JSON with the session present.
     const { readFile } = await import("node:fs/promises");
     const raw = await readFile(path.join(dataDir, "runtime.json"), "utf8");
     const parsed = JSON.parse(raw);
@@ -214,7 +198,6 @@ test("daemon: concurrent hooks for SAME session serialize (runtime-state stays c
 
 test("daemon-client: spawnDaemon on missing socket (auto-spawn)", async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-spawn-"));
-  // Don't pre-spawn — let the client auto-spawn.
   let childPid;
   try {
     const config = await loadConfigFor(dataDir);
@@ -229,11 +212,9 @@ test("daemon-client: spawnDaemon on missing socket (auto-spawn)", async () => {
       config,
     });
     assert.ok(output?.hookSpecificOutput?.additionalContext);
-    // A daemon should now be running. Prove it by ping.
     const ping = await pingDaemon(config);
     assert.ok(ping?.ok);
   } finally {
-    // Kill any daemon that auto-spawned
     try {
       const { readFile } = await import("node:fs/promises");
       const pid = parseInt(await readFile(path.join(dataDir, "daemon.pid"), "utf8"), 10);

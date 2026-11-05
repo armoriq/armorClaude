@@ -7,8 +7,6 @@ import { loginTag } from "../scripts/lib/audit-wal.mjs";
 import { capabilityOf } from "../scripts/lib/backend-posture.mjs";
 import { API_KEY, startHookSession, waitFor } from "./helpers/hook-session.mjs";
 
-// A backend that answers normally, never answers ("stall"), answers 503, or
-// rejects the key with 401, switchable mid-session.
 async function switchableBackend() {
   const requests = [];
   const auditRows = [];

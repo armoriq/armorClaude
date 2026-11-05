@@ -1,10 +1,3 @@
-// Phase 4 latency SLAs. These run in-process (no fresh node spawn per
-// invocation), so the numbers here measure ONLY the engine.mjs handler cost
-// — they are a lower bound, not the full per-hook wall-clock. The full hook
-// budget (cold-start + module load + handler) is what Tier B (daemon mode)
-// is designed to eliminate. The SLAs here protect against regressions in
-// the handler itself.
-
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
@@ -64,21 +57,11 @@ function summarize(samples) {
   return { min: sorted[0], p50: p(0.5), p95: p(0.95), max: sorted[sorted.length - 1] };
 }
 
-// Shared CI runners stall unpredictably (CPU steal, GC, cold page cache), which
-// shows up entirely in the tail: a run measuring p50=0.99ms still recorded
-// p95=124ms and failed a 100ms ceiling. The engine is what is under test, not
-// the runner, so the tail budget is relaxed in CI while the local ceiling stays
-// tight enough to catch a genuine regression.
 const CI = Boolean(process.env.CI);
 const perfCeiling = (local, ci) => (CI ? ci : local);
 
-// Discard the first iterations so JIT warmup and first-touch filesystem reads
-// are not counted as steady-state latency.
 const PERF_WARMUP_ITERATIONS = 5;
 
-// ---------------------------------------------------------------------------
-// Phase 4 A1 SLA: read-only fast-path tools complete in < 5 ms (in-process).
-// ---------------------------------------------------------------------------
 test("PERF: read-only fast-path tools p95 < 5ms (engine handler only)", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-perf-fastpath-"));
   const config = buildPerfConfig(tmp);
@@ -93,7 +76,6 @@ test("PERF: read-only fast-path tools p95 < 5ms (engine handler only)", async ()
     "toolsearch",
     "todowrite",
   ]) {
-    // 20 iterations per tool to smooth noise
     for (let i = 0; i < 20; i++) {
       const { elapsedMs } = await timed(() =>
         handlePreToolUse(
@@ -117,16 +99,9 @@ test("PERF: read-only fast-path tools p95 < 5ms (engine handler only)", async ()
   );
 });
 
-// ---------------------------------------------------------------------------
-// Phase 4 A0+full-pipeline SLA: warm path with valid local plan (no backend
-// HTTP) completes in < 100 ms (engine handler only). Today's typical warm
-// path measures ~30-50 ms for engine logic; we set a generous 100 ms ceiling
-// so noisy CI doesn't false-fail.
-// ---------------------------------------------------------------------------
 test("PERF: warm-path Bash with valid plan p95 < 100ms (engine handler only)", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-perf-warm-"));
   const config = buildPerfConfig(tmp);
-  // Seed a session with a plan that includes Bash so drift doesn't fire.
   await writeFile(
     config.runtimeFile,
     JSON.stringify({

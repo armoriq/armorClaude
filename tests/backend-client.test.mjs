@@ -74,10 +74,6 @@ function startMockServer(handler) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Backend client: no-backend graceful fallback
-// ---------------------------------------------------------------------------
-
 test("autoRegisterMcp returns error when no apiKey", async () => {
   const result = await autoRegisterMcp({ apiKey: "", backendEndpoint: "http://x" }, "github");
   assert.equal(result.ok, false);
@@ -105,10 +101,6 @@ test("syncMcpRegistry returns error when no apiKey", async () => {
   assert.equal(result.ok, false);
   assert.deepEqual(result.servers, []);
 });
-
-// ---------------------------------------------------------------------------
-// Backend client: with mock server
-// ---------------------------------------------------------------------------
 
 test("autoRegisterMcp sends POST to /mcp/auto-register", async () => {
   let receivedBody = null;
@@ -186,10 +178,6 @@ test("syncPolicy stages a draft then a proposal", async () => {
     server.close();
   }
 });
-
-// ---------------------------------------------------------------------------
-// /armor policy command wiring
-// ---------------------------------------------------------------------------
 
 test("/armor policy sync without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));

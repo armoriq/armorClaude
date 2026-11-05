@@ -181,9 +181,6 @@ test("checkIntentTokenPlan detects expired token", () => {
 });
 
 test("checkIntentTokenPlan: parameter mismatch is advisory by default (Phase 3 hardening)", () => {
-  // Default behavior: metadata.inputs.file_path is a prediction, not a contract.
-  // The user's other Claude Code session showed this fired false-positives when
-  // the LLM couldn't guess exact bash commands. We now allow by default.
   const token = {
     plan: {
       steps: [{ action: "Write", arguments: { file_path: "allowed.txt" } }],

@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ArmorClaude installer for Claude Code
-#
-# Usage:
-#   curl -fsSL https://armoriq.ai/install_armorclaude.sh | bash
-#
-# Non-interactive overrides:
-#   ARMORCLAUDE_MARKETPLACE_REPO=<path>   override marketplace source (testing)
-
 R=$'\033[1;31m'
 G=$'\033[32m'
 Y=$'\033[33m'
@@ -22,14 +14,9 @@ MARKETPLACE_REPO="${ARMORCLAUDE_MARKETPLACE_REPO:-armoriq/armorClaude}"
 PLUGIN_REF="armorclaude-dev@armoriq"
 DASHBOARD_URL="https://tools.armoriq.ai"
 
-# Recover if the caller launched the installer from a directory that was deleted.
 if ! pwd >/dev/null 2>&1; then
   cd "${HOME:-/}" 2>/dev/null || cd /
 fi
-
-# ---------------------------------------------------------------------------
-# UI helpers
-# ---------------------------------------------------------------------------
 
 ok()    { printf "${G}✔${N} %s\n" "$*"; }
 warn()  { printf "${Y}!${N} %s\n" "$*"; }
@@ -53,10 +40,6 @@ ${C}${B}    ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝ ╚�
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# Prereq checks
-# ---------------------------------------------------------------------------
-
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     err "missing required command: $1"
@@ -79,16 +62,11 @@ check_node_version() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Plugin install
-# ---------------------------------------------------------------------------
-
 install_plugin() {
   section "Installing plugin"
 
   info "adding marketplace ${B}${MARKETPLACE_REPO}${N}"
   if ! claude plugin marketplace add "${MARKETPLACE_REPO}" >/dev/null 2>&1; then
-    # already added is fine — re-fetch in case the source moved
     claude plugin marketplace update armoriq >/dev/null 2>&1 || true
   fi
   ok "marketplace ready"
@@ -119,15 +97,8 @@ install_plugin() {
     || warn "couldn't install globally — use ${B}npx @armoriq/sdk-dev${N} instead"
 }
 
-# ---------------------------------------------------------------------------
-# Verification + finale
-# ---------------------------------------------------------------------------
-
 verify_install() {
   section "Verifying"
-  # `claude plugin list` prints the status on the line after the plugin name, so
-  # a bare grep for "armorclaude" matches even when the plugin is disabled and
-  # would wrongly report success.
   local listing status
   listing="$(claude plugin list 2>/dev/null || true)"
   status="$(printf '%s\n' "$listing" | grep -A3 "armorclaude-dev@armoriq" | grep -m1 "Status:" || true)"
@@ -249,10 +220,6 @@ EOF
 
 EOF
 }
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 main() {
   banner

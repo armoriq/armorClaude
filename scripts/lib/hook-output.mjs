@@ -39,8 +39,6 @@ export function denyPreToolWithHint(code, reason, args = {}) {
     description: `Use ${toolName} to ${goal || "make progress on the user's task"}`,
   };
   if (toolInput && typeof toolInput === "object" && Object.keys(toolInput).length > 0) {
-    // Plan arguments are advisory to the local plan check; the backend's
-    // v2 plan check reads them.
     newStep.arguments = toolInput;
   }
   let suggestedPlan;
@@ -63,16 +61,7 @@ export function denyPreToolWithHint(code, reason, args = {}) {
   return denyPreTool(code, reason + hint);
 }
 
-/**
- * Freemium fallback: allow the tool to proceed WITHOUT ArmorClaude enforcement,
- * surfacing a one-time upgrade nudge to the user via `systemMessage`.
- *
- * We deliberately DO NOT set `permissionDecision` — that leaves Claude Code's
- * own permission flow untouched (ArmorClaude simply steps aside / runs in
- * observe-only mode) rather than force-allowing. Used when intent-token
- * issuance fails for a *billing* reason so a free user isn't hard-blocked with
- * a cryptic error that looks like a policy denial.
- */
+/** Omitting permissionDecision defers to Claude Code's own permission prompts; setting allow would bypass them. */
 export function allowWithNotice(systemMessage) {
   return {
     systemMessage,
@@ -82,11 +71,6 @@ export function allowWithNotice(systemMessage) {
   };
 }
 
-/**
- * True when an intent-token failure is a billing/subscription gate (HTTP 402
- * from the backend quota service) rather than a real enforcement error. Matches
- * the backend messages in conmap-auto/src/billing/quota.service.ts.
- */
 export function isBillingError(message) {
   return /subscription is required|active ArmorIQ Pro|billing cannot be verified|payment required|\b402\b/i.test(
     String(message || "")
@@ -100,16 +84,7 @@ export function blockPrompt(reason) {
   };
 }
 
-/**
- * Reply to a handled `/armor` slash command.
- *
- * Mechanically this is still a `block` decision — that's the only hook output
- * that keeps the command text away from the LLM while showing our own output.
- * Claude Code's UI prints a fixed "operation blocked by hook:" prefix for any
- * block, which reads as an error even though the command succeeded. We can't
- * suppress that prefix, but we can lead the reason with a subtle tag so the
- * message reads as a normal, handled command rather than a failure.
- */
+/** Only a block hides /armor text from the model; Claude Code prefixes it with "operation blocked by hook:". */
 export function armorReply(reason) {
   return blockPrompt(`(ArmorClaude — handled OK)\n${reason}`);
 }

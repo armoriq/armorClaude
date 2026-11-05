@@ -1,10 +1,3 @@
-/**
- * OPA HTTP client for ArmorClaude enforcement.
- * Modeled on armoriq-proxy-server/src/policy-enforcement/opa-client.service.ts.
- *
- * Features: response cache, circuit breaker, fail-closed on error.
- */
-
 const cache = new Map();
 let consecutiveFailures = 0;
 let circuitOpenUntil = 0;

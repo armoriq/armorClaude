@@ -1,15 +1,3 @@
-/**
- * Tool identity parser and MCP registry helpers.
- *
- * Tool name taxonomy:
- *   Read, Edit, Bash                           → builtin
- *   mcp__armorclaude-policy__*                  → armorclaude-own
- *   mcp__plugin_armorclaude_armorclaude-policy__* → armorclaude-own
- *   mcp__<server>__<tool>                       → external-mcp
- *   mcp__plugin_<plugin>_<server>__<tool>       → plugin-mcp
- *   Skill (with skill name in input)            → skill
- */
-
 const MCP_PATTERN = /^mcp__([^_]+(?:__[^_]+)*)__([^_]+.*)$/i;
 const PLUGIN_MCP_PATTERN = /^mcp__plugin_([^_]+)_([^_]+(?:__[^_]+)*)__([^_]+.*)$/i;
 

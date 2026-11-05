@@ -11,12 +11,6 @@ import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
 const PROD = "https://api.armoriq.ai";
 const LOGIN_LINE = `No ArmorClaude login for ${PROD}. Run: armoriq-dev login --product armorclaude --backend ${PROD}`;
 
-// ---------------------------------------------------------------------------
-// Enforcement is gated on being "connected" (a usable, SDK-format API key).
-// Fresh `claude plugin install` runs with no key → the plugin must NOT brick
-// the session; it runs in monitor mode until the user connects.
-// ---------------------------------------------------------------------------
-
 test("loadConfig: a usable ak_ key connects → enforce + intent required", () => {
   const config = loadConfigWithLogins([{ backend: PROD, apiKey: "ak_live_abc1234567890" }], {
     ARMORIQ_ENV: "production",
@@ -61,7 +55,6 @@ test("SessionStart when unconfigured: shows connect banner, runs passively (no b
   assert.ok(ctx.includes("MONITOR"), "banner should state monitor mode");
   assert.ok(ctx.includes(LOGIN_LINE), "banner should tell the model how to sign in");
   assert.equal(output?.systemMessage, LOGIN_LINE);
-  // Must not be a deny/block decision — SessionStart only adds context.
   assert.notEqual(output?.hookSpecificOutput?.permissionDecision, "deny");
 });
 

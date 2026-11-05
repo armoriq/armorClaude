@@ -62,7 +62,6 @@ const sub = (buf, no) => protoFields(buf).filter((f) => f.no === no && f.bytes);
 
 const STATUS_CODES = { 0: "unset", 1: "ok", 2: "error" };
 
-// Span status(15) -> code(3)
 function spanStatus(span) {
   const status = sub(span, 15)[0];
   const code = status ? protoFields(status.bytes).find((f) => f.no === 3) : undefined;
@@ -71,9 +70,6 @@ function spanStatus(span) {
 
 const hexField = (span, no) => sub(span, no)[0]?.bytes.toString("hex") || null;
 
-// ExportTraceServiceRequest -> ResourceSpans(1) -> ScopeSpans(2) -> Span(2): trace_id(1),
-// span_id(2), parent_span_id(4), name(5), start_time_unix_nano(7), end_time_unix_nano(8),
-// attributes(9)
 function decodeSpans(body) {
   const spans = [];
   for (const resourceSpans of sub(body, 1)) {
@@ -199,7 +195,6 @@ async function tempDir(prefix) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-// The daemon exits on startup when profiles is a file, so each hook runs in-process.
 async function withoutDaemon(dataDir) {
   await rm(path.join(dataDir, "profiles"), { recursive: true, force: true });
   await writeFile(path.join(dataDir, "profiles"), "not a directory");
@@ -392,7 +387,6 @@ test("daemon replies to Stop without waiting on the span export, and its shutdow
     const stopRepliedAt = await hook("Stop");
 
     await waitFor(() => backend.exportTimes.length > 0, 10_000, "the export Stop flushes");
-    // The SDK bounds a flush at 1.5 s, so a reply that waited on the held export lands that late.
     assert.ok(
       stopRepliedAt - backend.exportTimes[0] < 1_000,
       `Stop replied ${stopRepliedAt - backend.exportTimes[0]} ms after the export began`
@@ -462,7 +456,6 @@ test("one session stores the same trace with the daemon up and with it down (#17
     await runSession(daemonEnv, randomUUID());
     assert.ok(existsSync(path.join(daemonDir, "daemon.pid")), "a daemon served these hooks");
     await stopDaemon(daemonDir);
-    // A SessionEnd export still in flight at SIGTERM is spooled for the next daemon.
     await shipSpoolWithDaemon(daemonEnv, daemonDir);
 
     await withoutDaemon(fallbackDir);
@@ -625,8 +618,6 @@ test("fallback hooks spool their spans without waiting on a 2.5 s export, and a 
     for (const hook_event_name of ["PreToolUse", "PostToolUse", "SessionEnd"]) {
       const { code } = await runHook(env, { ...tool, hook_event_name, tool_response: {} });
       assert.equal(code, 0, hook_event_name);
-      // Time from the fallback starting, so a slow runner spawning the doomed
-      // daemon cannot hide a hook that waits out HOOK_LEASE_WAIT_MS (1.5 s).
       const took = Date.now() - fallbackStartedAt(dataDir, hook_event_name);
       assert.ok(took < 1_000, `${hook_event_name} spent ${took} ms in-process`);
     }
