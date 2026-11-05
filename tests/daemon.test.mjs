@@ -1,5 +1,3 @@
-/* eslint-disable */
-
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
@@ -46,14 +44,22 @@ async function spawnDaemonChild(dataDir) {
   throw new Error("daemon did not create socket within 3s");
 }
 
-async function killDaemon(child, dataDir) {
+function ignoreGone(error) {
+  if (error?.code !== "ESRCH" && error?.code !== "ENOENT") throw error;
+}
+
+async function killDaemon(child) {
   try {
     process.kill(child.pid, "SIGTERM");
-  } catch {}
+  } catch (error) {
+    ignoreGone(error);
+  }
   await new Promise((r) => setTimeout(r, 200));
   try {
     process.kill(child.pid, "SIGKILL");
-  } catch {}
+  } catch (error) {
+    ignoreGone(error);
+  }
 }
 
 async function loadConfigFor(dataDir) {
@@ -74,7 +80,7 @@ test("daemon: ping responds with the plugin's package version + uptime", async (
     assert.equal(reply.version, pkg.version);
     assert.ok(reply.uptime >= 0);
   } finally {
-    await killDaemon(child, dataDir);
+    await killDaemon(child);
   }
 });
 
@@ -96,7 +102,7 @@ test("daemon: PreToolUse roundtrip returns null for fast-path tool", async () =>
     });
     assert.equal(output, null, `read should fast-path; got ${JSON.stringify(output)}`);
   } finally {
-    await killDaemon(child, dataDir);
+    await killDaemon(child);
   }
 });
 
@@ -119,7 +125,7 @@ test("daemon: SessionStart returns context output", async () => {
     assert.match(context, /ArmorClaude installed but NOT connected/i);
     assert.match(context, /MONITOR mode/i);
   } finally {
-    await killDaemon(child, dataDir);
+    await killDaemon(child);
   }
 });
 
@@ -162,7 +168,7 @@ test("daemon: roundtrip latency p95 < 50ms (over Unix socket)", async () => {
       `daemon roundtrip p95 should be < 50ms; got p50=${p50.toFixed(2)} p95=${p95.toFixed(2)}`
     );
   } finally {
-    await killDaemon(child, dataDir);
+    await killDaemon(child);
   }
 });
 
@@ -192,13 +198,12 @@ test("daemon: concurrent hooks for SAME session serialize (runtime-state stays c
     const parsed = JSON.parse(raw);
     assert.ok(parsed.sessions["sess-conc-1"]);
   } finally {
-    await killDaemon(child, dataDir);
+    await killDaemon(child);
   }
 });
 
 test("daemon-client: spawnDaemon on missing socket (auto-spawn)", async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-spawn-"));
-  let childPid;
   try {
     const config = await loadConfigFor(dataDir);
     const { dispatchViaDaemon, pingDaemon } = await import("../scripts/lib/daemon-client.mjs");
@@ -219,7 +224,9 @@ test("daemon-client: spawnDaemon on missing socket (auto-spawn)", async () => {
       const { readFile } = await import("node:fs/promises");
       const pid = parseInt(await readFile(path.join(dataDir, "daemon.pid"), "utf8"), 10);
       if (Number.isFinite(pid)) process.kill(pid, "SIGTERM");
-    } catch {}
+    } catch (error) {
+      ignoreGone(error);
+    }
   }
 });
 
@@ -312,7 +319,9 @@ test("daemon-client: a daemon slower to start than 450 ms still serves the hook 
         parseInt(await readFile(path.join(dataDir, "daemon.pid"), "utf8"), 10),
         "SIGTERM"
       );
-    } catch {}
+    } catch (error) {
+      ignoreGone(error);
+    }
   }
 });
 
@@ -390,6 +399,6 @@ test("hook-router: a daemon-answered hook loads neither the engine nor the SDK r
     const log = path.join(dataDir, "daemon.log");
     assert.doesNotMatch(existsSync(log) ? readFileSync(log, "utf8") : "", /in-process/);
   } finally {
-    await killDaemon(child, dataDir);
+    await killDaemon(child);
   }
 });
