@@ -9,7 +9,6 @@ function hasBackend(config) {
   return Boolean(config.apiKey && config.backendEndpoint);
 }
 
-/** One call's v2 decision from the backend, which also spends an approved hold. */
 export async function enforceCall(config, body) {
   return jsonRequest(config, "POST", "/iap/sdk/enforce", body);
 }
@@ -29,7 +28,6 @@ export async function autoRegisterMcp(config, serverName) {
   }
 }
 
-/** JSON fetch helper honoring the configured timeout + auth headers. */
 async function jsonRequest(config, method, apiPath, body) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs || 8000);
@@ -47,16 +45,6 @@ async function jsonRequest(config, method, apiPath, body) {
   }
 }
 
-/**
- * Push the caller's policy to the backend as a STAGED PROPOSAL, using the armor
- * profile lifecycle: PUT /policies/profiles/draft then POST
- * /policies/profiles/propose. Both accept the plugin API key.
- *
- * Activation is intentionally NOT performed here — a human confirms the staged
- * proposal from the dashboard (POST /policies/profiles/confirm is JWT-only).
- * This is what makes a policy set from the terminal land in the DB and show up
- * in the UI awaiting confirmation.
- */
 export async function proposePolicy(config, policy, reason) {
   if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
   if (!policy) return { ok: false, reason: "no policy to propose" };
@@ -85,7 +73,6 @@ export async function proposePolicy(config, policy, reason) {
   }
 }
 
-/** Push a saved profile's policy to the backend as a staged proposal. */
 export async function pushProfile(config, profile) {
   return proposePolicy(
     config,
@@ -94,12 +81,10 @@ export async function pushProfile(config, profile) {
   );
 }
 
-/** Sync the current active policy to the backend as a staged proposal. */
 export async function syncPolicy(config, policyState) {
   return proposePolicy(config, policyState?.policy, "Policy synced via /armor (terminal)");
 }
 
-/** Read the org's active armor policy (API-key scoped: GET profiles/active). */
 export async function pullProfiles(config) {
   if (!hasBackend(config)) return { ok: false, reason: "no backend configured", profiles: [] };
   try {

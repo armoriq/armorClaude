@@ -16,21 +16,11 @@ export async function loadRuntimeState(runtimeFilePath) {
       : {};
   const discoveredTools = Array.isArray(raw?.discoveredTools) ? raw.discoveredTools : [];
   const state = { sessions, mcpRegistry, discoveredTools };
-  // Preserve the active-session pointer (written by the engine, read by the MCP
-  // server) across load/save round-trips.
   if (typeof raw?.activeSessionId === "string") state.activeSessionId = raw.activeSessionId;
   if (Number.isFinite(raw?.activeSessionAt)) state.activeSessionAt = raw.activeSessionAt;
   return state;
 }
 
-// ---------------------------------------------------------------------------
-// Active-session pointer — the policy MCP server (a separate stdio process) has
-// no access to the Claude Code session id: Claude Code exposes session_id only
-// in the hook JSON payload, never as an env var or .mcp.json interpolation. So
-// the engine (which DOES see session_id on every hook) stamps the most recently
-// active session id here; the MCP server reads it to scope register_intent_plan
-// and the Trust Update primitives to the correct live session.
-// ---------------------------------------------------------------------------
 export function setActiveSessionId(runtimeState, sessionId) {
   if (!sessionId || typeof sessionId !== "string") return;
   runtimeState.activeSessionId = sessionId;
@@ -80,10 +70,6 @@ export async function saveRuntimeState(runtimeFilePath, runtimeState) {
   await writeJson(runtimeFilePath, runtimeState);
 }
 
-// ---------------------------------------------------------------------------
-// Tool discovery — accumulate known tools across PreToolUse calls
-// ---------------------------------------------------------------------------
-
 export function upsertDiscoveredTool(runtimeState, toolName) {
   if (!toolName || typeof toolName !== "string") return;
   const name = toolName.trim();
@@ -101,12 +87,6 @@ export function upsertDiscoveredTool(runtimeState, toolName) {
 export function getDiscoveredTools(runtimeState) {
   return Array.isArray(runtimeState?.discoveredTools) ? runtimeState.discoveredTools : [];
 }
-
-// ---------------------------------------------------------------------------
-// Trust Update audit — append-only log of ReAnchor / Delegate / Revoke deltas
-// produced by armorClaude's automatic Trust Update integration. Mirrors the
-// IAP backend's TrustDelta table for in-process visibility and tests.
-// ---------------------------------------------------------------------------
 
 export function appendTrustOp(runtimeState, sessionId, op) {
   if (!sessionId || !op || typeof op !== "object") return;

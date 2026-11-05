@@ -75,10 +75,6 @@ function startMockOpa(handler) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// policy-compiler.mjs
-// ---------------------------------------------------------------------------
-
 test("compileToOpaInput maps deny rule correctly", () => {
   const input = compileToOpaInput([{ id: "p1", action: "deny", tool: "Bash" }], "Bash", {
     command: "ls",
@@ -115,10 +111,6 @@ test("compilePolicyForBundle produces bundle format", () => {
   assert.equal(bundle.format, "armorclaude-ir-v1");
   assert.ok(bundle.compiledAt);
 });
-
-// ---------------------------------------------------------------------------
-// opa-client.mjs
-// ---------------------------------------------------------------------------
 
 test("evaluateOpa returns error when no PDP URL", async () => {
   resetOpaClientState();
@@ -257,10 +249,6 @@ test("evaluateOpa circuit breaker opens after threshold failures", async () => {
   assert.ok(result.reason.includes("circuit breaker"));
 });
 
-// ---------------------------------------------------------------------------
-// Engine integration: OPA enforcement mode
-// ---------------------------------------------------------------------------
-
 test("handlePreToolUse uses OPA when enforcementEngine=opa", async () => {
   resetOpaClientState();
   const { server, url } = await startMockOpa((req, res) => {
@@ -338,10 +326,6 @@ test("handlePreToolUse falls back to local when OPA URL not set even if engine=o
   );
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
 });
-
-// ---------------------------------------------------------------------------
-// /armor policy settings commands
-// ---------------------------------------------------------------------------
 
 test("/armor policy settings shows current config", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "opa-test-"));

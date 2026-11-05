@@ -84,7 +84,6 @@ async function claim(dataDir, binding, sessionId, at) {
   const recorded = await readMarker(marker);
   if (!recorded) return startedAt;
   if (recorded.startTime) return recorded.startTime;
-  // Readers of one unreadable marker share its mtime, so racing rewrites agree.
   await placeMarker(marker, { startTime: recorded.writtenAt }, rename);
   return recorded.writtenAt;
 }

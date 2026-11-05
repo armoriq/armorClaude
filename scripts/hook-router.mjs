@@ -71,9 +71,6 @@ async function main() {
   try {
     input = JSON.parse(rawInput);
   } catch {
-    // Fail-closed: a malformed hook payload on a PreToolUse looks like
-    // enforcement missed, so deny in enforce mode instead of silent allow.
-    // Other events just exit — they can't allow anything on their own.
     if (config.mode === "enforce") {
       emitJson(denyPreTool("invalid_payload", "ArmorClaude hook payload invalid JSON"));
     }
@@ -89,8 +86,6 @@ async function main() {
     debugLog(config, `unhandled hook event: ${event}`);
     return;
   }
-  // The engine and observability take ~150 ms to import, longer than a whole
-  // daemon round trip, so only the in-process fallback loads them.
   const engine = await import("./lib/engine.mjs");
   const { observeHook, obsFlush } = await import("./lib/observability.mjs");
   const handler = engine[HANDLERS[event]];

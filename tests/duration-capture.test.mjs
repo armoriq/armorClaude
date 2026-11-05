@@ -6,7 +6,6 @@ import {
   _clearToolStartTimes,
 } from "../scripts/lib/engine.mjs";
 
-// Clean up between tests
 test.beforeEach(() => {
   _clearToolStartTimes();
 });
@@ -20,7 +19,6 @@ test("Pre->Post round-trip yields positive duration", async () => {
 
   _recordToolStart(input);
 
-  // Simulate some elapsed time
   await new Promise((r) => setTimeout(r, 20));
 
   const duration = _computeToolDuration(input);
@@ -43,15 +41,12 @@ test("Concurrent tool_use_ids don't collide", () => {
   _recordToolStart(inputA);
   _recordToolStart(inputB);
 
-  // Compute B first — should only consume B's entry
   const durationB = _computeToolDuration(inputB);
   assert.ok(typeof durationB === "number", "durationB should be a number");
 
-  // A's entry should still be present
   const durationA = _computeToolDuration(inputA);
   assert.ok(typeof durationA === "number", "durationA should be a number");
 
-  // Both consumed — second lookup on A should yield null
   const durationA2 = _computeToolDuration(inputA);
   assert.equal(durationA2, null, "second lookup should return null");
 });
@@ -77,17 +72,12 @@ test("Failure path captures duration too", async () => {
   _recordToolStart(input);
   await new Promise((r) => setTimeout(r, 10));
 
-  // _computeToolDuration is agnostic to success/failure — it just computes
-  // elapsed time. The failure path in handlePostToolUseFailure calls it the
-  // same way as the success path.
   const duration = _computeToolDuration(input);
   assert.ok(typeof duration === "number", "duration should be a number");
   assert.ok(duration >= 5, `duration should be >= 5ms, got ${duration}`);
 });
 
 test("Deny in pre-hook still records start timestamp", () => {
-  // _recordToolStart is called BEFORE any deny/early-return in handlePreToolUse.
-  // This test verifies the function stores the start time regardless.
   const input = {
     tool_use_id: "tu-denied-001",
     session_id: "sess-1",
@@ -96,7 +86,6 @@ test("Deny in pre-hook still records start timestamp", () => {
 
   _recordToolStart(input);
 
-  // The start time should be available for later retrieval
   const duration = _computeToolDuration(input);
   assert.ok(typeof duration === "number", "duration should be a number even for denied calls");
   assert.ok(duration >= 0, "duration should be non-negative");

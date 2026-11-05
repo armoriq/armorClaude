@@ -25,9 +25,7 @@ export async function seedBuiltinProfiles(config) {
     const existing = await readJson(filePath, null);
     const policy = normalizePolicyIr(tmpl.policy);
     const templateHash = canonicalPolicyHash(policy);
-    // Skip user-created profiles entirely — never overwrite them.
     if (existing && existing.profile?.createdBy !== "builtin") continue;
-    // Skip builtins that are already up to date.
     if (existing && existing.builtinHash === templateHash) continue;
     await writeJson(filePath, {
       profile: {

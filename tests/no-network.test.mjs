@@ -6,8 +6,6 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-// Every blocked attempt runs in a child process: the guard fails any process
-// that tried to leave loopback, and this file must stay clean itself.
 const HOST = "armorclaude-tests.example.invalid";
 
 function runChild(body) {

@@ -52,10 +52,6 @@ function buildConfig(tmpDir, overrides = {}) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// parseToolIdentity
-// ---------------------------------------------------------------------------
-
 test("parseToolIdentity: builtin tools", () => {
   assert.equal(parseToolIdentity("Read").category, "builtin");
   assert.equal(parseToolIdentity("Bash").category, "builtin");
@@ -97,10 +93,6 @@ test("parseToolIdentity: handles null/empty", () => {
   assert.equal(parseToolIdentity("").category, "unknown");
 });
 
-// ---------------------------------------------------------------------------
-// MCP registry helpers
-// ---------------------------------------------------------------------------
-
 test("getMcpServerStatus returns null for unknown server", () => {
   const state = { sessions: {}, mcpRegistry: {} };
   assert.equal(getMcpServerStatus(state, "github"), null);
@@ -121,10 +113,6 @@ test("listMcpServers returns all registered servers", () => {
   const servers = listMcpServers(state);
   assert.equal(servers.length, 2);
 });
-
-// ---------------------------------------------------------------------------
-// PreToolUse: MCP deny-by-default
-// ---------------------------------------------------------------------------
 
 test("handlePreToolUse asks before running an unknown external MCP tool", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "mcp-gate-test-"));
@@ -253,10 +241,6 @@ test("MCP gate is disabled when mcpDenyByDefault is false", async () => {
     "MCP gate should not deny when mcpDenyByDefault is false"
   );
 });
-
-// ---------------------------------------------------------------------------
-// /armor policy mcp commands
-// ---------------------------------------------------------------------------
 
 test("/armor policy mcp list shows no servers initially", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "mcp-gate-test-"));

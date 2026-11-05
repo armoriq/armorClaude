@@ -17,12 +17,6 @@ import {
   saveRuntimeState,
 } from "../scripts/lib/runtime-state.mjs";
 
-// ---------------------------------------------------------------------------
-// Mock SDK client — matches the shape of @armoriq/sdk's ArmorIQClient just
-// enough for the wrappers under test. Each test injects its own getClient
-// closure so calls and failures can be observed.
-// ---------------------------------------------------------------------------
-
 function mockClient({ revoke, reanchor, delegateSubtree } = {}) {
   return {
     revoke: revoke || (async () => ({ trustId: "tr_revoke_default" })),
@@ -44,10 +38,6 @@ function mockClient({ revoke, reanchor, delegateSubtree } = {}) {
 }
 
 const baseConfig = { apiKey: "ak_test", useSdkIntent: true };
-
-// ---------------------------------------------------------------------------
-// reanchorViaSdk
-// ---------------------------------------------------------------------------
 
 test("reanchorViaSdk forwards token + plan + reason to client.reanchor", async () => {
   let captured = null;
@@ -91,7 +81,7 @@ test("reanchorViaSdk returns ok=false when SDK throws (does not propagate)", asy
 test("reanchorViaSdk fails fast when SDK is disabled (no apiKey)", async () => {
   const result = await reanchorViaSdk({
     getClient: () => mockClient(),
-    config: { useSdkIntent: true }, // no apiKey
+    config: { useSdkIntent: true },
     intentToken: {},
     updatedPlan: { steps: [] },
   });
@@ -109,10 +99,6 @@ test("reanchorViaSdk validates required args", async () => {
   });
   assert.equal(b.ok, false);
 });
-
-// ---------------------------------------------------------------------------
-// revokeViaSdk
-// ---------------------------------------------------------------------------
 
 test("revokeViaSdk forwards full intent token + reason + cascade to client.revoke", async () => {
   let captured = null;
@@ -151,8 +137,6 @@ test("revokeViaSdk synthesizes minimal token when only tokenId is given", async 
     reason: "operator",
   });
   assert.equal(result.ok, true);
-  // The synthesized shape carries token_id deep enough for the backend's
-  // relaxed RevokeDto to extract it.
   assert.equal(captured?.tokenId, "tok_only");
   assert.equal(captured?.token_id, "tok_only");
 });
@@ -172,10 +156,6 @@ test("revokeViaSdk swallows SDK errors and reports", async () => {
   assert.equal(result.ok, false);
   assert.match(result.error, /backend 500/);
 });
-
-// ---------------------------------------------------------------------------
-// delegateSubtreeViaSdk
-// ---------------------------------------------------------------------------
 
 test("delegateSubtreeViaSdk forwards subtreePath + delegate key", async () => {
   let captured = null;
@@ -213,14 +193,9 @@ test("delegateSubtreeViaSdk validates required args", async () => {
     getClient: () => mockClient(),
     config: baseConfig,
     intentToken: { tokenId: "p" },
-    // no opts
   });
   assert.equal(r.ok, false);
 });
-
-// ---------------------------------------------------------------------------
-// runtime-state: appendTrustOp + getTrustOps
-// ---------------------------------------------------------------------------
 
 test("appendTrustOp persists ordered audit entries on the session", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-trustop-"));
@@ -248,8 +223,8 @@ test("appendTrustOp persists ordered audit entries on the session", async () => 
 
 test("appendTrustOp tolerates missing session and missing op", () => {
   const state = { sessions: {} };
-  appendTrustOp(state, "missing", { operation: "Revoke" }); // should not throw
-  appendTrustOp(state, "", { operation: "Revoke" }); // empty session id
-  appendTrustOp(state, "x", null); // null op
+  appendTrustOp(state, "missing", { operation: "Revoke" });
+  appendTrustOp(state, "", { operation: "Revoke" });
+  appendTrustOp(state, "x", null);
   assert.equal(getTrustOps(state, "missing").length, 0);
 });

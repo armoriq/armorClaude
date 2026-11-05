@@ -10,12 +10,6 @@ async function readJson(relPath) {
   return JSON.parse(await readFile(path.join(repoRoot, relPath), "utf8"));
 }
 
-// Claude Code substitutes ${CLAUDE_PLUGIN_ROOT} literally. It does NOT implement
-// shell parameter expansion, so a bash-style default such as
-// ${CLAUDE_PLUGIN_ROOT:-.} is not recognised and collapses to ".", which then
-// resolves against the user's cwd instead of the plugin directory. The MCP
-// server then fails to start with "MCP error -32000: Connection closed" and
-// register_intent_plan is never exposed — enforcement silently does nothing.
 test("plugin manifests reference CLAUDE_PLUGIN_ROOT without shell default syntax", async () => {
   for (const relPath of [".mcp.json", "hooks/hooks.json"]) {
     const raw = await readFile(path.join(repoRoot, relPath), "utf8");
