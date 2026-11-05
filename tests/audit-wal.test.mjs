@@ -1,9 +1,7 @@
-/* eslint-disable */
-
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile, stat } from "node:fs/promises";
-import { existsSync, readdirSync } from "node:fs";
+import { mkdtemp } from "node:fs/promises";
+import { readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -83,7 +81,7 @@ test("rotation: oversize triggers archive + offset reset", async () => {
 });
 
 test("malformed line is skipped, not blocking the stream", async () => {
-  const { dir, wal } = await fixture();
+  const { wal } = await fixture();
   await wal.appendLine({ id: 1 });
   const fs = await import("node:fs/promises");
   await fs.appendFile(wal._paths.currentPath, "this is not json\n", "utf8");
@@ -104,7 +102,7 @@ test("row too large is rejected (cap protects O_APPEND atomicity)", async () => 
 });
 
 test("readBatch returns rows in enqueue order even when disk order is scrambled", async () => {
-  const { dir, wal } = await fixture();
+  const { wal } = await fixture();
   await Promise.all(
     Array.from({ length: 10 }, (_, i) => wal.appendLine({ logical_step: i, payload: `row-${i}` }))
   );
