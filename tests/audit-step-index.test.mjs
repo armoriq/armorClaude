@@ -85,3 +85,12 @@ test("once every matching step is used, a further call falls back to the first m
   ]);
   assert.deepEqual(steps, [2, 2]);
 });
+
+test("an off-plan call carries no step index, and an on-plan call keeps its step", async (t) => {
+  const steps = await stepsFor(t, [
+    ["Write", { file_path: "a.txt", content: "x" }],
+    ["Write", { file_path: "a.txt", content: "x" }, "PostToolUseFailure"],
+    ["Bash", { command: "ls" }],
+  ]);
+  assert.deepEqual(steps, [null, null, 0]);
+});
