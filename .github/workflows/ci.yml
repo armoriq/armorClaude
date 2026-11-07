@@ -4,17 +4,29 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "57 2 * * *"
+  workflow_dispatch:
+    inputs:
+      flake_hunt:
+        description: Run the tests five times and report flaky ones
+        type: boolean
+        default: false
 
 jobs:
   check:
+    name: check (${{ matrix.node-version }})${{ matrix.attempt > 1 && format(' attempt {0}', matrix.attempt) || '' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # package.json requires >=20.19.0; 22 is what the plugin runs on in practice.
         node-version: ["20.19", "22"]
+        attempt: ${{ fromJSON((github.event_name == 'schedule' || inputs.flake_hunt) && '[1, 2, 3, 4, 5]' || '[1]') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || '' }}
 
       - uses: actions/setup-node@v4
         with:
@@ -30,4 +42,35 @@ jobs:
         run: npm run format:check
 
       - name: Test
-        run: npm test
+        run: |
+          mkdir -p flake-results
+          npm test -- --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=flake-results/junit.xml
+      - name: Upload results for the flake report
+        if: always() && (github.event_name == 'schedule' || inputs.flake_hunt)
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-${{ matrix.attempt }}-node${{ matrix.node-version }}
+          path: flake-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  flake-report:
+    name: flake report
+    needs: [check]
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.flake_hunt) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: flake-*
+          path: flake-results
+      - uses: armoriq/.github/.github/actions/flake-report@main
+        with:
+          results: flake-results
+          attempts: 5
+          ref: ${{ github.event_name == 'schedule' && 'dev' || github.ref_name }}
+          sha: ""
