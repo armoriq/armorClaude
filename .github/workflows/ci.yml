@@ -57,7 +57,7 @@ jobs:
   flake-report:
     name: flake report
     needs: [check]
-    if: always() && (github.event_name == 'schedule' || inputs.flake_hunt)
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.flake_hunt) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
