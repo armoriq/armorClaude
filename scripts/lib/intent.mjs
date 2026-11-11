@@ -29,13 +29,6 @@ export function getSdkClient(config) {
   if (cached) {
     return cached;
   }
-  // SDK has separate iapEndpoint/proxyEndpoint params for legacy reasons
-  // (the SDK can also act as a tool dispatcher via invokeWithPolicy, which
-  // armorclaude never uses). We pass csrgEndpoint as iapEndpoint because
-  // the SDK's `/delegation/create` route lives on csrg-iap. We don't pass
-  // proxyEndpoint: only invoke and invokeWithPolicy, which armorclaude never
-  // calls, and SDK constructors before armoriq-sdk-customer-ts#269 (a
-  // GET {proxy}/health probe) send a request to the SDK's default proxy.
   const client = new ArmorIQClient({
     apiKey: config.apiKey,
     userId: config.userId,
@@ -231,11 +224,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput, strict = false
       return { allowed: true };
     }
   }
-  // Permissive by default: declared step arguments are advisory, not contractual.
-  // LLM plans are predictions; treating exact param mismatch as a security
-  // violation produces too many false positives (see live screenshot from the
-  // user's other Claude Code session). Set strict=true (or
-  // ARMORCLAUDE_STRICT_PARAM_CHECK=true via the engine handler) to opt back in.
+  // Param checks are permissive by default; ARMORCLAUDE_STRICT_PARAM_CHECK=true turns on strict checking.
   if (sawConstrainedMatch && strict) {
     return {
       allowed: false,
@@ -271,7 +260,6 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
     };
   }
 
-  // Parameter-level enforcement: check tool params against plan step constraints
   if (isPlainObject(toolParams)) {
     const paramCheck = checkToolAgainstPlan({
       plan: parsed.plan,
@@ -554,8 +542,6 @@ export function validateCsrgProofHeaders(proofs, required) {
 }
 
 export async function requestIntent(config, payload) {
-  // SDK is the only intent path. The HTTP-direct override (intentEndpoint)
-  // and the useSdkIntent toggle were both retired in the env cleanup.
   if (!config.apiKey) {
     return { skipped: true };
   }

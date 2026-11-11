@@ -1,21 +1,4 @@
-/**
- * Audit Write-Ahead Log
- *
- * An append-only JSONL file on disk per login. Crash-recoverable: a daemon
- * SIGKILL between disk write and backend ack loses zero rows, because rows
- * are on disk before the caller is acknowledged.
- *
- * Layout under <dataDir>/audit/<loginTag(backend, apiKey)>/:
- *   current.jsonl       - append-only, today's audit rows
- *   shipped.offset      - last byte the backend has acked (atomic write)
- *   archive/YYYY-MM-DD-NNN.jsonl - rotated segments
- *
- * Concurrency: POSIX `O_APPEND` is atomic for writes <= PIPE_BUF
- * (approximately 4096 B on macOS/Linux). Each audit row is around 500 bytes
- * typical, so concurrent appends from multiple hooks do not interleave. If a
- * row grows past roughly 4 KB the kernel may split the write, so appendLine
- * caps rows at 4000 bytes and rejects larger payloads.
- */
+/** O_APPEND writes are atomic only up to PIPE_BUF (~4 KB), so appendLine caps rows at 4000 bytes or rows tear. */
 
 import { createHash } from "node:crypto";
 import { appendFile, open, readFile, rename, stat, unlink } from "node:fs/promises";

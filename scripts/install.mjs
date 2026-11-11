@@ -1,8 +1,4 @@
 #!/usr/bin/env node
-/**
- * Installs the global /armor slash command into <Claude config dir>/commands/armor.md
- * so users can type /armor yes instead of /armorclaude:armor yes.
- */
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -37,6 +33,5 @@ async function install() {
 }
 
 install().catch((err) => {
-  // Non-fatal — don't break npm install if this fails.
   console.warn(`ArmorClaude: could not install /armor command: ${err?.message ?? err}`);
 });

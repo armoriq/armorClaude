@@ -75,10 +75,6 @@ function startMockCsrg(handler) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Config: cryptoPolicyEnabled auto-enables with apiKey
-// ---------------------------------------------------------------------------
-
 test("loadConfig auto-enables cryptoPolicyEnabled when apiKey is set", () => {
   const config = loadConfigWithLogins(
     [{ backend: "http://localhost:8000", apiKey: "ak_test_1234567890" }],
@@ -87,11 +83,6 @@ test("loadConfig auto-enables cryptoPolicyEnabled when apiKey is set", () => {
   assert.equal(config.cryptoPolicyEnabled, true);
 });
 
-// cryptoPolicyEnabled follows the REAL api key, whereas config.apiKey falls back
-// to a local-mock placeholder so the SDK constructor accepts it. Comparing the
-// two directly only held on a machine that happened to have credentials in
-// ~/.armoriq/credentials.json; with none present the placeholder is truthy while
-// cryptoPolicyEnabled is correctly false.
 const LOCAL_MOCK_PLACEHOLDER_KEY = "ak_test_localmock000000000000";
 
 test("loadConfig: cryptoPolicyEnabled is tied to real apiKey presence", () => {
@@ -108,8 +99,6 @@ test("loadConfig: a signed-in key enables crypto policy", () => {
   assert.equal(config.cryptoPolicyEnabled, true);
 });
 
-// This is the dev branch, which config.mjs documents as staging-default.
-// The production default belongs to the main branch.
 test("loadConfig: dev branch defaults to staging endpoints", () => {
   const config = loadConfig({});
   assert.equal(config.armoriqEnv, "staging");
@@ -145,10 +134,6 @@ test("loadConfig: ARMORIQ_ENV=development allows local endpoint overrides", () =
   assert.equal(config.backendEndpoint, "http://127.0.0.1:3000");
   assert.equal(config.csrgEndpoint, "http://127.0.0.1:8080");
 });
-
-// ---------------------------------------------------------------------------
-// /armor policy confirm with crypto enabled
-// ---------------------------------------------------------------------------
 
 test("confirm issues crypto policy token when cryptoPolicyEnabled and CSRG reachable", async () => {
   let csrgCalled = false;
@@ -352,16 +337,9 @@ test("confirm does not attempt crypto when cryptoPolicyEnabled is false", async 
   assert.ok(!out.includes("crypto"));
 });
 
-// ---------------------------------------------------------------------------
-// OPA mode: confirm pushes to backend
-// ---------------------------------------------------------------------------
-
 test("confirm pushes to backend in OPA mode", async () => {
   let syncCalled = false;
   const { server, url } = await startMockCsrg((req, res) => {
-    // syncPolicy() proposes through /policies/profiles/draft + /propose. It
-    // stopped using /policies/sync when terminal policy changes became staged
-    // proposals, so matching the old path never fired.
     if (req.url?.includes("/policies/profiles/")) syncCalled = true;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
@@ -377,8 +355,6 @@ test("confirm pushes to backend in OPA mode", async () => {
 
     await handleArmorPolicyCommand("/armor policy add deny Bash", config);
     await handleArmorPolicyCommand("/armor policy confirm", config);
-    // The push is deliberately fire-and-forget so confirmation is not blocked
-    // on the network, so poll rather than asserting on the next tick.
     for (let i = 0; i < 50 && !syncCalled; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }

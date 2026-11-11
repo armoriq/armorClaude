@@ -20,8 +20,6 @@ export async function readJson(filePath, fallbackValue) {
     if (error && typeof error === "object" && error.code === "ENOENT") {
       return fallbackValue;
     }
-    // Corrupted JSON (e.g. interrupted write from an older non-atomic build)
-    // falls back to the default rather than breaking the whole session.
     if (error instanceof SyntaxError) {
       return fallbackValue;
     }

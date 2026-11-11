@@ -61,18 +61,12 @@ async function seedPolicy(config, rules = []) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Low-level profile CRUD
-// ---------------------------------------------------------------------------
-
 test("seedBuiltinProfiles creates one profile per template", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "profiles-test-"));
   const config = buildConfig(tmp);
   await seedBuiltinProfiles(config);
   const files = await readdir(path.join(tmp, "profiles"));
   const jsonFiles = files.filter((f) => f.endsWith(".json")).sort();
-  // Derived from POLICY_TEMPLATES so adding a template does not silently break
-  // this test the way a hard-coded count did.
   const expected = Object.keys(POLICY_TEMPLATES)
     .map((name) => `${name}.json`)
     .sort();
@@ -148,10 +142,6 @@ test("deleteProfile returns false for non-existent profile", async () => {
   const deleted = await deleteProfile(config, "nonexistent");
   assert.equal(deleted, false);
 });
-
-// ---------------------------------------------------------------------------
-// /armor policy profile commands via command handler
-// ---------------------------------------------------------------------------
 
 test("/armor policy profile list shows all profiles", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "profiles-test-"));
@@ -247,10 +237,6 @@ test("/armor policy profile pull without apiKey returns error", async () => {
   const out = await handleArmorPolicyCommand("/armor policy profile pull", config);
   assert.ok(out.includes("armoriq-dev login --product armorclaude"));
 });
-
-// ---------------------------------------------------------------------------
-// End-to-end: save current policy, switch to template, switch back
-// ---------------------------------------------------------------------------
 
 test("round-trip: save custom → switch to template → switch back to custom", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "profiles-test-"));

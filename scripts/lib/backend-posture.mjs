@@ -16,15 +16,12 @@ const CAPABILITY_BY_TOOL = new Map(
   Object.entries(CAPABILITIES).flatMap(([capability, tools]) => tools.map((t) => [t, capability]))
 );
 
-/** The capability-table class of a tool: read, write, shell, mcp, web or other. */
 export function capabilityOf(toolName) {
   const norm = normalizeToolName(toolName);
   if (norm.startsWith("mcp__")) return "mcp";
   return CAPABILITY_BY_TOOL.get(norm) ?? "other";
 }
 
-// Hooks run in short-lived processes as well as the daemon, so the posture
-// lives in a file shared by both, bound to the backend and key it was seen with.
 function postureFile(config) {
   return path.join(config.dataDir, "backend-posture.json");
 }
@@ -57,7 +54,6 @@ export function backendUnreachable(config, now = Date.now()) {
   return (readPosture(config).unreachableUntil ?? 0) > now;
 }
 
-/** The backend answered 401 for this key: the plugin runs signed out until a new login. */
 export function signedOut(config) {
   return Boolean(config.apiKey) && readPosture(config).signedOut === true;
 }

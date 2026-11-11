@@ -27,7 +27,7 @@ test("deviceIdentity falls back to a stable hostname hash without a CLI id", () 
   assert.equal(a.deviceId, b.deviceId);
 });
 
-// The usage sync is the only writer of token-usage rows (#156, #158).
+// regression: #156
 test("Stop posts no token usage itself", async () => {
   const { handleStop } = await import("../scripts/lib/engine.mjs");
   const intentMod = await import("../scripts/lib/intent.mjs");

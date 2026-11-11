@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { allowWithNotice, isBillingError, denyPreTool } from "../scripts/lib/hook-output.mjs";
 
 test("isBillingError matches the backend 402 subscription messages", () => {
-  // Exact strings from conmap-auto/src/billing/quota.service.ts
   assert.equal(
     isBillingError("An active ArmorIQ Pro subscription is required to use armorclaude."),
     true
@@ -25,10 +24,8 @@ test("isBillingError does NOT swallow real enforcement / network errors", () => 
 
 test("allowWithNotice steps aside (no permissionDecision) and surfaces the nudge", () => {
   const out = allowWithNotice("upgrade at https://tools.armoriq.ai/tools/billing");
-  // Must NOT force allow/deny — Claude Code's own permission flow proceeds.
   assert.equal(out.hookSpecificOutput.permissionDecision, undefined);
   assert.equal(out.hookSpecificOutput.hookEventName, "PreToolUse");
-  // The user-visible message is present.
   assert.match(out.systemMessage, /upgrade/i);
 });
 

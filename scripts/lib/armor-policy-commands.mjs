@@ -19,9 +19,7 @@ import {
 const PENDING_FILE = "policy-pending.json";
 const DRAFTS_FILE = "policy-drafts.json";
 const PROPOSAL_TTL_MS = 30 * 60 * 1000;
-// Safe profile/template slug: lowercase alphanumeric, hyphen-separated.
-// Rejects path separators and "." so a template name can never traverse
-// outside the profiles directory (e.g. "../foo", "a/b").
+// Must reject "/" and ".": the name becomes a file path, so "../foo" would escape the profiles directory.
 const SAFE_PROFILE_NAME = /^[a-z0-9][a-z0-9-]*$/;
 const KNOWN_CLAUDE_TOOLS = new Set([
   "*",
@@ -1851,8 +1849,6 @@ function parseCommand(prompt) {
   const removeMatch = rest.match(/^remove\s+(\S+)/i);
   if (removeMatch) return { cmd: "remove", id: removeMatch[1] };
 
-  // Accepts one or more bundle names (comma- or space-separated). Multiple
-  // bundles are merged (most-restrictive-wins) into a single policy.
   const templateMatch = rest.match(/^template\s+(.+)/i);
   if (templateMatch) {
     const names = templateMatch[1]
@@ -2303,10 +2299,6 @@ export async function handleArmorPolicyCommand(prompt, config) {
     case "template": {
       const names = parsed.names?.length ? parsed.names : [parsed.name].filter(Boolean);
 
-      // Resolve each requested bundle to a template. Falls back to a seeded
-      // builtin profile on disk so new bundles work without a daemon version
-      // bump. Only builtins are eligible, and the name must be a safe slug so we
-      // never resolve a path outside the profiles directory.
       const resolve = async (nm) => {
         let tmpl = getTemplate(nm);
         if (!tmpl && SAFE_PROFILE_NAME.test(nm)) {
@@ -2434,19 +2426,9 @@ export async function handleArmorPolicyCommand(prompt, config) {
       }
       await clearPending(config);
 
-      // Push policy to backend for all engines (local is the default) when a
-      // backend is configured. Fire-and-forget: local policy is authoritative,
-      // and armor commands run under a long-lived daemon that outlives this
-      // call, so a detached promise flushes without blocking confirmation.
-      // Matches the hasBackend() check in backend-client.mjs.
       let dashboardNote = "";
       if (config.apiKey && config.backendEndpoint) {
         syncPolicyToBackend(config, nextState).catch(() => {});
-        // The push lands as a staged proposal, not the active org policy, while
-        // SessionStart pulls the dashboard's ACTIVE policy over the local one.
-        // So this change enforces now and is silently reverted at the start of
-        // the next session unless someone confirms it in the dashboard. Saying
-        // only "Policy updated" reads as permanent and it is not.
         dashboardNote =
           "\nThis applies to the current session. It was also sent to the dashboard as a" +
           " proposal — confirm it there (Policies → Confirm) or the next session will pull the" +
@@ -2605,17 +2587,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
   }
 }
 
-/**
- * Dashboard-authoritative sync: pull the org's CONFIRMED active policy from the
- * backend and make it the local enforced policy. Called on session start.
- *
- * Fail-safe by construction: on ANY problem (no api key, network error, invalid
- * remote policy, or crypto policy-token issuance failure) the local policy is
- * left untouched — a failed pull never wipes or loosens enforcement. No-op when
- * the remote policy already matches the local one.
- *
- * Returns { ok, changed, version?, reason? }.
- */
+/** On any failure leave the local policy untouched, so a failed pull can never wipe or loosen enforcement. */
 export async function syncActivePolicyFromBackend(config) {
   if (!config.apiKey) return { ok: false, changed: false, reason: "no api key" };
 
@@ -2658,9 +2630,6 @@ export async function syncActivePolicyFromBackend(config) {
     ],
   };
 
-  // Re-issue the crypto policy token for the new policy, exactly like confirm.
-  // If issuance fails, do NOT overwrite local policy — keep enforcing the
-  // current one rather than switch to a policy we can't back with a token.
   const cryptoResult = await issueCryptoPolicyTokenForState(config, nextState);
   if (!cryptoResult.ok) {
     return {

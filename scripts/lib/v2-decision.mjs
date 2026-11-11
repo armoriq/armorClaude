@@ -14,8 +14,6 @@ import {
   signedOut,
 } from "./backend-posture.mjs";
 
-// One cache per backend, key and agent. In the daemon it lives for the whole
-// session, so the org's v2 bundle is fetched once and revalidated by ETag.
 const caches = new Map();
 
 function bundleCache(config) {
@@ -36,9 +34,6 @@ function bundleCache(config) {
   return caches.get(key);
 }
 
-// The cache asks for an axios-shaped client; this one sends the plugin's own
-// auth and client headers like every other backend call. Its answer, or the
-// lack of one within BACKEND_TIMEOUT_MS, sets the backend posture.
 function bundleHttpClient(config) {
   return {
     async get(url, { params = {}, headers = {} } = {}) {
@@ -64,7 +59,6 @@ function bundleHttpClient(config) {
   };
 }
 
-/** The tool name and server v2 rules key on: MCP tools by their own name, scoped to their server. */
 export function v2Call(toolName) {
   const identity = parseToolIdentity(toolName);
   const mcp = identity.category === "external-mcp" || identity.category === "plugin-mcp";
@@ -81,14 +75,6 @@ export function unreachableReason(config, toolName) {
   );
 }
 
-/**
- * The org's v2 verdict for one call, decided locally from the policy bundle.
- * Anything but a read confirms the bundle with the backend at least every
- * UNREACHABLE_FOR_MS, so a backend that stopped answering blocks it with
- * `backend_unreachable`; a read runs on the cached bundle, or none. Otherwise
- * a bundle that cannot be fetched, or is older than the SDK's stale limit,
- * decides `block`.
- */
 export async function decideV2(config, toolName, toolArgs) {
   const cache = bundleCache(config);
   const { decideLocally } = sdkModule("local-decision");
@@ -145,11 +131,6 @@ function signedToken(intentTokenRaw) {
   }
 }
 
-/**
- * A held call goes to the backend, the only place an approval is spent:
- * `approved_delegation` lets it run once, a rejection or expiry blocks it,
- * and a still-held call files one delegation request per call shape.
- */
 export async function resolveV2Hold(config, { intentTokenRaw, toolName, toolArgs, session }) {
   const intentToken = intentTokenRaw ? signedToken(intentTokenRaw) : null;
   if (!intentToken?.plan_id) {

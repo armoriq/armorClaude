@@ -52,7 +52,6 @@ function childEnv(config) {
     CLAUDE_PLUGIN_OPTION_API_KEY: config.apiKey,
     ARMORIQ_ENV: config.armoriqEnv,
     ARMORIQ_BACKEND_URL: config.backendEndpoint,
-    // Children run from dataDir, so a relative value would resolve elsewhere.
     CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR?.trim() && claudeConfigDir(),
   };
   const env = { ...process.env };
