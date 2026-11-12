@@ -145,8 +145,9 @@ export function createAuditWal(opts) {
 
       rows.sort(compareForOrder);
       const stripped = rows.map((row) => {
-        // eslint-disable-next-line no-unused-vars
-        const { _seq, _enqueuedAt, ...rest } = row;
+        const rest = { ...row };
+        delete rest._seq;
+        delete rest._enqueuedAt;
         return rest;
       });
       return { rows: stripped, endOffset: offset + pos };
