@@ -30,22 +30,27 @@ async function startWith(overrides) {
     { hook_event_name: "SessionStart", session_id: `s-${Math.random()}` },
     config
   );
-  return output?.hookSpecificOutput?.additionalContext || "";
+  return {
+    ctx: output?.hookSpecificOutput?.additionalContext || "",
+    shown: output?.systemMessage || "",
+  };
 }
 
-test("SessionStart warns when connected but usage sync is off", async () => {
-  const ctx = await startWith({ usageSyncEnabled: false });
-  assert.ok(ctx.includes(NOTICE), "a connected session with sync off must say so");
-  assert.ok(ctx.includes("disable_usage_sync"), "it must name the option to unset");
+test("SessionStart warns the person, not just the model, when usage sync is off", async () => {
+  const { ctx, shown } = await startWith({ usageSyncEnabled: false });
+  assert.ok(shown.includes(NOTICE), "systemMessage is what Claude Code prints to the person");
+  assert.ok(shown.includes("disable_usage_sync"), "it must name the option to unset");
+  assert.ok(ctx.includes(NOTICE), "the model is told too, so it can answer questions about it");
 });
 
 test("SessionStart stays quiet when usage sync is on", async () => {
-  const ctx = await startWith({ usageSyncEnabled: true });
+  const { ctx, shown } = await startWith({ usageSyncEnabled: true });
+  assert.equal(shown, "", "a reporting session must not be warned");
   assert.ok(!ctx.includes(NOTICE), "a reporting session must not be warned");
 });
 
 test("SessionStart does not add the sync notice when not connected", async () => {
-  const ctx = await startWith({ unconfigured: true, apiKey: "", usageSyncEnabled: false });
+  const { ctx } = await startWith({ unconfigured: true, apiKey: "", usageSyncEnabled: false });
   assert.ok(ctx.includes("NOT connected"), "the connect banner still owns this case");
   assert.ok(!ctx.includes(NOTICE), "signing in is the fix, so do not stack a second warning");
 });

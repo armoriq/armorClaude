@@ -602,11 +602,16 @@ export async function handleSessionStart(input, config) {
 
   const intentLabel = intentMode(config, (await loadPolicyState(config.policyFile)).policy);
   const usageNote = usageSyncOffNotice(config);
-  return addPromptContext(
-    `ArmorClaude active (${modeLabel}, intent=${intentLabel})${syncNote}${onboardingMsg}` +
-      (usageNote ? `\n\n${usageNote}` : ""),
-    "SessionStart"
-  );
+  return {
+    // systemMessage is what Claude Code prints to the person. Context alone
+    // only reaches the model, which may never mention it.
+    ...(usageNote && { systemMessage: usageNote }),
+    ...addPromptContext(
+      `ArmorClaude active (${modeLabel}, intent=${intentLabel})${syncNote}${onboardingMsg}` +
+        (usageNote ? `\n\n${usageNote}` : ""),
+      "SessionStart"
+    ),
+  };
 }
 
 // ---------------------------------------------------------------------------
