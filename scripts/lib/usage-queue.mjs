@@ -64,7 +64,12 @@ function updateSession(dir, sessionId, change) {
   });
 }
 
-async function titleChange(dir, { sessionId, transcript }, state, pending) {
+async function titleChange(dir, { sessionId, transcript }, state, pending, capture) {
+  // The console reaches a title only through the session's usage rows, so a title for a
+  // session that has reported none would never be shown. Renaming an old session, whose
+  // usage all predates the cutoff, is how that happens.
+  const reported = capture.hours.length > 0 || Object.keys(state.acknowledged ?? {}).length > 0;
+  if (!reported) return [];
   const title = sessionTitle(transcript, sessionId, state.title);
   if (!title || (sameTitle(state.title, title) && state.title.sent)) return [];
   if (pending.some((b) => (b.sessions ?? []).some((t) => sameTitle(t, title)))) return [];
@@ -86,7 +91,7 @@ export async function captureChanges(job, session) {
   return {
     ...taken,
     snapshots: changedSnapshots({ capture: taken, sessionId, revision, known }),
-    sessions: await titleChange(job.dir, session, state, pending),
+    sessions: await titleChange(job.dir, session, state, pending, taken),
     calls: callChange(session, state, { cutoff: from, generation, pending, repo: taken.repo }),
   };
 }
