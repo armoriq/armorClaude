@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean } from "./common.mjs";
+import { credentialFor } from "./credentials-profile.mjs";
 
 /**
  * Read a config value from CLAUDE_PLUGIN_OPTION_* (injected by Claude Code
@@ -91,8 +92,12 @@ export function loadConfig(env = process.env) {
     const creds = JSON.parse(
       readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
     );
-    if (!apiKey && typeof creds?.apiKey === "string") apiKey = creds.apiKey;
-    if (!orgId && typeof creds?.orgId === "string") orgId = creds.orgId;
+    const saved = credentialFor(creds, {
+      backend: backendEndpoint,
+      product: "armorclaude",
+    });
+    if (!apiKey && saved.apiKey) apiKey = saved.apiKey;
+    if (!orgId && saved.orgId) orgId = saved.orgId;
   } catch {
     // no credentials file — local-only mode
   }
