@@ -8,7 +8,9 @@ import {
   env,
   isoAgo,
   projectFile,
+  quiet,
   run,
+  sessionBatches,
   settled,
   stop,
   until,
@@ -63,6 +65,19 @@ test("a Stop sends the session's title once, timed when the plugin first saw it,
     assert.equal(renamed.title, "Fix the lexer");
     assert.ok(Date.parse(renamed.titleUpdatedAt) > seenAt);
     assert.deepEqual(titled(b, id).at(-1).snapshots, [], "a rename alone sends no usage");
+  });
+});
+
+test("a session whose usage all predates the cutoff sends no title", async () => {
+  await withSession(async (b, h, id) => {
+    writeSession(h, id, [
+      assistant(id, "a", isoAgo(4 * 3_600_000), { input_tokens: 3 }),
+      titleLine(id, "Renamed long after the session ended"),
+    ]);
+    await stop(h, b.url, false, id);
+    await quiet(h);
+    assert.deepEqual(sessionBatches(b, id), [], "no usage is captured before the cutoff");
+    assert.deepEqual(titlesOf(b, id), []);
   });
 });
 
