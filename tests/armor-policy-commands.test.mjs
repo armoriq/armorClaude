@@ -289,8 +289,7 @@ test("/armor policy add complex natural language returns draft-only", async () =
   assert.ok(out.includes("Normalized JSON:"));
   assert.ok(out.includes("Next:"));
   assert.ok(out.includes("intern-policy"));
-  // eslint-disable-next-line no-control-regex
-  assert.doesNotMatch(out, /\x1b\[[0-9;]*m/);
+  assert.ok(!out.includes("\u001b["), "output carries no ANSI escape sequences");
   await assert.rejects(readFile(path.join(tmp, "policy-pending.json"), "utf8"));
   const drafts = JSON.parse(await readFile(path.join(tmp, "policy-drafts.json"), "utf8"));
   assert.equal(Object.keys(drafts.drafts).length, 1);

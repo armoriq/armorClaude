@@ -124,27 +124,6 @@ export function extractAllowedActions(plan) {
   return allowed;
 }
 
-// eslint-disable-next-line no-unused-vars
-function findPlanStep(plan, toolName) {
-  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
-  const normalizedTool = normalizeToolName(toolName);
-  for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) === normalizedTool) {
-      return step;
-    }
-  }
-  return null;
-}
-
 function getStepInputCandidates(step) {
   const candidates = [];
   if (isPlainObject(step.params)) {
