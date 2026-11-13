@@ -481,6 +481,22 @@ function notConnectedStart(config, loginNoticeDue) {
   };
 }
 
+/**
+ * Usage sync turns itself off when a key is missing or either opt-out is set,
+ * and every call site then returns silently. Without this the session looks
+ * connected and enforcing while no token usage ever reaches the dashboard.
+ * Only reached once connected: notConnectedStart owns the unconfigured case.
+ */
+function usageSyncOffNotice(config) {
+  if (config.usageSyncEnabled) return null;
+  return (
+    "ArmorClaude is connected and enforcing, but usage reporting is OFF, " +
+    "so this session's tokens and cost will not appear on the dashboard.\n" +
+    "Unset disable_usage_sync / disable_observability (or " +
+    "ARMORIQ_USAGE_SYNC_DISABLED / ARMORIQ_OBSERVABILITY_DISABLED) to restore it."
+  );
+}
+
 export async function handleSessionStart(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
@@ -585,10 +601,17 @@ export async function handleSessionStart(input, config) {
   }
 
   const intentLabel = intentMode(config, (await loadPolicyState(config.policyFile)).policy);
-  return addPromptContext(
-    `ArmorClaude active (${modeLabel}, intent=${intentLabel})${syncNote}${onboardingMsg}`,
-    "SessionStart"
-  );
+  const usageNote = usageSyncOffNotice(config);
+  return {
+    // systemMessage is what Claude Code prints to the person. Context alone
+    // only reaches the model, which may never mention it.
+    ...(usageNote && { systemMessage: usageNote }),
+    ...addPromptContext(
+      `ArmorClaude active (${modeLabel}, intent=${intentLabel})${syncNote}${onboardingMsg}` +
+        (usageNote ? `\n\n${usageNote}` : ""),
+      "SessionStart"
+    ),
+  };
 }
 
 // ---------------------------------------------------------------------------
