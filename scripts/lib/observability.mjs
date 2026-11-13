@@ -469,14 +469,24 @@ async function obsCheck(entry, config, { input, output, at }) {
   );
 }
 
+// Claude Code puts a failed tool's message in `error`, not `tool_response`.
+// The SDK records its type always and its text only when capture allows content.
+function toolError(input) {
+  return typeof input.error === "string" && input.error.trim()
+    ? redactSecrets(input.error)
+    : undefined;
+}
+
 async function obsReport(entry, config, { input, at }, outcome) {
   const call = toolCall(input, config);
+  const error = outcome === "error" ? toolError(input) : undefined;
   await entry.session.recordTool(
     { ...call, operation: { category: operationCategory(call.toolName) } },
     {
       outcome,
       durationMs: input.duration_ms,
       result: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
+      ...(error ? { error } : {}),
     },
     eventTime(at)
   );
