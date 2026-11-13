@@ -4,6 +4,15 @@ import path from "node:path";
 import { parseBoolean } from "./common.mjs";
 import { credentialFor } from "./credentials-profile.mjs";
 
+const PRODUCT = "armorclaude";
+/** Set to "dev" on the dev branch; it suffixes the product in the client header. */
+const CHANNEL = "stable";
+
+/** The backend reads this to tell which build a device runs. */
+export const CLIENT_VERSION = `${PRODUCT}${CHANNEL === "stable" ? "" : `-${CHANNEL}`}/${
+  JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version
+}`;
+
 /**
  * Read a config value from CLAUDE_PLUGIN_OPTION_* (injected by Claude Code
  * plugin userConfig), falling back to the legacy ARMORCLAUDE_* env var.
@@ -142,6 +151,7 @@ export function loadConfig(env = process.env) {
     // userConfig-driven credential (see effectiveApiKey above: a bad-format key
     // is dropped, and local mock substitutes an SDK-accepted placeholder).
     apiKey: effectiveApiKey,
+    clientVersion: CLIENT_VERSION,
     orgId,
     auditEnabled: Boolean(effectiveApiKey),
     defaultTemplate,
