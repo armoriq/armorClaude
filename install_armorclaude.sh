@@ -83,6 +83,41 @@ check_node_version() {
 # Plugin install
 # ---------------------------------------------------------------------------
 
+# Claude Code only auto-updates plugins from a marketplace whose settings entry
+# says so, and a third-party marketplace defaults to false. Without this, a
+# published fix reaches nobody until each user runs `claude plugin update`.
+# There is no CLI flag for it, so the settings entry is written directly.
+# Set ARMORCLAUDE_NO_AUTO_UPDATE=1 to keep updates manual.
+enable_auto_update() {
+  if [[ "${ARMORCLAUDE_NO_AUTO_UPDATE:-}" == "1" ]]; then
+    info "leaving updates manual (ARMORCLAUDE_NO_AUTO_UPDATE=1)"
+    return 0
+  fi
+  local settings="${HOME}/.claude/settings.json"
+  local status=0
+  ARMORCLAUDE_SETTINGS="${settings}" node -e '
+    const fs = require("fs");
+    const file = process.env.ARMORCLAUDE_SETTINGS;
+    let settings = {};
+    if (fs.existsSync(file)) settings = JSON.parse(fs.readFileSync(file, "utf8"));
+    const places = (settings.extraKnownMarketplaces ??= {});
+    const armoriq = (places.armoriq ??= {
+      source: { source: "github", repo: "armoriq/armorClaude" },
+    });
+    if (armoriq.autoUpdate === true) process.exit(2);
+    armoriq.autoUpdate = true;
+    fs.mkdirSync(require("path").dirname(file), { recursive: true });
+    const temporary = `${file}.armorclaude.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`);
+    fs.renameSync(temporary, file);
+  ' 2>/dev/null || status=$?
+  case "${status}" in
+    0) ok "updates are automatic (new versions install at the next session)" ;;
+    2) ok "updates are already automatic" ;;
+    *) warn "could not turn on automatic updates; run ${B}claude plugin update armorclaude${N} to update" ;;
+  esac
+}
+
 install_plugin() {
   section "Installing plugin"
 
@@ -92,6 +127,8 @@ install_plugin() {
     claude plugin marketplace update armoriq >/dev/null 2>&1 || true
   fi
   ok "marketplace ready"
+
+  enable_auto_update
 
   info "installing plugin ${B}${PLUGIN_REF}${N}"
   claude plugin install "${PLUGIN_REF}" >/dev/null
