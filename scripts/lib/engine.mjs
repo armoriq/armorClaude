@@ -43,7 +43,8 @@ import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./plan
 import { readJson } from "./fs-store.mjs";
 import { mkdir, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
+import { randomUUID } from "node:crypto";
 import {
   appendTrustOp,
   getSession,
@@ -375,18 +376,55 @@ async function emitAudit({ dto, config, iapService }) {
   return "sent (http)";
 }
 
+async function postUsage(config, path, body) {
+  const response = await fetch(`${config.backendEndpoint}/dashboard/token-usage${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-API-Key": config.apiKey },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let parsed = null;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    parsed = null;
+  }
+  return { ok: response.ok, status: response.status, body: parsed, text };
+}
+
+/**
+ * The stream's generation, initialising it on first use. Cached on the session
+ * because `POST /stream` is an upsert the backend locks a scope for, and Stop
+ * fires every turn.
+ */
+async function usageGeneration(config, session) {
+  if (typeof session.usageGeneration === "string") return session.usageGeneration;
+  const started = await postUsage(config, "/stream", {});
+  const generation = started.body?.generation;
+  if (!started.ok || typeof generation !== "string") {
+    throw new Error(`stream init ${started.status} ${started.text.slice(0, 120)}`);
+  }
+  session.usageGeneration = generation;
+  return generation;
+}
+
 /**
  * Best-effort: capture per-model token usage from the session transcript and
- * report it to the dashboard via the SDK (`POST /dashboard/token-usage`). This
- * is the single cross-tool path shared with ArmorCodex/Copilot:
- * `summarizeTranscriptUsage` + `client.recordTokenUsage`.
+ * report it to the dashboard.
  *
- * Stop fires every turn, so we debounce on the cumulative token total and only
- * POST when it changed. The backend upsert SETS the per-(session,model) counts,
- * so re-posting a cumulative total is idempotent and never double-counts.
- * `product` is sent explicitly so attribution works even if the API key has
- * product=NULL. `session.lastTokenTotal` is mutated in place; the caller
- * persists it. Failures are swallowed — token telemetry never breaks the hook.
+ * Uses the batch-revision protocol (`POST /stream` then `POST /batch`). Once a
+ * usage stream exists for a (user, org, device, product) scope the backend
+ * refuses the older revisionless `POST /dashboard/token-usage` with 409
+ * forever, which silently dropped every turn's usage on affected installs.
+ *
+ * `revision` is a millisecond clock reading, so each post supersedes the last
+ * for its (session, date, hour); equal revisions with different payloads are a
+ * 409 by design. The hour is named explicitly, so usage lands in the hour it
+ * happened rather than in the backend's undated midnight bucket.
+ *
+ * Stop fires every turn, so we debounce on the cumulative token total.
+ * `session.lastTokenTotal` is mutated in place; the caller persists it.
+ * Failures are swallowed — token telemetry never breaks the hook.
  */
 async function reportTokenUsage(input, config, session, sessionId) {
   if (!config.apiKey) return;
@@ -397,15 +435,34 @@ async function reportTokenUsage(input, config, session, sessionId) {
       0
     );
     if (total > 0 && total !== session.lastTokenTotal) {
-      const result = await getSdkClient(config).recordTokenUsage({
-        product: config.productSlug,
+      const now = new Date();
+      const snapshot = {
         sessionId,
+        usageDate: now.toISOString().slice(0, 10),
+        usageHour: now.getUTCHours(),
+        revision: now.getTime(),
         entries,
+      };
+      // Without a name the session list renders "Unknown device", because it
+      // reads the device off the joined usage row rather than the session.
+      const batch = { batchId: randomUUID(), deviceName: hostname(), snapshots: [snapshot] };
+      let result = await postUsage(config, "/batch", {
+        generation: await usageGeneration(config, session),
+        ...batch,
       });
-      if (result?.ok) session.lastTokenTotal = total;
+      // A reset elsewhere rotates the generation; re-initialise once and retry
+      // rather than dropping the turn's usage on the floor until a restart.
+      if (result.status === 409) {
+        session.usageGeneration = undefined;
+        result = await postUsage(config, "/batch", {
+          generation: await usageGeneration(config, session),
+          ...batch,
+        });
+      }
+      if (result.ok) session.lastTokenTotal = total;
       debugLog(
         config,
-        `[tokens] ${entries.length} model(s) total=${total} ${result?.ok ? "ok" : "failed:" + (result?.reason || "")}`
+        `[tokens] ${entries.length} model(s) total=${total} ${result.ok ? "ok" : `failed: ${result.status} ${result.text.slice(0, 160)}`}`
       );
     }
   } catch (error) {
@@ -1616,6 +1673,7 @@ export async function handleStop(input, config) {
   upsertSession(runtimeState, sessionId, {
     lastStopAt: nowEpochSeconds(),
     lastTokenTotal: session.lastTokenTotal,
+    usageGeneration: session.usageGeneration,
   });
   await saveRuntimeState(config.runtimeFile, runtimeState);
   return null;
