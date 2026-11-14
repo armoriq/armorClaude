@@ -1,11 +1,8 @@
 {
   "name": "armorclaude",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "description": "ArmorIQ intent-based security enforcement for Claude Code: policy-based tool access control, intent verification, CSRG cryptographic proofs, and audit logging.",
-  "author": {
-    "name": "ArmorIQ",
-    "email": "license@armoriq.io"
-  },
+  "author": { "name": "ArmorIQ", "email": "license@armoriq.io" },
   "homepage": "https://armoriq.ai/tools/armorclaude",
   "privacyPolicy": "https://armoriq.ai/privacy-policy",
   "repository": "https://github.com/armoriq/armorClaude",
@@ -21,7 +18,7 @@
     "default_template": {
       "type": "string",
       "title": "Default policy template",
-      "description": "Optional. One of: all-allow, strict-read-only, balanced, lockdown, architect, quality-guardian, velocity-machine, night-owl. On first run it is proposed (staged for your confirmation \u2014 never applied automatically). Leave blank to be shown the template picker instead."
+      "description": "Optional. One of: all-allow, strict-read-only, balanced, lockdown, architect, quality-guardian, velocity-machine, night-owl. On first run it is proposed (staged for your confirmation — never applied automatically). Leave blank to be shown the template picker instead."
     },
     "disable_observability": {
       "type": "boolean",
