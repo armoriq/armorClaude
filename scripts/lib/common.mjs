@@ -225,6 +225,7 @@ export async function postJson(url, payload, headers, timeoutMs) {
 
 export function buildAuthHeaders(config) {
   const headers = { "Content-Type": "application/json" };
+  if (config.clientVersion) headers["X-ArmorIQ-Client"] = config.clientVersion;
   if (config.apiKey) {
     headers.Authorization = `Bearer ${config.apiKey}`;
     headers["X-API-Key"] = config.apiKey;

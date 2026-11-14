@@ -1,0 +1,81 @@
+# Publishes a GitHub Release whenever the plugin version on main changes.
+# The backend resolves the stable channel from `releases/latest`, and
+# `claude plugin update` only installs when the manifest version moves, so a
+# merge without a version bump reaches nobody and is deliberately a no-op here.
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths: [".claude-plugin/plugin.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Read the version and check it is new
+        id: v
+        run: |
+          version="$(jq -r .version .claude-plugin/plugin.json)"
+          [ -n "$version" ] && [ "$version" != null ] || { echo "plugin.json has no version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "v$version is already released"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: The manifest, package and marketplace entry must agree
+        if: steps.v.outputs.exists == 'false'
+        run: |
+          version='${{ steps.v.outputs.version }}'
+          for actual in \
+            "$(jq -r .version package.json)" \
+            "$(jq -r .version package-lock.json)" \
+            "$(jq -r '.packages[""].version' package-lock.json)" \
+            "$(jq -r '.plugins[] | select(.name=="armorclaude") | .version' .claude-plugin/marketplace.json)"
+          do
+            [ "$actual" = "$version" ] || { echo "version mismatch: $actual != $version"; exit 1; }
+          done
+
+      - name: Install and test
+        if: steps.v.outputs.exists == 'false'
+        run: |
+          npm ci
+          npm test --if-present
+
+      # An installed client sends `X-ArmorIQ-Client: armorclaude/<version>`, so a
+      # release whose code reports a different version would make the backend's
+      # update check compare the wrong numbers.
+      - name: The version the client reports must match the release
+        if: steps.v.outputs.exists == 'false'
+        run: |
+          reported="$(node -e 'import("./scripts/lib/config.mjs").then(m=>console.log(m.CLIENT_VERSION))')"
+          [ "$reported" = 'armorclaude/${{ steps.v.outputs.version }}' ] \
+            || { echo "client reports $reported"; exit 1; }
+
+      - name: Publish
+        if: steps.v.outputs.exists == 'false'
+        run: |
+          version='${{ steps.v.outputs.version }}'
+          gh release create "v$version" \
+            --target "$GITHUB_SHA" \
+            --title "v$version" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
