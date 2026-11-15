@@ -227,12 +227,49 @@ prompt_yes_no() {
   fi
   printf "${B}?${N} %s ${D}%s${N} " "$question" "$hint" >&2
   local answer
-  read -r answer < /dev/tty || answer=""
+  read -r answer < /dev/tty || return 1
   [[ -z "$answer" ]] && { [[ "$default" == "Y" ]]; return $?; }
   [[ "$answer" =~ ^[Yy] ]]
 }
 
+plugin_backend() {
+  node <<'NODE'
+const { existsSync } = require("node:fs");
+const { homedir } = require("node:os");
+const path = require("node:path");
+const env = (process.env.ARMORIQ_ENV || "").trim().toLowerCase();
+const mock = (process.env.ARMORIQ_LOCAL_MOCK || "").trim().toLowerCase();
+if (["development", "dev", "local", "test"].includes(env) ||
+    ["1", "true", "yes", "y", "on"].includes(mock) ||
+    existsSync(path.join(homedir(), ".armoriq/local-mode"))) process.exit(0);
+process.stdout.write(["staging", "stage"].includes(env)
+  ? "https://staging-api.armoriq.ai" : "https://api.armoriq.ai");
+NODE
+}
+
+plugin_has_login() {
+  node - "$1" <<'NODE'
+const { readFileSync } = require("node:fs");
+const { homedir } = require("node:os");
+const path = require("node:path");
+try {
+  const backend = process.argv[2];
+  const doc = JSON.parse(readFileSync(path.join(homedir(), ".armoriq/credentials.json"), "utf8"));
+  const origin = (value) => { try { return new URL(value).origin; } catch { return ""; } };
+  const profile = doc.version === 2
+    ? Object.values(doc.profiles ?? {}).find((p) => p?.product === "armorclaude" && origin(p.backend) === backend)
+    : doc;
+  process.exit(/^ak_(test|live|claw)_/.test(profile?.apiKey) ? 0 : 1);
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
 connect_to_armoriq() {
+  local backend
+  backend="$(plugin_backend)"
+  [[ -n "$backend" ]] || return 0
   section "Connect to ArmorIQ"
   cat <<EOF
 
@@ -241,38 +278,58 @@ connect_to_armoriq() {
 
 EOF
 
-  if ! is_promptable; then
-    printf "  Run ${G}${B}armoriq login${N} to connect later.\n\n"
+  if plugin_has_login "$backend"; then
+    ok "ArmorIQ login for ArmorClaude found"
     return 0
   fi
 
-  if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
-    echo
-    printf "  No problem. Run ${G}${B}armoriq login${N} anytime to connect.\n\n"
-    return 0
-  fi
-
-  echo
-  # Run armoriq login inline — uses the globally installed CLI or npx fallback
-  if command -v armoriq >/dev/null 2>&1; then
-    armoriq login
-  elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk login
+  local login cli
+  cli="$(command -v armoriq || true)"
+  if [[ -f "$cli" && -x "$cli" ]]; then
+    login=(armoriq login --product armorclaude --backend "$backend")
   else
-    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk login${N} manually."
-    return 0
+    login=(npx -y @armoriq/sdk login --product armorclaude --backend "$backend")
   fi
 
-  local login_status=$?
-  if [[ $login_status -eq 0 ]] && [[ -f "$HOME/.armoriq/credentials.json" ]]; then
+  if is_promptable && (
+    trap 'exit 130' INT
+    prompt_yes_no "Connect your ArmorIQ account now?" "Y" || exit 1
     echo
+    "${login[@]}" < /dev/tty
+  ) && plugin_has_login "$backend"; then
     ok "ArmorIQ connected. Claude Code will auto-load the key."
+  else
+    printf "\n  Sign in later: %s\n\n" "${login[*]}"
   fi
 }
 
 finale() {
   echo
   printf "${G}${B}ArmorClaude is installed.${N}\n"
+
+  node - "$(plugin_backend)" 2>/dev/null <<'NODE' || true
+const { readFileSync, mkdirSync, openSync, closeSync } = require("node:fs");
+const { homedir } = require("node:os");
+const path = require("node:path");
+try {
+  const dnt = process.env.DO_NOT_TRACK?.trim().toLowerCase();
+  const disabled = process.env.ARMORIQ_USAGE_PING_DISABLED?.trim().toLowerCase();
+  if (["1", "true"].includes(dnt) || ["1", "true", "yes"].includes(disabled)) process.exit(0);
+  if (!["https://api.armoriq.ai", "https://staging-api.armoriq.ai", "https://staging-api.armoriq.io"].includes(process.argv[2])) process.exit(0);
+  try {
+    const settings = JSON.parse(readFileSync(path.join(homedir(), ".armoriq/settings.json"), "utf8"));
+    if (!settings || typeof settings !== "object" || Array.isArray(settings) ||
+        (Object.prototype.hasOwnProperty.call(settings, "usagePing") &&
+         (typeof settings.usagePing !== "boolean" || !settings.usagePing))) process.exit(0);
+  } catch (error) {
+    if (error.code !== "ENOENT") process.exit(0);
+  }
+  const dir = path.join(homedir(), ".armoriq/reach/v1/armorclaude");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  closeSync(openSync(path.join(dir, "notice-shown"), "wx", 0o600));
+  console.log("ArmorIQ sends an anonymous daily usage ping (a random install id, plugin and version, OS, signed in or not, and daily counts of plans and blocks); turn it off with ARMORIQ_USAGE_PING_DISABLED=1 or DO_NOT_TRACK=1.");
+} catch {}
+NODE
 
   section "Quick start"
   cat <<EOF

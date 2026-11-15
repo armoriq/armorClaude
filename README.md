@@ -59,9 +59,10 @@ to stderr:
 - Requires **Node.js >= 20** and **npm on PATH**, plus **network access on that first run**.
 - The bundled MCP server (`armorclaude-policy`) registers once dependencies finish installing;
   it stays connected on subsequent runs without reinstalling.
-- **No API key is needed to start.** With `api_key` blank the plugin runs in **local-only mode**
-  (no data leaves your machine — see [Data & Privacy](#data--privacy)); a key only adds backend
-  audit, intent tokens, and CSRG proofs.
+- **No API key is needed to start.** Until you sign in, policy checks run locally. An anonymous
+  daily usage ping is sent unless you turn it off (see [Data & Privacy](#data--privacy)). Signing
+  in adds backend audit, intent tokens, and CSRG proofs. For this stable channel, run
+  `armoriq login --product armorclaude --backend https://api.armoriq.ai`.
 
 If `claude mcp list` does not show `✓ Connected`, run the server directly from the plugin
 directory to surface the install/startup error:
@@ -119,6 +120,23 @@ armorClaude/
 ```
 
 ## Configuration
+
+Sign in for the backend ArmorClaude calls. The CLI saves credentials in `~/.armoriq/credentials.json`.
+Use the command for the installed channel and effective environment:
+
+```bash
+# Production (this stable channel's default)
+armoriq login --product armorclaude --backend https://api.armoriq.ai
+
+# Staging (ARMORIQ_ENV=staging on this stable channel)
+armoriq login --product armorclaude --backend https://staging-api.armoriq.ai
+```
+
+If the CLI is absent from PATH, use `npx -y @armoriq/sdk` in place of `armoriq`.
+The dev channel uses `armoriq-dev` (or `npx -y @armoriq/sdk-dev`) and staging by default.
+With `ARMORIQ_ENV=local` and an `ARMORIQ_BACKEND_URL` override, replace the `--backend`
+value with that URL's origin (scheme, host and port only, without credentials, path,
+query or fragment).
 
 ### Plugin userConfig (recommended)
 
@@ -240,10 +258,10 @@ MCP tools: `policy_read`, `register_intent_plan`, and Trust Update tools. There 
 ## Data & Privacy
 
 ArmorClaude's security enforcement works by inspecting prompts and tool calls. **What leaves your
-machine depends entirely on whether an ArmorIQ API key is configured:**
+machine depends on whether an ArmorIQ API key is configured and your privacy settings:**
 
-- **Local-only mode (no `api_key`)** — nothing is transmitted. Policy checks, intent-drift
-  detection, and audit logging all run locally.
+- **Local-only mode (not signed in).** Policy checks, intent-drift detection, and audit logging
+  all run locally. An anonymous daily usage ping is sent unless you turn it off (see below).
 - **Connected mode (`api_key` set)** — the following is sent to the ArmorIQ backend
   (`api.armoriq.ai` / `iap.armoriq.ai`) to provide intent tokens, audit trails, and CSRG proofs:
   - The captured **prompt and structured intent plan** (goal + steps).
@@ -261,6 +279,37 @@ and intent enforcement still work):
 
 - **Plugin option:** set `disable_observability: true` in the plugin's userConfig, **or**
 - **Environment variable:** set `ARMORIQ_OBSERVABILITY_DISABLED=true` (also accepts `1` / `yes`).
+
+### Anonymous daily usage ping
+
+The first time the plugin runs each UTC day, it sends at most one anonymous usage ping. It
+contains a format version number, a random install id, the plugin and its version, the host agent and its version
+(when available), the operating system, whether you are signed in, the backend environment,
+and daily totals of plans, blocked tool calls, and approval requests counted while signed out.
+The install id is separate from the device id used for sign in.
+
+The ping never includes prompts, plans, tool names, arguments, paths, repo names, emails, keys,
+the sign in device id, or IP addresses. Google Cloud's request logs record the sender's IP
+address at the infrastructure level, although ArmorIQ's app never stores it.
+
+To turn it off, use any one of these:
+
+- Set `ARMORIQ_USAGE_PING_DISABLED=1` or `DO_NOT_TRACK=1`.
+- Set `"usagePing": false` in `~/.armoriq/settings.json`.
+- Set the `disable_usage_ping` plugin setting to `true` in userConfig.
+
+### Daily sign in reminder
+
+At session start, an install that is not signed in shows the login command at most once per
+UTC day for each ArmorIQ home and production or staging environment. The reminder stops
+after sign in and does not appear in local mode. It makes no network request and works
+independently of the anonymous ping and `DO_NOT_TRACK`.
+
+To hide it, use any one of these:
+
+- Set `ARMORIQ_SIGNIN_REMINDER_DISABLED=1` (also accepts `true` or `yes`, any case).
+- Set `"signInReminder": false` in `~/.armoriq/settings.json`.
+- Set the `disable_signin_reminder` plugin setting to `true` in userConfig.
 
 - **Product overview and setup:** <https://armoriq.ai/tools/armorclaude>
 - **Privacy policy (data collected, retention, opt-out):** <https://armoriq.ai/privacy-policy> (Section 6, "Product-Specific Data Flows")
