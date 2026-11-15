@@ -6,8 +6,8 @@
   "description": "ArmorIQ intent-based security enforcement for Claude Code",
   "license": "MIT",
   "scripts": {
-    "test": "node --test",
-    "check": "node --test",
+    "test": "node --import ./tests/setup/no-network.mjs --test",
+    "check": "node --import ./tests/setup/no-network.mjs --test",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

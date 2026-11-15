@@ -3,6 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { parseBoolean } from "./common.mjs";
 import { credentialFor } from "./credentials-profile.mjs";
+import { pingEnabled, reminderEnabled } from "./reach.mjs";
+export { declaredCli, loginCommand, statusCommand, notSignedIn } from "./login-command.mjs";
 
 const PRODUCT = "armorclaude";
 /** Set to "dev" on the dev branch; it suffixes the product in the client header. */
@@ -97,6 +99,8 @@ export function loadConfig(env = process.env) {
     pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORIQ_OBSERVABILITY_DISABLED"),
     false
   );
+  const usagePingDisabled = parseBoolean(pluginOpt(env, "DISABLE_USAGE_PING"), false);
+  let credentialReadFailed = false;
   try {
     const creds = JSON.parse(
       readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
@@ -107,8 +111,9 @@ export function loadConfig(env = process.env) {
     });
     if (!apiKey && saved.apiKey) apiKey = saved.apiKey;
     if (!orgId && saved.orgId) orgId = saved.orgId;
-  } catch {
+  } catch (error) {
     // no credentials file — local-only mode
+    credentialReadFailed = error.code !== "ENOENT";
   }
 
   // A key is only usable if it matches the @armoriq/sdk key format
@@ -147,6 +152,15 @@ export function loadConfig(env = process.env) {
     observabilityEnabled: !observabilityDisabled && Boolean(effectiveApiKey),
     observabilityEndpoint: backendEndpoint,
     observabilityProduct: "armorclaude",
+    signInReminderEnabled:
+      !credentialReadFailed &&
+      reminderEnabled({
+        env,
+        home: homedir(),
+        pluginDisabled: parseBoolean(pluginOpt(env, "DISABLE_SIGNIN_REMINDER"), false),
+      }),
+    usagePingDisabled,
+    usagePingEnabled: pingEnabled({ env, home: homedir(), pluginDisabled: usagePingDisabled }),
 
     // userConfig-driven credential (see effectiveApiKey above: a bad-format key
     // is dropped, and local mock substitutes an SDK-accepted placeholder).
