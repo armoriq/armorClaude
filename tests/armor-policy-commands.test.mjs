@@ -19,7 +19,6 @@ function buildConfig(tmpDir) {
     dataDir: tmpDir,
     policyFile: path.join(tmpDir, "policy.json"),
     runtimeFile: path.join(tmpDir, "runtime.json"),
-    useProduction: false,
     backendEndpoint: "http://127.0.0.1:3000",
     csrgEndpoint: "http://127.0.0.1:8080",
     apiKey: "",
@@ -78,10 +77,6 @@ async function seedIrPolicy(config, overrides = {}) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// isArmorPolicyCommand detection
-// ---------------------------------------------------------------------------
-
 test("isArmorPolicyCommand recognises valid commands", () => {
   assert.ok(isArmorPolicyCommand("/armor policy"));
   assert.ok(isArmorPolicyCommand("/armor policy list"));
@@ -104,10 +99,6 @@ test("isArmorPolicyCommand rejects non-commands", () => {
   assert.ok(!isArmorPolicyCommand(42));
 });
 
-// ---------------------------------------------------------------------------
-// help
-// ---------------------------------------------------------------------------
-
 test("/armor policy help returns usage text", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
@@ -125,10 +116,6 @@ test("/armor help returns primary UX text", async () => {
   const out = await handleArmorPolicyCommand("/armor", config);
   assert.ok(out.includes("/armorclaude:armor policy add"));
 });
-
-// ---------------------------------------------------------------------------
-// list
-// ---------------------------------------------------------------------------
 
 test("/armor policy list shows empty policy", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
@@ -157,10 +144,6 @@ test("/armor policy list renders legacy Bash programs as canonical Bash conditio
   assert.ok(out.includes("ALLOW policy1: Bash when bash.program in [ls]"));
   assert.ok(!out.includes("allow ls"));
 });
-
-// ---------------------------------------------------------------------------
-// add + confirm
-// ---------------------------------------------------------------------------
 
 test("/armor policy add stages a rule then confirm applies it", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
@@ -306,8 +289,7 @@ test("/armor policy add complex natural language returns draft-only", async () =
   assert.ok(out.includes("Normalized JSON:"));
   assert.ok(out.includes("Next:"));
   assert.ok(out.includes("intern-policy"));
-  // eslint-disable-next-line no-control-regex
-  assert.doesNotMatch(out, /\x1b\[[0-9;]*m/);
+  assert.ok(!out.includes("\u001b["), "output carries no ANSI escape sequences");
   await assert.rejects(readFile(path.join(tmp, "policy-pending.json"), "utf8"));
   const drafts = JSON.parse(await readFile(path.join(tmp, "policy-drafts.json"), "utf8"));
   assert.equal(Object.keys(drafts.drafts).length, 1);
@@ -1065,10 +1047,6 @@ test("parseNaturalRules supports deterministic aliases and rejects vague input",
   assert.deepEqual(parseNaturalRules("add please make it safe"), []);
 });
 
-// ---------------------------------------------------------------------------
-// add + cancel
-// ---------------------------------------------------------------------------
-
 test("/armor policy add then cancel discards staged change", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
@@ -1160,10 +1138,6 @@ test("/armor policy confirm can save the applied policy as a profile", async () 
   assert.ok(profilesOut.includes("dev-safe"));
 });
 
-// ---------------------------------------------------------------------------
-// remove
-// ---------------------------------------------------------------------------
-
 test("/armor policy remove stages removal then confirm applies it", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
@@ -1190,10 +1164,6 @@ test("/armor policy remove non-existent rule returns error", async () => {
   assert.ok(out.includes("Rule not found"));
 });
 
-// ---------------------------------------------------------------------------
-// reset
-// ---------------------------------------------------------------------------
-
 test("/armor policy reset stages clearing all rules", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
@@ -1209,10 +1179,6 @@ test("/armor policy reset stages clearing all rules", async () => {
   const listOut = await handleArmorPolicyCommand("/armor policy list", config);
   assert.ok(listOut.includes("no rules configured"));
 });
-
-// ---------------------------------------------------------------------------
-// template
-// ---------------------------------------------------------------------------
 
 test("/armor policy template applies a known template", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
@@ -1236,11 +1202,6 @@ test("/armor policy template rejects unknown template", async () => {
   assert.ok(out.includes("Unknown template"));
 });
 
-// Helper: create a profile on disk with a real (normalized) policy, then set
-// its createdBy. This simulates either a builtin profile shipped in a newer
-// bundle that the daemon's in-memory POLICY_TEMPLATES does not yet know about,
-// or a user-created profile. We go through saveProfile so the policy IR is
-// valid, then patch createdBy on disk (saveProfile always writes "user").
 async function writeProfileFile(config, name, createdBy) {
   await saveProfile(config, name, `${createdBy} profile ${name}`, [
     { id: "allow-read", action: "allow", tool: "Read" },
@@ -1256,8 +1217,6 @@ test("/armor policy template applies a seeded builtin profile absent from POLICY
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
   await seedPolicy(config);
-  // "future-builtin" is not a compiled-in template, but is present on disk as
-  // a builtin (as if seeded by a newer bundle).
   await writeProfileFile(config, "future-builtin", "builtin");
 
   const tmplOut = await handleArmorPolicyCommand("/armor policy template future-builtin", config);
@@ -1274,13 +1233,10 @@ test("/armor policy template refuses a user-created profile", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
   await seedPolicy(config);
-  // A user-created profile on disk must NOT be applicable as a template.
   await writeProfileFile(config, "my-custom", "user");
 
   const out = await handleArmorPolicyCommand("/armor policy template my-custom", config);
   assert.ok(out.includes("Unknown template"), `expected rejection, got: ${out}`);
-  // A user profile must not be advertised in the "Available" template list
-  // (the requested name still appears in the "Unknown template: <name>" line).
   const available = out.split("Available:")[1] ?? "";
   assert.ok(!available.includes("my-custom"), `user profile leaked into Available: ${out}`);
 });
@@ -1294,10 +1250,6 @@ test("/armor policy template rejects path-traversal names", async () => {
     assert.ok(out.includes("Unknown template"), `expected rejection for "${bad}", got: ${out}`);
   }
 });
-
-// ---------------------------------------------------------------------------
-// export
-// ---------------------------------------------------------------------------
 
 test("/armor policy export dumps JSON", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
@@ -1329,10 +1281,6 @@ test("/armor policy view dumps active policy JSON only", async () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// confirm/cancel with nothing staged
-// ---------------------------------------------------------------------------
-
 test("/armor policy confirm with nothing staged returns message", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
@@ -1347,10 +1295,6 @@ test("/armor policy cancel with nothing staged returns message", async () => {
   assert.ok(out.includes("Nothing staged"));
 });
 
-// ---------------------------------------------------------------------------
-// hold alias → require_approval
-// ---------------------------------------------------------------------------
-
 test("/armor policy add hold maps to require_approval", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
@@ -1358,10 +1302,6 @@ test("/armor policy add hold maps to require_approval", async () => {
   const out = await handleArmorPolicyCommand("/armor policy add hold Bash", config);
   assert.ok(out.includes("require_approval"));
 });
-
-// ---------------------------------------------------------------------------
-// Engine integration: /armor policy blocks prompt and returns response
-// ---------------------------------------------------------------------------
 
 test("handleUserPromptSubmit blocks and handles /armor policy list", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
@@ -1476,10 +1416,6 @@ test("handleUserPromptSubmit does NOT block normal prompts", async () => {
   assert.notEqual(output?.decision, "block");
 });
 
-// ---------------------------------------------------------------------------
-// Stub commands return not-yet-implemented
-// ---------------------------------------------------------------------------
-
 test("/armor policy mcp list returns server list", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
@@ -1505,17 +1441,9 @@ test("/armor policy sync without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor policy sync", config);
-  assert.ok(out.includes("API key"));
+  assert.ok(out.includes("armoriq login --product armorclaude"));
 });
 
-// ---------------------------------------------------------------------------
-// Dashboard-sync warning on confirm
-// ---------------------------------------------------------------------------
-
-// With a backend configured, confirm pushes a staged PROPOSAL while SessionStart
-// pulls the dashboard's ACTIVE policy over the local one. The change therefore
-// enforces now and is reverted at the start of the next session unless someone
-// confirms it in the dashboard. "Policy updated to vN" alone reads as permanent.
 test("confirm warns that the dashboard will overwrite when a backend is configured", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
   const config = { ...buildConfig(tmp), apiKey: "ak_test_0000000000000000000" };
@@ -1528,7 +1456,7 @@ test("confirm warns that the dashboard will overwrite when a backend is configur
 
 test("confirm does not mention the dashboard in local-only mode", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armor-policy-test-"));
-  const config = buildConfig(tmp); // apiKey: "" — nothing syncs, local policy persists
+  const config = buildConfig(tmp);
   await handleArmorPolicyCommand("/armor policy add deny Write", config);
   const out = await handleArmorPolicyCommand("/armor yes", config);
   assert.ok(out.includes("Policy updated to v"));

@@ -1,0 +1,22 @@
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const loaded = new Map();
+
+function load(name) {
+  try {
+    return require(`@armoriq/sdk/dist/${name}`);
+  } catch (err) {
+    if (err?.code !== "MODULE_NOT_FOUND" && err?.code !== "ERR_PACKAGE_PATH_NOT_EXPORTED")
+      throw err;
+    process.stderr.write(
+      `[armorclaude] SDK module ${name} not found by name, loading the SDK root: ${err.code}\n`
+    );
+    return require("@armoriq/sdk");
+  }
+}
+
+export function sdkModule(name) {
+  if (!loaded.has(name)) loaded.set(name, load(name));
+  return loaded.get(name);
+}

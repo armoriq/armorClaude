@@ -20,7 +20,6 @@ function buildSdkClientKey(config) {
     config.contextId,
     config.backendEndpoint,
     config.csrgEndpoint,
-    config.useProduction ? "prod" : "dev",
   ].join("|");
 }
 
@@ -30,24 +29,17 @@ export function getSdkClient(config) {
   if (cached) {
     return cached;
   }
-  // SDK has separate iapEndpoint/proxyEndpoint params for legacy reasons
-  // (the SDK can also act as a tool dispatcher via invokeWithPolicy, which
-  // armorclaude never uses). We pass csrgEndpoint as iapEndpoint because
-  // the SDK's `/delegation/create` route lives on csrg-iap. We don't pass
-  // proxyEndpoint at all — armorclaude observes tool calls via hooks, the
-  // proxy is never hit. SDK falls back to its own default if a customer
-  // ever spawns an invokeWithPolicy path.
   const client = new ArmorIQClient({
     apiKey: config.apiKey,
     userId: config.userId,
     agentId: config.agentId,
     contextId: config.contextId,
-    useProduction: config.useProduction,
     iapEndpoint: config.csrgEndpoint,
     backendEndpoint: config.backendEndpoint,
     timeout: config.timeoutMs,
     maxRetries: config.maxRetries,
     verifySsl: config.verifySsl,
+    client: config.client,
   });
   sdkClientCache.set(key, client);
   return client;
@@ -60,7 +52,7 @@ function buildFallbackPlan(payload) {
     plan.steps.push({
       action: payload.toolName.trim(),
       mcp: payload.mcpName || "claude-code",
-      metadata: isPlainObject(payload.toolInput) ? { inputs: payload.toolInput } : {},
+      arguments: isPlainObject(payload.toolInput) ? payload.toolInput : {},
     });
   }
   return plan;
@@ -101,7 +93,15 @@ export function extractPlanFromIntentToken(raw) {
     : isPlainObject(parsed.token) && Number.isFinite(parsed.token.expires_at)
       ? parsed.token.expires_at
       : undefined;
-  return { plan: planCandidate, expiresAt };
+  return { plan: planCandidate, expiresAt, planCheck: parsed.planCheck };
+}
+
+function planCheckDenial(planCheck, toolName) {
+  const tool = normalizeToolName(toolName);
+  const named = (entry) => normalizeToolName(String(entry).split(":")[0]) === tool;
+  if (!(planCheck?.deniedTools ?? []).some(named)) return null;
+  const reason = (planCheck.deniedReasons ?? []).find(named);
+  return `ArmorIQ plan check denied ${toolName}${reason ? ` (${reason})` : ""}`;
 }
 
 export function extractAllowedActions(plan) {
@@ -124,32 +124,8 @@ export function extractAllowedActions(plan) {
   return allowed;
 }
 
-// eslint-disable-next-line no-unused-vars
-function findPlanStep(plan, toolName) {
-  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
-  const normalizedTool = normalizeToolName(toolName);
-  for (const step of steps) {
-    if (!isPlainObject(step)) {
-      continue;
-    }
-    const action =
-      typeof step.action === "string"
-        ? step.action
-        : typeof step.tool === "string"
-          ? step.tool
-          : "";
-    if (normalizeToolName(action) === normalizedTool) {
-      return step;
-    }
-  }
-  return null;
-}
-
 function getStepInputCandidates(step) {
   const candidates = [];
-  if (isPlainObject(step.metadata) && isPlainObject(step.metadata.inputs)) {
-    candidates.push(step.metadata.inputs);
-  }
   if (isPlainObject(step.params)) {
     candidates.push(step.params);
   }
@@ -227,11 +203,7 @@ export function checkToolAgainstPlan({ plan, toolName, toolInput, strict = false
       return { allowed: true };
     }
   }
-  // Permissive by default: declared metadata.inputs are advisory, not contractual.
-  // LLM plans are predictions; treating exact param mismatch as a security
-  // violation produces too many false positives (see live screenshot from the
-  // user's other Claude Code session). Set strict=true (or
-  // ARMORCLAUDE_STRICT_PARAM_CHECK=true via the engine handler) to opt back in.
+  // Param checks are permissive by default; ARMORCLAUDE_STRICT_PARAM_CHECK=true turns on strict checking.
   if (sawConstrainedMatch && strict) {
     return {
       allowed: false,
@@ -254,6 +226,10 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
       plan: parsed.plan,
     };
   }
+  const denial = planCheckDenial(parsed.planCheck, toolName);
+  if (denial) {
+    return { matched: true, blockReason: denial, planCheckDenied: true, plan: parsed.plan };
+  }
   const allowedActions = extractAllowedActions(parsed.plan);
   if (!allowedActions.has(normalizeToolName(toolName))) {
     return {
@@ -263,7 +239,6 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
     };
   }
 
-  // Parameter-level enforcement: check tool params against plan step constraints
   if (isPlainObject(toolParams)) {
     const paramCheck = checkToolAgainstPlan({
       plan: parsed.plan,
@@ -546,8 +521,6 @@ export function validateCsrgProofHeaders(proofs, required) {
 }
 
 export async function requestIntent(config, payload) {
-  // SDK is the only intent path. The HTTP-direct override (intentEndpoint)
-  // and the useSdkIntent toggle were both retired in the env cleanup.
   if (!config.apiKey) {
     return { skipped: true };
   }
@@ -563,7 +536,9 @@ export async function requestIntent(config, payload) {
   const sdkPolicy = payload.policy
     ? compilePolicyForSdkIntent(payload.policy, payload.policy_hash)
     : undefined;
-  const token = await client.getIntentToken(capture, sdkPolicy, payload.validitySeconds);
+  const token = await client.getIntentToken(capture, sdkPolicy, payload.validitySeconds, {
+    contextId: payload.session_id,
+  });
   const tokenRaw = JSON.stringify(token);
   const parsedFromToken = extractPlanFromIntentToken(tokenRaw);
   return {

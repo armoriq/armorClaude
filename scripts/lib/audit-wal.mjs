@@ -1,42 +1,66 @@
-/**
- * Audit Write-Ahead Log
- *
- * Replaces the in-memory `auditBuffer` in daemon.mjs with an append-only
- * JSONL file on disk. Crash-recoverable: a daemon SIGKILL between disk
- * write and backend ack loses zero rows, because rows are on disk before
- * the caller is acknowledged.
- *
- * Layout under <dataDir>/audit/:
- *   current.jsonl       - append-only, today's audit rows
- *   shipped.offset      - last byte the backend has acked (atomic write)
- *   archive/YYYY-MM-DD-NNN.jsonl - rotated segments
- *
- * Concurrency: POSIX `O_APPEND` is atomic for writes <= PIPE_BUF
- * (approximately 4096 B on macOS/Linux). Each audit row is around 500 bytes
- * typical, so concurrent appends from multiple hooks do not interleave. If a
- * row grows past roughly 4 KB the kernel may split the write, so appendLine
- * caps rows at 4000 bytes and rejects larger payloads.
- */
+/** O_APPEND writes are atomic only up to PIPE_BUF (~4 KB), so appendLine caps rows at 4000 bytes or rows tear. */
 
-import {
-  appendFile,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  stat,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { appendFile, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
+import {
+  PRIVATE_FILE_MODE,
+  ensurePrivateDir,
+  tightenDirFilesOnce,
+  writePrivateFile,
+} from "./fs-store.mjs";
 
 const MAX_LINE_BYTES = 4000;
 const DEFAULT_ROTATE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_ROTATE_AGE_MS = 60 * 60 * 1000;
+const ROW_BUDGET_BYTES =
+  MAX_LINE_BYTES -
+  Buffer.byteLength(
+    JSON.stringify({ _seq: Number.MAX_SAFE_INTEGER, _enqueuedAt: Number.MAX_SAFE_INTEGER })
+  );
+
+export const loginTag = (backend, apiKey) =>
+  createHash("sha256").update(`${backend}\n${apiKey}`).digest("hex").slice(0, 16);
+
+export const LOGIN_TAG = /^[0-9a-f]{16}$/;
+
+const rowBytes = (row) => Buffer.byteLength(JSON.stringify(row), "utf8");
+
+function truncateField(row, field) {
+  const json = JSON.stringify(row[field]);
+  const originalBytes = Buffer.byteLength(json, "utf8");
+  let keep = json.length;
+  for (;;) {
+    const next = {
+      ...row,
+      [field]: { truncated: true, originalBytes, preview: json.slice(0, keep) },
+    };
+    const excess = rowBytes(next) - ROW_BUDGET_BYTES;
+    if (excess <= 0 || keep === 0) return next;
+    keep = Math.max(0, keep - excess);
+  }
+}
+
+const fieldBytes = (row, field) => Buffer.byteLength(JSON.stringify(row[field] ?? null), "utf8");
+
+export function fitAuditRow(row) {
+  const largestFirst = ["input", "output"].sort((a, b) => fieldBytes(row, b) - fieldBytes(row, a));
+  let fitted = row;
+  for (const field of largestFirst) {
+    if (rowBytes(fitted) <= ROW_BUDGET_BYTES) return fitted;
+    const shrunk = truncateField(fitted, field);
+    if (rowBytes(shrunk) < rowBytes(fitted)) fitted = shrunk;
+  }
+  const bytes = rowBytes(fitted);
+  if (bytes > ROW_BUDGET_BYTES) {
+    throw new Error(`${row.tool} row is ${bytes} bytes after truncation, cap is ${MAX_LINE_BYTES}`);
+  }
+  return fitted;
+}
 
 export function createAuditWal(opts) {
-  const dir = path.join(opts.dataDir, "audit");
+  const dir = path.join(opts.dataDir, "audit", opts.login);
   const currentPath = path.join(dir, "current.jsonl");
   const offsetPath = path.join(dir, "shipped.offset");
   const archiveDir = path.join(dir, "archive");
@@ -46,8 +70,12 @@ export function createAuditWal(opts) {
   let ensured = false;
   async function ensureDirs() {
     if (ensured) return;
-    await mkdir(dir, { recursive: true });
-    await mkdir(archiveDir, { recursive: true });
+    await ensurePrivateDir(opts.dataDir);
+    await ensurePrivateDir(path.dirname(dir));
+    await ensurePrivateDir(dir);
+    await ensurePrivateDir(archiveDir);
+    await tightenDirFilesOnce(dir);
+    await tightenDirFilesOnce(archiveDir);
     ensured = true;
   }
 
@@ -62,9 +90,11 @@ export function createAuditWal(opts) {
     await ensureDirs();
     const json = JSON.stringify(enriched);
     if (Buffer.byteLength(json, "utf8") > MAX_LINE_BYTES) {
-      throw new Error(`audit row too large (${json.length} bytes); cap is ${MAX_LINE_BYTES}`);
+      throw new Error(
+        `audit row too large (${Buffer.byteLength(json, "utf8")} bytes); cap is ${MAX_LINE_BYTES}`
+      );
     }
-    await appendFile(currentPath, `${json}\n`, { encoding: "utf8" });
+    await appendFile(currentPath, `${json}\n`, { encoding: "utf8", mode: PRIVATE_FILE_MODE });
   }
 
   async function readShippedOffset() {
@@ -80,9 +110,7 @@ export function createAuditWal(opts) {
 
   async function writeShippedOffset(offset) {
     await ensureDirs();
-    const tmpPath = `${offsetPath}.tmp.${process.pid}.${Date.now()}`;
-    await writeFile(tmpPath, String(offset), "utf8");
-    await rename(tmpPath, offsetPath);
+    await writePrivateFile(offsetPath, String(offset));
   }
 
   async function readBatch(maxRows = 100) {
@@ -117,8 +145,9 @@ export function createAuditWal(opts) {
 
       rows.sort(compareForOrder);
       const stripped = rows.map((row) => {
-        // eslint-disable-next-line no-unused-vars
-        const { _seq, _enqueuedAt, ...rest } = row;
+        const rest = { ...row };
+        delete rest._seq;
+        delete rest._enqueuedAt;
         return rest;
       });
       return { rows: stripped, endOffset: offset + pos };

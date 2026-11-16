@@ -1,17 +1,18 @@
 {
   "name": "armorclaude",
-  "version": "0.2.11",
+  "version": "0.2.20",
   "private": true,
   "type": "module",
   "description": "ArmorIQ intent-based security enforcement for Claude Code",
   "license": "MIT",
   "scripts": {
-    "test": "node --test",
-    "check": "node --test",
-    "lint": "eslint .",
+    "test": "node --test --import ./tests/setup/no-network.mjs",
+    "check": "node --test --import ./tests/setup/no-network.mjs",
+    "lint": "oxlint --report-unused-disable-directives",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "build": "echo 'no build step'",
+    "release:version": "node scripts/release-version.mjs",
     "prepare": "husky",
     "postinstall": "node scripts/install.mjs"
   },
@@ -19,14 +20,14 @@
     "node": ">=20.19.0"
   },
   "dependencies": {
-    "@armoriq/sdk": "^0.6.10",
+    "@armoriq/sdk": "^0.8.24",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "eslint": "^9.0.0",
-    "eslint-config-prettier": "^9.1.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
     "husky": "^9.1.7",
+    "oxlint": "1.89.0",
     "prettier": "^3.2.0"
   }
 }

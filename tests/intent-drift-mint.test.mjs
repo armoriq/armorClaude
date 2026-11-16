@@ -1,4 +1,5 @@
 import test from "node:test";
+import { NO_V2_POLICY_BACKEND } from "./helpers/v2-bundle.mjs";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
@@ -6,28 +7,13 @@ import path from "node:path";
 import { handlePreToolUse } from "../scripts/lib/engine.mjs";
 import { writeJson } from "../scripts/lib/fs-store.mjs";
 
-// Regression cover for a drift bypass that only appeared once an API key was
-// configured — i.e. exactly the paying-customer path.
-//
-// handlePreToolUse used to mint an intent token before checking the registered
-// plan, and the mint payload carried toolName/toolInput but not the plan. The
-// backend therefore built a plan around the very call being checked, the
-// registered plan was overwritten in runtime.json, and the call was validated
-// against a plan derived from itself. A session whose plan declared only Read
-// would run Bash without complaint.
-//
-// These tests need no backend: the guard must reject before any mint is
-// attempted, so a bare api key with no reachable server is sufficient. If the
-// guard regresses, the SDK call is attempted and the assertions fail.
-
 function buildConfig(tmpDir, overrides = {}) {
   return {
     mode: "enforce",
     dataDir: tmpDir,
     policyFile: path.join(tmpDir, "policy.json"),
     runtimeFile: path.join(tmpDir, "runtime.json"),
-    useProduction: false,
-    backendEndpoint: "http://127.0.0.1:1",
+    backendEndpoint: NO_V2_POLICY_BACKEND,
     csrgEndpoint: "http://127.0.0.1:1",
     apiKey: "test-key",
     useSdkIntent: false,
@@ -54,9 +40,6 @@ function buildConfig(tmpDir, overrides = {}) {
   };
 }
 
-// An all-allow policy switches the plugin to frictionless mode and disables
-// intent entirely, so the fixture needs at least one forbid statement for
-// intent enforcement to be active at all.
 async function writeEnforcingPolicy(config) {
   await writeJson(config.policyFile, {
     version: 1,

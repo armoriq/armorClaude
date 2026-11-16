@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ArmorClaude installer for Claude Code
-#
-# Usage:
-#   curl -fsSL https://armoriq.ai/install_armorclaude.sh | bash
-#
-# Non-interactive overrides:
-#   ARMORCLAUDE_MARKETPLACE_REPO=<path>   override marketplace source (testing)
-
 R=$'\033[1;31m'
 G=$'\033[32m'
 Y=$'\033[33m'
@@ -22,14 +14,9 @@ MARKETPLACE_REPO="${ARMORCLAUDE_MARKETPLACE_REPO:-armoriq/armorClaude}"
 PLUGIN_REF="armorclaude@armoriq"
 DASHBOARD_URL="https://tools.armoriq.ai"
 
-# Recover if the caller launched the installer from a directory that was deleted.
 if ! pwd >/dev/null 2>&1; then
   cd "${HOME:-/}" 2>/dev/null || cd /
 fi
-
-# ---------------------------------------------------------------------------
-# UI helpers
-# ---------------------------------------------------------------------------
 
 ok()    { printf "${G}✔${N} %s\n" "$*"; }
 warn()  { printf "${Y}!${N} %s\n" "$*"; }
@@ -53,10 +40,6 @@ ${C}${B}    ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝ ╚�
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# Prereq checks
-# ---------------------------------------------------------------------------
-
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     err "missing required command: $1"
@@ -79,70 +62,43 @@ check_node_version() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Plugin install
-# ---------------------------------------------------------------------------
-
-# Claude Code auto-updates a plugin only when its marketplace entry says so, and
-# a third-party marketplace defaults to false, so a published fix otherwise
-# reaches nobody until each user runs `claude plugin update` by hand. There is no
-# CLI flag for it, so the settings entry is written here. Exit 2 means it was
-# already on. Set ARMORCLAUDE_NO_AUTO_UPDATE=1 to keep updates manual.
+# A third-party marketplace defaults to no auto-update and the CLI has no flag
+# for it, so without this entry a release reaches nobody.
 enable_auto_update() {
   if [[ "${ARMORCLAUDE_NO_AUTO_UPDATE:-}" == "1" ]]; then
     info "leaving updates manual (ARMORCLAUDE_NO_AUTO_UPDATE=1)"
     return 0
   fi
 
-  local settings="${HOME}/.claude/settings.json"
   local status=0
-  if command -v node >/dev/null 2>&1; then
-    ARMORIQ_SETTINGS="${settings}" ARMORIQ_MARKETPLACE_REPO="${MARKETPLACE_REPO}" node -e '
-      const fs = require("fs");
-      const path = require("path");
-      const file = process.env.ARMORIQ_SETTINGS;
-      const settings = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
-      const places = (settings.extraKnownMarketplaces ??= {});
-      const armoriq = (places.armoriq ??= {
-        source: { source: "github", repo: process.env.ARMORIQ_MARKETPLACE_REPO },
-      });
-      if (armoriq.autoUpdate === true) process.exit(2);
-      armoriq.autoUpdate = true;
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      const temporary = `${file}.armoriq.tmp`;
-      fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`);
-      fs.renameSync(temporary, file);
-    ' 2>/dev/null || status=$?
-  elif command -v python3 >/dev/null 2>&1; then
-    ARMORIQ_SETTINGS="${settings}" ARMORIQ_MARKETPLACE_REPO="${MARKETPLACE_REPO}" python3 -c '
-import json, os, sys
-file = os.environ["ARMORIQ_SETTINGS"]
-settings = {}
-if os.path.exists(file):
-    with open(file) as handle:
-        settings = json.load(handle)
-places = settings.setdefault("extraKnownMarketplaces", {})
-armoriq = places.setdefault(
-    "armoriq",
-    {"source": {"source": "github", "repo": os.environ["ARMORIQ_MARKETPLACE_REPO"]}},
-)
-if armoriq.get("autoUpdate") is True:
-    sys.exit(2)
-armoriq["autoUpdate"] = True
-os.makedirs(os.path.dirname(file), exist_ok=True)
-temporary = file + ".armoriq.tmp"
-with open(temporary, "w") as handle:
-    json.dump(settings, handle, indent=2)
-    handle.write("\n")
-os.replace(temporary, file)
-' 2>/dev/null || status=$?
-  else
-    status=127
-  fi
+  ARMORIQ_CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}" ARMORIQ_MARKETPLACE_REPO="${MARKETPLACE_REPO}" node -e '
+    const fs = require("fs");
+    const path = require("path");
+    const dir = process.env.ARMORIQ_CLAUDE_DIR;
+    const link = path.join(dir, "settings.json");
+    const file = fs.existsSync(link) ? fs.realpathSync(link) : link;
+    const read = (f) => (fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {});
+    const settings = read(file);
+    const known = read(path.join(dir, "plugins", "known_marketplaces.json")).armoriq;
+    const places = (settings.extraKnownMarketplaces ??= {});
+    const armoriq = (places.armoriq ??= {
+      source: known?.source ?? { source: "github", repo: process.env.ARMORIQ_MARKETPLACE_REPO },
+    });
+    if (armoriq.autoUpdate === true) process.exit(2);
+    if (armoriq.autoUpdate === false || known?.autoUpdate === false) process.exit(3);
+    armoriq.autoUpdate = true;
+    const mode = fs.existsSync(file) ? fs.statSync(file).mode & 0o7777 : 0o644;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temporary = `${file}.armoriq-${process.pid}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode });
+    fs.chmodSync(temporary, mode);
+    fs.renameSync(temporary, file);
+  ' 2>/dev/null || status=$?
 
   case "${status}" in
-    0) ok "updates are automatic (new versions install at your next session)" ;;
+    0) ok "updates are automatic (new versions install during your next session)" ;;
     2) ok "updates are already automatic" ;;
+    3) info "leaving updates manual: auto-update for armoriq is turned off on this machine" ;;
     *) warn "couldn't turn on automatic updates; run ${B}claude plugin update ${PLUGIN_REF}${N} to update" ;;
   esac
 }
@@ -152,7 +108,6 @@ install_plugin() {
 
   info "adding marketplace ${B}${MARKETPLACE_REPO}${N}"
   if ! claude plugin marketplace add "${MARKETPLACE_REPO}" >/dev/null 2>&1; then
-    # already added is fine — re-fetch in case the source moved
     claude plugin marketplace update armoriq >/dev/null 2>&1 || true
   fi
   ok "marketplace ready"
@@ -168,7 +123,7 @@ install_plugin() {
   # "Failed to connect — MCP error -32000: Connection closed".
   info "preparing plugin dependencies"
   local plugin_dir
-  plugin_dir="$(ls -d "${HOME}"/.claude/plugins/cache/armoriq/armorclaude/*/ 2>/dev/null | sort -V | tail -1)"
+  plugin_dir="$(ls -d "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"/plugins/cache/armoriq/armorclaude/*/ 2>/dev/null | sort -V | tail -1)"
   if [[ -n "${plugin_dir}" && -f "${plugin_dir}scripts/bootstrap.mjs" ]]; then
     if node "${plugin_dir}scripts/bootstrap.mjs" warm >/dev/null 2>&1; then
       ok "dependencies ready"
@@ -185,15 +140,8 @@ install_plugin() {
     || warn "couldn't install globally — use ${B}npx @armoriq/sdk${N} instead"
 }
 
-# ---------------------------------------------------------------------------
-# Verification + finale
-# ---------------------------------------------------------------------------
-
 verify_install() {
   section "Verifying"
-  # `claude plugin list` prints the status on the line after the plugin name, so
-  # a bare grep for "armorclaude" matches even when the plugin is disabled and
-  # would wrongly report success.
   local listing status
   listing="$(claude plugin list 2>/dev/null || true)"
   status="$(printf '%s\n' "$listing" | grep -A3 "armorclaude@armoriq" | grep -m1 "Status:" || true)"
@@ -242,24 +190,23 @@ connect_to_armoriq() {
 EOF
 
   if ! is_promptable; then
-    printf "  Run ${G}${B}armoriq login${N} to connect later.\n\n"
+    printf "  Run ${G}${B}armoriq login --product armorclaude${N} to connect later.\n\n"
     return 0
   fi
 
   if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
     echo
-    printf "  No problem. Run ${G}${B}armoriq login${N} anytime to connect.\n\n"
+    printf "  No problem. Run ${G}${B}armoriq login --product armorclaude${N} anytime to connect.\n\n"
     return 0
   fi
 
   echo
-  # Run armoriq login inline — uses the globally installed CLI or npx fallback
   if command -v armoriq >/dev/null 2>&1; then
-    armoriq login
+    armoriq login --product armorclaude
   elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk login
+    npx @armoriq/sdk login --product armorclaude
   else
-    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk login${N} manually."
+    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk login --product armorclaude${N} manually."
     return 0
   fi
 
@@ -316,10 +263,6 @@ EOF
 
 EOF
 }
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 main() {
   banner

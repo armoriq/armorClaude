@@ -1,17 +1,52 @@
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
+import { claudeConfigDir } from "./claude-paths.mjs";
 import { parseBoolean } from "./common.mjs";
-import { credentialFor } from "./credentials-profile.mjs";
+import { signedOut } from "./backend-posture.mjs";
+import { sdkModule } from "./sdk.mjs";
 
 const PRODUCT = "armorclaude";
-/** Set to "dev" on the dev branch; it suffixes the product in the client header. */
-const CHANNEL = "stable";
+const DEV_PLUGIN_DATA = `${PRODUCT}-dev-armoriq`;
+const STAGING_BACKEND = "https://staging-api.armoriq.ai";
+// The dev installer signs in to staging with the armoriq-dev CLI from @armoriq/sdk-dev.
+const DEV_CLI = "armoriq-dev";
+const PLUGIN_VERSION = createRequire(import.meta.url)("../../package.json").version;
 
-/** The backend reads this to tell which build a device runs. */
-export const CLIENT_VERSION = `${PRODUCT}${CHANNEL === "stable" ? "" : `-${CHANNEL}`}/${
-  JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version
-}`;
+function clientIdentity(dataDir) {
+  const product = path.basename(dataDir) === DEV_PLUGIN_DATA ? `${PRODUCT}-dev` : PRODUCT;
+  return { product, version: PLUGIN_VERSION };
+}
+
+let cachedLoginCommand;
+
+export function declaredCli({ name, bin }) {
+  const clis = bin !== null && typeof bin === "object" ? Object.keys(bin) : [];
+  if (clis.length !== 1)
+    throw new Error(`${name} must declare exactly one CLI in its package.json bin`);
+  return clis[0];
+}
+
+// Name the backend this plugin reads its key from, so the login lands where
+// the plugin looks for it.
+export function loginCommand(backend) {
+  if (!cachedLoginCommand) {
+    const sdkPackage = createRequire(import.meta.url)("@armoriq/sdk/package.json");
+    cachedLoginCommand = `${declaredCli(sdkPackage)} login --product ${PRODUCT}`;
+  }
+  if (!backend) return cachedLoginCommand;
+  const command =
+    backend === STAGING_BACKEND ? cachedLoginCommand.replace(/^\S+/, DEV_CLI) : cachedLoginCommand;
+  return `${command} --backend ${backend}`;
+}
+
+export function statusCommand() {
+  return `${loginCommand().split(" ")[0]} status`;
+}
+
+export const notSignedIn = (backend) =>
+  `No ArmorClaude login for ${backend}. Run: ${loginCommand(backend)}`;
 
 /**
  * Read a config value from CLAUDE_PLUGIN_OPTION_* (injected by Claude Code
@@ -22,6 +57,36 @@ function pluginOpt(env, pluginKey, legacyKey) {
   if (pluginVal) return pluginVal;
   if (legacyKey) return env[legacyKey]?.trim() || "";
   return "";
+}
+
+export const REQUEST_CONFIG_KEYS = [
+  "armoriqEnv",
+  "apiKey",
+  "orgId",
+  "userId",
+  "loggedInAt",
+  "loginHistory",
+  "hadUnusableKey",
+  "backendEndpoint",
+  "observabilityEnabled",
+  "observabilityEndpoint",
+  "observabilityProduct",
+  "usageSyncEnabled",
+  "auditEnabled",
+  "csrgVerifyEnabled",
+  "cryptoPolicyEnabled",
+  "signedOut",
+];
+
+const USABLE_KEY = /^ak_(test|live|claw)_/;
+
+export function loginEnforcement(apiKey, localMock) {
+  const connected = localMock || USABLE_KEY.test(apiKey);
+  return {
+    mode: connected ? "enforce" : "monitor",
+    intentRequired: connected,
+    unconfigured: !connected,
+  };
 }
 
 function normalizeArmoriqEnv(value) {
@@ -35,27 +100,16 @@ function normalizeArmoriqEnv(value) {
 }
 
 /**
- * armorClaude config — main branch (production).
- *
- *   userConfig (plugin UI)  → api_key only
- *   env vars                → paths + debug
- *   everything else         → hardcoded to the tested-good default
- *
- * Dev-branch default: staging. Main must keep production-hardcoded behavior
- * before release, but the dev plugin must never send staging keys to the
- * production API by accident.
- *
- * ARMORIQ_ENV:
- *   production/default -> api.armoriq.ai + iap.armoriq.ai
- *   staging/stage -> staging-api.armoriq.ai + iap-staging.armoriq.ai
- *   development/local/test -> local URLs, overridable for local stacks only
+ * The key and org come only from the armorclaude profile `armoriq login` saved for
+ * the backend. ARMORIQ_ENV picks the backend: production/prod, staging/stage, or
+ * development/local/test; unset, armorclaude-dev uses staging and armorclaude production.
  */
 export function loadConfig(env = process.env) {
   // ── Paths ──
   const dataDir =
     env.CLAUDE_PLUGIN_DATA?.trim() ||
     env.ARMORCLAUDE_DATA_DIR?.trim() ||
-    path.join(homedir(), ".claude", "armorclaude");
+    path.join(claudeConfigDir(env), "armorclaude");
   const policyFile = env.ARMORCLAUDE_POLICY_FILE?.trim() || path.join(dataDir, "policy.json");
   const runtimeFile = env.ARMORCLAUDE_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
@@ -64,7 +118,9 @@ export function loadConfig(env = process.env) {
   // File-based flag avoids shell env var gymnastics on Windows.
   // Delete ~/.armoriq/local-mode to restore production mode.
   const localModeFile = path.join(homedir(), ".armoriq", "local-mode");
-  const requestedEnv = normalizeArmoriqEnv(env.ARMORIQ_ENV) || "production";
+  const requestedEnv =
+    normalizeArmoriqEnv(env.ARMORIQ_ENV) ||
+    (path.basename(dataDir) === DEV_PLUGIN_DATA ? "staging" : "production");
   const localMock =
     parseBoolean(env.ARMORIQ_LOCAL_MOCK, false) ||
     existsSync(localModeFile) ||
@@ -75,20 +131,23 @@ export function loadConfig(env = process.env) {
       ? env.ARMORIQ_BACKEND_URL?.trim() || "http://localhost:8000"
       : activeEnv === "production"
         ? "https://api.armoriq.ai"
-        : "https://staging-api.armoriq.ai";
+        : STAGING_BACKEND;
   const csrgEndpoint =
     activeEnv === "local"
       ? env.ARMORIQ_CSRG_URL?.trim() || "http://localhost:8000"
       : activeEnv === "production"
         ? "https://iap.armoriq.ai"
         : "https://iap-staging.armoriq.ai";
-  const useProduction = activeEnv === "production";
 
-  // ── userConfig fields. UI primary, legacy env fallback. ──
-  let apiKey = pluginOpt(env, "API_KEY", "ARMORIQ_API_KEY");
+  const login = sdkModule("credentials").loadLoginContext({
+    backend: backendEndpoint,
+    product: PRODUCT,
+  });
+  const profile = login?.profile;
+  let apiKey = profile?.apiKey ?? "";
+  const orgId = profile?.orgId ?? "";
   // Optional default policy template applied (staged for confirm) on first run.
   const defaultTemplate = pluginOpt(env, "DEFAULT_TEMPLATE");
-  let orgId = env.ARMORIQ_ORG_ID?.trim() || "";
 
   // Observability is ON by default. Users can opt out via the
   // `disable_observability` plugin option or the ARMORIQ_OBSERVABILITY_DISABLED
@@ -97,46 +156,29 @@ export function loadConfig(env = process.env) {
     pluginOpt(env, "DISABLE_OBSERVABILITY", "ARMORIQ_OBSERVABILITY_DISABLED"),
     false
   );
-  try {
-    const creds = JSON.parse(
-      readFileSync(path.join(homedir(), ".armoriq", "credentials.json"), "utf-8")
-    );
-    const saved = credentialFor(creds, {
-      backend: backendEndpoint,
-      product: "armorclaude",
-    });
-    if (!apiKey && saved.apiKey) apiKey = saved.apiKey;
-    if (!orgId && saved.orgId) orgId = saved.orgId;
-  } catch {
-    // no credentials file — local-only mode
-  }
+  const usageSyncDisabled = parseBoolean(
+    pluginOpt(env, "DISABLE_USAGE_SYNC", "ARMORIQ_USAGE_SYNC_DISABLED"),
+    false
+  );
 
-  // A key is only usable if it matches the @armoriq/sdk key format
-  // (ak_test_/ak_live_/ak_claw_). Anything else — empty, or a stale/old-format
-  // key left over from a prior install — is treated as "not connected":
-  //   • handing a bad-format key to `new ArmorIQClient(...)` throws in the
-  //     constructor, which crashed the policy MCP server ("-32000").
-  //   • enforcing without a working key just hard-blocks every tool, bricking
-  //     the session on a fresh `claude plugin install` (no onboarding ran).
-  // So we drop an unusable key and fall into monitor mode (see `connected`).
-  const keyLooksUsable = /^ak_(test|live|claw)_/.test(apiKey);
+  // A key outside the SDK format (ak_test_/ak_live_/ak_claw_) makes
+  // new ArmorIQClient throw, crashing the policy MCP server, and enforcing without
+  // a working key blocks every tool. Treat it as not connected: monitor mode.
+  const keyLooksUsable = USABLE_KEY.test(apiKey);
   const hadUnusableKey = Boolean(apiKey) && !keyLooksUsable;
   if (hadUnusableKey) apiKey = "";
   // Effective key handed to the SDK. In local mock use a placeholder the SDK's
   // key-format check accepts (the mock server ignores auth). Everything that
   // keys off "do we have a working credential" uses this.
   const effectiveApiKey = apiKey || (localMock ? "ak_test_localmock000000000000" : "");
-  // "Connected" == we have a usable key (or we're in local mock). Only then do
-  // we enforce. Unconfigured installs run passively until the user connects.
-  const connected = localMock || keyLooksUsable;
 
-  return {
+  const config = {
     // Paths / endpoints
     dataDir,
+    client: clientIdentity(dataDir),
     policyFile,
     runtimeFile,
     armoriqEnv: activeEnv,
-    useProduction,
     backendEndpoint,
     csrgEndpoint,
     verifyStepEndpoint: `${backendEndpoint}/iap/verify-step`,
@@ -147,36 +189,23 @@ export function loadConfig(env = process.env) {
     observabilityEnabled: !observabilityDisabled && Boolean(effectiveApiKey),
     observabilityEndpoint: backendEndpoint,
     observabilityProduct: "armorclaude",
+    usageSyncEnabled: !observabilityDisabled && !usageSyncDisabled && Boolean(effectiveApiKey),
 
-    // userConfig-driven credential (see effectiveApiKey above: a bad-format key
-    // is dropped, and local mock substitutes an SDK-accepted placeholder).
+    // The login profile's key (see effectiveApiKey above: a bad-format key is
+    // dropped, and local mock substitutes an SDK-accepted placeholder).
     apiKey: effectiveApiKey,
-    clientVersion: CLIENT_VERSION,
     orgId,
     auditEnabled: Boolean(effectiveApiKey),
     defaultTemplate,
 
-    // Enforcement is gated on being connected. With a usable key (or local
-    // mock) we enforce + require intent, exactly as before. Without one, we run
-    // in monitor mode so the plugin never bricks an un-onboarded session; the
-    // SessionStart banner tells the user how to connect. Once a valid key is
-    // present, this flips back to enforce automatically.
-    mode: connected ? "enforce" : "monitor",
-    intentRequired: connected,
-    // True when the plugin is installed but not connected (no usable key).
-    // Drives the SessionStart setup banner.
-    unconfigured: !connected,
+    ...loginEnforcement(effectiveApiKey, localMock),
     hadUnusableKey,
     auditWal: true,
     autoReanchor: true,
     autoRevokeOnEnd: true,
     daemonEnabled: true,
-    // csrgVerifyEnabled drives verify-step heartbeats → activeSessions counter.
-    // Production: false — org native policy on api.armoriq.io denies all paths
-    //   for gmail.com domain, so verify-step always returns "blocked". Keeping
-    //   this false lets tools run while the org policy issue is resolved upstream.
-    // Local mock: true — mock always returns allowed, so heartbeats work and
-    //   activeSessions shows the real count on the dashboard.
+    // Off in production: the api.armoriq.io org policy blocks verify-step for
+    // gmail.com, so enabling it would block every tool.
     csrgVerifyEnabled: localMock,
     requireCsrgProofs: false,
     // Crypto policy requires a caller-owned credential. The local-mock
@@ -199,7 +228,10 @@ export function loadConfig(env = process.env) {
     productSlug: "armorclaude",
     llmId: "claude-code",
     mcpName: "claude-code",
-    userId: "claude-user",
+    userId: profile?.userId ?? "",
+    userEmail: profile?.email ?? "",
+    loggedInAt: profile?.loggedInAt ?? "",
+    loginHistory: login?.loginHistory ?? null,
     agentId: "claude-code",
     contextId: "default",
 
@@ -217,4 +249,23 @@ export function loadConfig(env = process.env) {
 
     debug: parseBoolean(env.ARMORCLAUDE_DEBUG, false),
   };
+  return withBackendPosture(config);
+}
+
+/** Signed out: what a session without a login gets, so nothing is sent with a rejected key. */
+export function localOnly(config) {
+  return {
+    ...config,
+    apiKey: "",
+    auditEnabled: false,
+    observabilityEnabled: false,
+    usageSyncEnabled: false,
+    cryptoPolicyEnabled: false,
+    signedOut: true,
+    ...loginEnforcement("", false),
+  };
+}
+
+export function withBackendPosture(config) {
+  return signedOut(config) ? localOnly(config) : config;
 }

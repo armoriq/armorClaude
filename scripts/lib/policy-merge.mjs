@@ -5,7 +5,6 @@ import { normalizePolicyIr, validatePolicyIr } from "./policy-ir.mjs";
 const DEFAULT_RANK = { allow: 0, hold: 1, deny: 2 };
 const EFFECT_RANK = { permit: 0, require_approval: 1, forbid: 2 };
 
-/** Identity of a rule ignoring its effect: same principal+action+resource+conditions. */
 function ruleKey(statement) {
   return JSON.stringify([
     statement.principal,
@@ -15,21 +14,6 @@ function ruleKey(statement) {
   ]);
 }
 
-/**
- * Merge multiple armor.policy.v1 bundles into a single conflict-free policy.
- *
- * Resolution (most-restrictive-wins, safe by construction):
- *  - defaults.decision: strictest across inputs (deny > hold > allow).
- *  - Two rules with the SAME target (principal+action+resource+conditions) but
- *    different effects: keep the strictest effect (forbid > require_approval >
- *    permit). Exact duplicates collapse to one.
- *  - Rules that merely OVERLAP (not identical targets) are all kept; the engine's
- *    deny_overrides conflict resolution settles them safely at evaluation time.
- *  - Statement ids are made unique (collisions get a -N suffix).
- *
- * A single input is returned normalized (a no-op merge). Throws if the merged
- * document fails IR validation.
- */
 export function mergePolicies(policies, { name = "custom-merged", description } = {}) {
   const list = Array.isArray(policies) ? policies : [policies];
   if (list.length === 0) {
@@ -37,7 +21,6 @@ export function mergePolicies(policies, { name = "custom-merged", description } 
   }
   const normalized = list.map((p) => normalizePolicyIr(p));
 
-  // Strictest default wins.
   let decision = "allow";
   for (const p of normalized) {
     if ((DEFAULT_RANK[p.defaults.decision] ?? 0) > (DEFAULT_RANK[decision] ?? 0)) {
@@ -45,8 +28,6 @@ export function mergePolicies(policies, { name = "custom-merged", description } 
     }
   }
 
-  // Collapse identical targets, keeping the strictest effect. Insertion order
-  // (first-seen) is preserved for deterministic output.
   const byKey = new Map();
   for (const p of normalized) {
     for (const statement of p.statements) {
@@ -58,7 +39,6 @@ export function mergePolicies(policies, { name = "custom-merged", description } 
     }
   }
 
-  // Unique, stable ids.
   const usedIds = new Set();
   const statements = [];
   for (const statement of byKey.values()) {

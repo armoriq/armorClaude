@@ -1,23 +1,12 @@
-/**
- * Shared intent plan schema — single source of truth used by:
- *  - register_intent_plan MCP tool (validates Claude's input)
- *  - ExitPlanMode plan-file parser (validates extracted JSON block)
- *  - UserPromptSubmit directive (format string injected into Claude's context)
- */
-
 import { z } from "zod";
 
 export const PLAN_STEP_SCHEMA = z.object({
   action: z.string().min(1).describe("Tool name (e.g. Read, Edit, Bash, mcp__server__tool)"),
   description: z.string().optional().describe("Why this step is needed"),
-  metadata: z
-    .object({
-      inputs: z
-        .record(z.string(), z.unknown())
-        .optional()
-        .describe("Expected tool parameters for enforcement"),
-    })
-    .optional(),
+  arguments: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe("The tool parameters you expect to pass"),
 });
 
 export const INTENT_PLAN_ZOD = z.object({
@@ -28,37 +17,25 @@ export const INTENT_PLAN_ZOD = z.object({
     .describe("Ordered list of tool calls the agent intends to make"),
 });
 
-/**
- * Human-readable format string injected into Claude's context so it knows
- * exactly what shape to produce.
- */
 export const INTENT_PLAN_FORMAT = `{
   "goal": "<one-line summary of the task>",
   "steps": [
     {
       "action": "<ToolName e.g. Read, Edit, Bash, Grep, Glob, Write, WebFetch>",
       "description": "<why this step is needed>",
-      "metadata": { "inputs": { /* expected tool parameters, optional */ } }
+      "arguments": { /* expected tool parameters, optional */ }
     }
   ]
 }`;
 
-/**
- * Normalize a validated plan into the internal format used by requestIntent()
- * and the plan enforcement pipeline.
- */
 export function normalizeIntentPlan(parsed) {
   return {
     steps: parsed.steps.map((s) => ({
-      // Both `action` and `tool` are populated to match the backend's
-      // CSRG/policy enforcer expectations: the SDK's invoke() does the
-      // same (sets tool: action). The backend hashes `step.tool` for
-      // policy paths like /steps/[i]/tool.
       action: s.action,
       tool: s.action,
       mcp: "claude-code",
       description: s.description || "",
-      metadata: s.metadata || {},
+      arguments: s.arguments || {},
     })),
     metadata: {
       goal: parsed.goal,

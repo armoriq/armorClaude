@@ -20,7 +20,6 @@ function buildConfig(tmpDir, overrides = {}) {
     dataDir: tmpDir,
     policyFile: path.join(tmpDir, "policy.json"),
     runtimeFile: path.join(tmpDir, "runtime.json"),
-    useProduction: false,
     backendEndpoint: "http://127.0.0.1:3000",
     csrgEndpoint: "http://127.0.0.1:8080",
     apiKey: "",
@@ -62,11 +61,8 @@ function startMockServer(handler) {
   });
 }
 
-// An all-allow policy puts the plugin in frictionless mode, which disables the
-// intent gate entirely (see isFrictionlessAllowPolicy in engine.mjs). That is
-// also what a config with no policy.json falls back to, so any test exercising
-// intent enforcement has to write a policy carrying at least one non-permit
-// statement first.
+// An all-allow policy, also the default with no policy.json, disables the
+// intent gate, so intent tests need at least one non-permit statement.
 async function writeEnforcingPolicy(config) {
   await writeJson(config.policyFile, {
     version: 1,
@@ -658,9 +654,7 @@ test("handlePreToolUse denies missing intent when strict", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
   await writeEnforcingPolicy(config);
-  // Use Edit (mutating, NOT in the Phase 4 A1 read-only fast-path) so the
-  // full intent-required pipeline runs. Read/Grep/Glob/WebSearch/etc are
-  // intentionally fast-pathed and bypass this check by design.
+  // Read-only tools skip the intent check, so this needs a mutating tool.
   const output = await handlePreToolUse(
     {
       hook_event_name: "PreToolUse",
@@ -888,7 +882,7 @@ function v1Policy(name, statements) {
   };
 }
 
-test("handleUserPromptSubmit suppresses the intent directive under an all-allow policy", async () => {
+test("handleUserPromptSubmit injects a capture-only intent directive under an all-allow policy (#294)", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { planningEnabled: true, intentRequired: true });
   await savePolicyState(config.policyFile, {
@@ -909,10 +903,10 @@ test("handleUserPromptSubmit suppresses the intent directive under an all-allow 
     config
   );
   const ctx = output?.hookSpecificOutput?.additionalContext || "";
-  assert.ok(
-    !ctx.includes("register_intent_plan"),
-    "no intent directive should be injected when the policy is all-allow (enforcement is off)"
-  );
+  assert.ok(ctx.includes("register_intent_plan"));
+  assert.match(ctx, /ArmorClaude intent capture is active/);
+  assert.match(ctx, /The current policy blocks none of them/);
+  assert.ok(!ctx.includes("will be blocked"));
 });
 
 test("handleUserPromptSubmit injects the intent directive when the policy enforces", async () => {

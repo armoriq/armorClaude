@@ -59,9 +59,9 @@ to stderr:
 - Requires **Node.js >= 20** and **npm on PATH**, plus **network access on that first run**.
 - The bundled MCP server (`armorclaude-policy`) registers once dependencies finish installing;
   it stays connected on subsequent runs without reinstalling.
-- **No API key is needed to start.** With `api_key` blank the plugin runs in **local-only mode**
-  (no data leaves your machine — see [Data & Privacy](#data--privacy)); a key only adds backend
-  audit, intent tokens, and CSRG proofs.
+- **No API key is needed to start.** Until you sign in, the plugin runs in **local-only mode**
+  (no data leaves your machine, see [Data & Privacy](#data--privacy)). Signing in with
+  `armoriq login --product armorclaude` adds backend audit, intent tokens, and CSRG proofs.
 
 If `claude mcp list` does not show `✓ Connected`, run the server directly from the plugin
 directory to surface the install/startup error:
@@ -71,6 +71,13 @@ node scripts/bootstrap.mjs mcp
 ```
 
 ### Update / disable / uninstall
+
+The installer turns on auto-update for the `armoriq` marketplace, so Claude Code installs each new
+release by itself during your next session (`Plugin updated ... Run /reload-plugins to apply`).
+The stable plugin moves when its version in `marketplace.json` changes; `armorclaude-dev` moves with
+every commit on `dev`. If you installed another way,
+ArmorClaude tells you once at session start; turn it on in `/plugin`, Marketplaces, `armoriq`,
+Enable auto-update. Set `ARMORCLAUDE_NO_AUTO_UPDATE=1` before installing to keep updates manual.
 
 ```bash
 claude plugin update armorclaude
@@ -98,7 +105,8 @@ armorClaude/
 │   └── marketplace.json          # Marketplace listing for `claude plugin install`
 ├── hooks/hooks.json              # Hook registration (7 lifecycle events)
 ├── .mcp.json                     # MCP server for policy + intent tools
-├── install_armorclaude.sh        # Curl-able installer
+├── install_armorclaude.sh        # Curl-able installer (armorclaude, production)
+├── install_armorclaude_dev.sh    # Same for armorclaude-dev (staging)
 ├── scripts/
 │   ├── bootstrap.mjs             # Auto-installs npm deps on first run
 │   ├── hook-router.mjs           # Hook entrypoint (dispatches events)
@@ -120,13 +128,16 @@ armorClaude/
 
 ## Configuration
 
+ArmorClaude takes its ArmorIQ key and org only from `armoriq login --product armorclaude`,
+which saves them in `~/.armoriq/credentials.json` for the backend ArmorClaude calls. There is no
+key setting, and `ARMORIQ_API_KEY` is ignored.
+
 ### Plugin userConfig (recommended)
 
 When installed as a Claude Code plugin, these values are prompted on enable:
 
 | Key | Sensitive | Description |
 |-----|-----------|-------------|
-| `api_key` | Yes | ArmorIQ API key |
 | `mode` | No | `enforce` (default) or `monitor` |
 | `intent_required` | No | Require intent for all tools (default: `true`) |
 | `crypto_policy_enabled` | No | Enable Merkle tree policy binding |
@@ -145,7 +156,6 @@ When installed as a Claude Code plugin, these values are prompted on enable:
 **ArmorIQ Integration:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARMORIQ_API_KEY` | — | ArmorIQ SDK API key |
 | `ARMORCLAUDE_USE_SDK_INTENT` | `true` | Use ArmorIQ SDK for intent capture |
 | `ARMORCLAUDE_INTENT_URL` | — | Custom intent endpoint (overrides SDK) |
 | `ARMORCLAUDE_VERIFY_STEP_URL` | `<backend>/iap/verify-step` | IAP verify endpoint |
@@ -175,6 +185,7 @@ When installed as a Claude Code plugin, these values are prompted on enable:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ARMORIQ_OBSERVABILITY_DISABLED` | `false` | Set to `true`/`1`/`yes` to stop sending execution traces to the ArmorIQ dashboard. Observability is **on by default** when an API key is set — see [Data & Privacy](#data--privacy). Equivalent to the `disable_observability` plugin option. |
+| `ARMORIQ_USAGE_SYNC_DISABLED` | `false` | Set to `true`/`1`/`yes` to stop the token usage sync. Applies only while observability is on. Equivalent to the `disable_usage_sync` plugin option. |
 
 **Policy Management:**
 | Variable | Default | Description |
@@ -236,20 +247,24 @@ MCP tools: `policy_read`, `register_intent_plan`, and Trust Update tools. There 
 - **Crypto Policy Binding**: Optional Merkle tree binding via CSRG ensures policy rules can't be tampered with after token issuance.
 - **Audit Trail**: Every tool execution (success/failure) is logged to ArmorIQ IAP.
 - **Fail-Closed**: Missing tokens, failed planning, invalid proofs — all result in denied tool calls in enforce mode.
+- **Allow-all policy**: With the `all-allow` template, or with no confirmed policy yet, intent is captured but never blocks. Claude is still asked to register a plan, a signed intent token is requested, and audit rows are linked to that plan, but missing plans, drift, expired tokens and proof failures do not deny a tool call. The session banner shows `intent=capture`.
 
 ## Data & Privacy
 
 ArmorClaude's security enforcement works by inspecting prompts and tool calls. **What leaves your
 machine depends entirely on whether an ArmorIQ API key is configured:**
 
-- **Local-only mode (no `api_key`)** — nothing is transmitted. Policy checks, intent-drift
+- **Local-only mode (not signed in).** Nothing is transmitted. Policy checks, intent-drift
   detection, and audit logging all run locally.
-- **Connected mode (`api_key` set)** — the following is sent to the ArmorIQ backend
+- **Connected mode (signed in).** The following is sent to the ArmorIQ backend
   (`api.armoriq.ai` / `iap.armoriq.ai`) to provide intent tokens, audit trails, and CSRG proofs:
   - The captured **prompt and structured intent plan** (goal + steps).
   - Per-step **audit logs** containing the tool name and its **inputs and outputs**.
   - **Observability execution traces** (spans for planning, policy checks, and tool
     inputs/outputs) — **on by default** in connected mode.
+  - **Token usage** per Claude Code session, model and UTC hour, with the repo path and device name,
+    for every session in `~/.claude/projects`, including sessions that ran without ArmorClaude.
+    On by default while observability is on; see below to turn it off.
 
   Tool inputs and outputs are passed through secret redaction and parameter sanitization before
   transmission.
@@ -261,6 +276,18 @@ and intent enforcement still work):
 
 - **Plugin option:** set `disable_observability: true` in the plugin's userConfig, **or**
 - **Environment variable:** set `ARMORIQ_OBSERVABILITY_DISABLED=true` (also accepts `1` / `yes`).
+
+Turning off observability also stops the token usage sync.
+
+### Turning off the token usage sync
+
+While observability is on, a background sync uploads token counts (per session, model and UTC hour,
+with the repo path and device name) for every Claude Code session in `~/.claude/projects`,
+including sessions that ran without ArmorClaude. It sends no prompts or transcript text. To stop
+it and keep observability traces:
+
+- **Plugin option:** set `disable_usage_sync: true` in the plugin's userConfig, **or**
+- **Environment variable:** set `ARMORIQ_USAGE_SYNC_DISABLED=true` (also accepts `1` / `yes`).
 
 - **Product overview and setup:** <https://armoriq.ai/tools/armorclaude>
 - **Privacy policy (data collected, retention, opt-out):** <https://armoriq.ai/privacy-policy> (Section 6, "Product-Specific Data Flows")

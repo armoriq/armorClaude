@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import path from "node:path";
 import { z } from "zod";
 import { loadConfig } from "./lib/config.mjs";
-import { writeJson } from "./lib/fs-store.mjs";
+import { ensurePrivateDir, writeJson } from "./lib/fs-store.mjs";
 import { extractAllowedActions, getSdkClient, requestIntent } from "./lib/intent.mjs";
 import { delegateSubtreeViaSdk, reanchorViaSdk, revokeViaSdk } from "./lib/iap-service.mjs";
 import {
@@ -27,14 +27,8 @@ function toTextResult(text, extra = {}) {
   };
 }
 
-/**
- * Some MCP clients (and Claude itself) sometimes pass complex tool arguments
- * as JSON-encoded strings instead of structured objects. Accept either form.
- *
- *   { goal: "...", steps: "[{...}]" }   → parse steps as JSON
- *   { plan:  "{\"goal\":...}" }         → parse plan envelope as JSON
- *   { goal: "...", steps: [{...}] }     → pass through
- */
+// MCP clients, Claude included, sometimes send plan arguments as JSON-encoded
+// strings instead of objects.
 function coercePlanArgs(args) {
   if (!args || typeof args !== "object") {
     return args;
@@ -73,6 +67,7 @@ async function loadStateAndConfig() {
 }
 
 async function run() {
+  await ensurePrivateDir(loadConfig().dataDir);
   const server = new McpServer({
     name: "armorclaude-policy",
     version: "0.1.0",
@@ -103,9 +98,6 @@ async function run() {
     }
   );
 
-  // -----------------------------------------------------------------
-  // register_intent_plan — Claude calls this to declare its plan
-  // -----------------------------------------------------------------
   server.registerTool(
     "register_intent_plan",
     {
@@ -206,28 +198,17 @@ async function run() {
     }
   );
 
-  // -----------------------------------------------------------------
-  // Trust Update primitives — operator/LLM can revoke, reanchor, or
-  // delegate the active intent token directly from a Claude Code chat.
-  // All three resolve the active session by reading the runtime file
-  // (the MCP server is a long-lived stdio process, separate from the
-  // hook handlers, so we re-read on every call).
-  // -----------------------------------------------------------------
+  // This long-lived stdio process is separate from the hook handlers, so it
+  // re-reads the runtime file on every call to avoid stale session state.
 
   async function resolveActiveSession() {
     const config = loadConfig();
     const runtimeState = await loadRuntimeState(config.runtimeFile);
     const sessions = runtimeState.sessions || {};
 
-    // Prefer the current Claude Code window's session id when set. With
-    // multiple concurrent windows the "most-recent updatedAt" heuristic
-    // would route trust_revoke / trust_reanchor / trust_delegate against
-    // the wrong window's token. CLAUDE_CODE_SESSION_ID is stamped on the
-    // per-session pending-plan file (#43) and is reliable here.
-    // Prefer an explicit env var (future-proofing), then the active-session
-    // pointer the engine stamps into runtime.json on every hook. Claude Code
-    // does not expose session_id to MCP servers, so the pointer is the reliable
-    // source for routing trust ops to the current window's token.
+    // Claude Code does not expose session_id to MCP servers. Without the
+    // active-session pointer, concurrent windows would route trust ops against
+    // the most recently updated window's token instead of this one.
     const activeSid = process.env.CLAUDE_CODE_SESSION_ID || getActiveSessionId(runtimeState);
     if (activeSid && sessions[activeSid]) {
       return {

@@ -1,4 +1,3 @@
-/* eslint-disable */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
@@ -12,7 +11,7 @@ import {
   handlePostToolUseFailure,
   handlePreToolUse,
 } from "../scripts/lib/engine.mjs";
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import {
   upsertSession,
   loadRuntimeState,
@@ -27,7 +26,6 @@ function buildConfig(tmpDir, overrides = {}) {
     dataDir: tmpDir,
     policyFile: path.join(tmpDir, "policy.json"),
     runtimeFile: path.join(tmpDir, "runtime.json"),
-    useProduction: false,
     backendEndpoint: "http://127.0.0.1:3000",
     csrgEndpoint: "http://127.0.0.1:8000",
     apiKey: "",
@@ -290,10 +288,6 @@ test("handlePostToolUseFailure logs failed status", async () => {
     globalThis.fetch = originalFetch;
   }
 });
-
-// ---------------------------------------------------------------------------
-// Phase 3 — Trust Update integration: auto-reanchor + auto-revoke
-// ---------------------------------------------------------------------------
 
 test("PreToolUse appends ReAnchor trust op when pending plan differs from cached", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-trust-"));
