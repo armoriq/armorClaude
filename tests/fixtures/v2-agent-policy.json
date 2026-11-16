@@ -1,0 +1,207 @@
+{
+  "schemaVersion": "armor.policy.v2",
+  "target": {
+    "agent": "claude-code"
+  },
+  "layer": "agent",
+  "defaults": {
+    "tools": "allow",
+    "network": "block",
+    "files": "allow",
+    "skills": "allow"
+  },
+  "capture": {
+    "arguments": false,
+    "redact": ["*token*", "*secret*", "authorization"],
+    "maxBytesPerCall": 16384,
+    "sample": 1
+  },
+  "expiresAt": "never",
+  "statements": [
+    {
+      "id": "st-bash-0",
+      "subject": null,
+      "match": {
+        "tool": "Bash",
+        "keyTier": "exact",
+        "order": 0
+      },
+      "effect": "block",
+      "conditions": [
+        {
+          "field": "args.command",
+          "op": "regex",
+          "value": "rm -rf",
+          "schemaBinding": {
+            "schemaHash": null
+          }
+        }
+      ],
+      "expiresAt": "never",
+      "provenance": {
+        "ruleKey": "Bash",
+        "variant": 0,
+        "source": "yaml",
+        "layer": "agent"
+      }
+    },
+    {
+      "id": "st-bash-1",
+      "subject": null,
+      "match": {
+        "tool": "Bash",
+        "keyTier": "exact",
+        "order": 1
+      },
+      "effect": "allow",
+      "conditions": [],
+      "expiresAt": "never",
+      "provenance": {
+        "ruleKey": "Bash",
+        "variant": 1,
+        "source": "yaml",
+        "layer": "agent"
+      }
+    },
+    {
+      "id": "st-write-0",
+      "subject": null,
+      "match": {
+        "tool": "Write",
+        "keyTier": "exact",
+        "order": 0
+      },
+      "effect": "hold",
+      "conditions": [
+        {
+          "field": "args.file_path",
+          "op": "startsWith",
+          "value": "/workspace/secrets/",
+          "schemaBinding": {
+            "schemaHash": null
+          }
+        }
+      ],
+      "approval": {
+        "approvers": 1,
+        "anyMember": true
+      },
+      "expiresAt": "never",
+      "provenance": {
+        "ruleKey": "Write",
+        "variant": 0,
+        "source": "yaml",
+        "layer": "agent"
+      }
+    },
+    {
+      "id": "st-write-1",
+      "subject": null,
+      "match": {
+        "tool": "Write",
+        "keyTier": "exact",
+        "order": 1
+      },
+      "effect": "allow",
+      "conditions": [],
+      "expiresAt": "never",
+      "provenance": {
+        "ruleKey": "Write",
+        "variant": 1,
+        "source": "yaml",
+        "layer": "agent"
+      }
+    },
+    {
+      "id": "st-read-0",
+      "subject": null,
+      "match": {
+        "tool": "Read",
+        "keyTier": "exact",
+        "order": 0
+      },
+      "effect": "block",
+      "conditions": [
+        {
+          "field": "args.file_path",
+          "op": "regex",
+          "value": "\\.env$",
+          "schemaBinding": {
+            "schemaHash": null
+          }
+        }
+      ],
+      "expiresAt": "never",
+      "provenance": {
+        "ruleKey": "Read",
+        "variant": 0,
+        "source": "yaml",
+        "layer": "agent"
+      }
+    },
+    {
+      "id": "st-read-1",
+      "subject": null,
+      "match": {
+        "tool": "Read",
+        "keyTier": "exact",
+        "order": 1
+      },
+      "effect": "allow",
+      "conditions": [],
+      "expiresAt": "never",
+      "provenance": {
+        "ruleKey": "Read",
+        "variant": 1,
+        "source": "yaml",
+        "layer": "agent"
+      }
+    },
+    {
+      "id": "st-create-issue-0",
+      "subject": null,
+      "match": {
+        "tool": "create_issue",
+        "keyTier": "exact",
+        "order": 0
+      },
+      "effect": "block",
+      "conditions": [
+        {
+          "field": "args.repo",
+          "op": "eq",
+          "value": "prod",
+          "schemaBinding": {
+            "schemaHash": null
+          }
+        }
+      ],
+      "expiresAt": "never",
+      "provenance": {
+        "ruleKey": "create_issue",
+        "variant": 0,
+        "source": "yaml",
+        "layer": "agent"
+      }
+    },
+    {
+      "id": "st-create-issue-1",
+      "subject": null,
+      "match": {
+        "tool": "create_issue",
+        "keyTier": "exact",
+        "order": 1
+      },
+      "effect": "allow",
+      "conditions": [],
+      "expiresAt": "never",
+      "provenance": {
+        "ruleKey": "create_issue",
+        "variant": 1,
+        "source": "yaml",
+        "layer": "agent"
+      }
+    }
+  ],
+  "policyHash": "sha256:0c8efd66641fd9b8b150b4608be602d7d36212e33d892bd9120a1dcf79a0697d"
+}

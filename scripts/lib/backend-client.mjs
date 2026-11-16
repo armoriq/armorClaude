@@ -9,6 +9,10 @@ function hasBackend(config) {
   return Boolean(config.apiKey && config.backendEndpoint);
 }
 
+export async function enforceCall(config, body) {
+  return jsonRequest(config, "POST", "/iap/sdk/enforce", body);
+}
+
 export async function autoRegisterMcp(config, serverName) {
   if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
   try {
@@ -24,7 +28,6 @@ export async function autoRegisterMcp(config, serverName) {
   }
 }
 
-/** JSON fetch helper honoring the configured timeout + auth headers. */
 async function jsonRequest(config, method, apiPath, body) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs || 8000);
@@ -42,16 +45,6 @@ async function jsonRequest(config, method, apiPath, body) {
   }
 }
 
-/**
- * Push the caller's policy to the backend as a STAGED PROPOSAL, using the armor
- * profile lifecycle: PUT /policies/profiles/draft then POST
- * /policies/profiles/propose. Both accept the plugin API key.
- *
- * Activation is intentionally NOT performed here — a human confirms the staged
- * proposal from the dashboard (POST /policies/profiles/confirm is JWT-only).
- * This is what makes a policy set from the terminal land in the DB and show up
- * in the UI awaiting confirmation.
- */
 export async function proposePolicy(config, policy, reason) {
   if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
   if (!policy) return { ok: false, reason: "no policy to propose" };
@@ -80,7 +73,6 @@ export async function proposePolicy(config, policy, reason) {
   }
 }
 
-/** Push a saved profile's policy to the backend as a staged proposal. */
 export async function pushProfile(config, profile) {
   return proposePolicy(
     config,
@@ -89,12 +81,10 @@ export async function pushProfile(config, profile) {
   );
 }
 
-/** Sync the current active policy to the backend as a staged proposal. */
 export async function syncPolicy(config, policyState) {
   return proposePolicy(config, policyState?.policy, "Policy synced via /armor (terminal)");
 }
 
-/** Read the org's active armor policy (API-key scoped: GET profiles/active). */
 export async function pullProfiles(config) {
   if (!hasBackend(config)) return { ok: false, reason: "no backend configured", profiles: [] };
   try {
@@ -128,5 +118,48 @@ export async function syncMcpRegistry(config) {
     };
   } catch (err) {
     return { ok: false, reason: String(err?.message || err), servers: [] };
+  }
+}
+
+export async function keyOwner(config) {
+  if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
+  try {
+    const res = await postJson(
+      endpoint(config, "/iap/validate-key"),
+      {},
+      buildAuthHeaders(config),
+      config.timeoutMs || 8000
+    );
+    const userId = res.data?.userId;
+    if (!res.ok) return { ok: false, reason: `validate-key returned ${res.status}` };
+    if (typeof userId !== "string" || !userId)
+      return { ok: false, reason: "validate-key returned no userId" };
+    return { ok: true, userId };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err) };
+  }
+}
+
+export async function pendingHistorySync(config, deviceId) {
+  if (!hasBackend(config)) return { ok: false, reason: "no backend configured" };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.timeoutMs || 8000);
+  try {
+    const query = `?deviceId=${encodeURIComponent(deviceId)}`;
+    const res = await fetch(endpoint(config, `/api-keys/device-history-sync${query}`), {
+      headers: buildAuthHeaders(config),
+      signal: controller.signal,
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return { ok: false, reason: `device-history-sync returned ${res.status}` };
+    return {
+      ok: true,
+      requestedAt: typeof data?.requestedAt === "string" ? data.requestedAt : null,
+      requestId: typeof data?.requestId === "string" ? data.requestId : null,
+    };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err) };
+  } finally {
+    clearTimeout(timeout);
   }
 }

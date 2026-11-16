@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { claudeConfigDir } from "./claude-paths.mjs";
 
 const OWN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const MANAGED_SETTINGS = {
@@ -14,11 +14,6 @@ const UPDATER_OFF = [
   "DISABLE_UPDATES",
   "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
 ];
-
-function claudeConfigDir(env) {
-  const configured = env.CLAUDE_CONFIG_DIR?.trim();
-  return configured ? path.resolve(configured) : path.join(homedir(), ".claude");
-}
 
 async function readJsonOrNull(file) {
   try {

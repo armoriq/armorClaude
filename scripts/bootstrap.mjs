@@ -1,6 +1,3 @@
-// Lazily install npm dependencies on first run, then dispatch to the
-// real hook-router or MCP server. This makes the plugin work after
-// `claude plugin install` even when the cache directory has no node_modules.
 import { existsSync, writeFileSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
@@ -15,9 +12,6 @@ const packageFiles = [
   path.join(pluginRoot, "node_modules", "@modelcontextprotocol", "sdk", "package.json"),
 ];
 
-// The marker is only trusted when all expected packages are also present.
-// Partial installs (e.g. zod present, sdk missing) would previously pass
-// the per-file check and the dispatch would crash on a missing import.
 function installedOk() {
   if (!existsSync(installedMarker)) return false;
   if (!packageFiles.every(existsSync)) return false;
@@ -62,10 +56,6 @@ if (!installedOk()) {
 
 const target = process.argv[2];
 if (target === "warm") {
-  // Dependencies are installed above; nothing else to do. The installer calls
-  // this so the first MCP connect doesn't have to wait on `npm install` — that
-  // wait exceeds Claude Code's handshake timeout and surfaces as
-  // "MCP error -32000: Connection closed".
   process.exit(0);
 } else if (target === "router") {
   await import("./hook-router.mjs");

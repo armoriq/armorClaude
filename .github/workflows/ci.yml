@@ -59,7 +59,7 @@ jobs:
           fi
           newest="$(printf '%s\n%s\n' "$base" "$head" | sort -V | tail -1)"
           if [ "$head" = "$base" ] || [ "$newest" != "$head" ]; then
-            echo "::error::plugin code changed but plugin.json stays at $head (main has $base). Bump the version in plugin.json, package.json, package-lock.json and marketplace.json so installs update."
+            echo "::error::plugin code changed but plugin.json stays at $head (main has $base). Run npm run release:version <next> so installs update."
             exit 1
           fi
           echo "version $base -> $head"

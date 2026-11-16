@@ -3,18 +3,16 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { loadConfig } from "../scripts/lib/config.mjs";
+import { createRequire } from "node:module";
+import { declaredCli, loginCommand } from "../scripts/lib/config.mjs";
 import { handleSessionStart } from "../scripts/lib/engine.mjs";
+import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
 
-// ---------------------------------------------------------------------------
-// Enforcement is gated on being "connected" (a usable, SDK-format API key).
-// Fresh `claude plugin install` runs with no key → the plugin must NOT brick
-// the session; it runs in monitor mode until the user connects.
-// ---------------------------------------------------------------------------
+const PROD = "https://api.armoriq.ai";
+const LOGIN_LINE = `No ArmorClaude login for ${PROD}. Run: armoriq login --product armorclaude --backend ${PROD}`;
 
 test("loadConfig: a usable ak_ key connects → enforce + intent required", () => {
-  const config = loadConfig({
-    CLAUDE_PLUGIN_OPTION_API_KEY: "ak_live_abc1234567890",
+  const config = loadConfigWithLogins([{ backend: PROD, apiKey: "ak_live_abc1234567890" }], {
     ARMORIQ_ENV: "production",
   });
   assert.equal(config.apiKey, "ak_live_abc1234567890");
@@ -24,10 +22,7 @@ test("loadConfig: a usable ak_ key connects → enforce + intent required", () =
 });
 
 test("loadConfig: a bad-format key is dropped → monitor, never handed to the SDK", () => {
-  // A bad plugin key preempts the ~/.armoriq/credentials.json fallback, so this
-  // is deterministic regardless of what's on the test machine.
-  const config = loadConfig({
-    CLAUDE_PLUGIN_OPTION_API_KEY: "old-style-key-not-ak-format",
+  const config = loadConfigWithLogins([{ backend: PROD, apiKey: "old-style-key-not-ak-format" }], {
     ARMORIQ_ENV: "production",
   });
   assert.equal(config.apiKey, "", "bad-format key must be dropped, not sent to the SDK");
@@ -48,6 +43,7 @@ test("SessionStart when unconfigured: shows connect banner, runs passively (no b
     policyFile: path.join(tmp, "policy.json"),
     runtimeFile: path.join(tmp, "runtime.json"),
     apiKey: "",
+    backendEndpoint: PROD,
     debug: false,
   };
   const output = await handleSessionStart(
@@ -57,7 +53,56 @@ test("SessionStart when unconfigured: shows connect banner, runs passively (no b
   const ctx = output?.hookSpecificOutput?.additionalContext || "";
   assert.ok(ctx.includes("NOT connected"), "banner should say the plugin is not connected");
   assert.ok(ctx.includes("MONITOR"), "banner should state monitor mode");
-  assert.ok(ctx.includes("tools.armoriq.ai"), "banner should point to the dashboard");
-  // Must not be a deny/block decision — SessionStart only adds context.
+  assert.ok(ctx.includes(LOGIN_LINE), "banner should tell the model how to sign in");
+  assert.equal(output?.systemMessage, LOGIN_LINE);
   assert.notEqual(output?.hookSpecificOutput?.permissionDecision, "deny");
+});
+
+test("SessionStart when unconfigured: the login line shows once per session, the monitor context every time", async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "connect-gating-"));
+  const config = {
+    mode: "monitor",
+    intentRequired: false,
+    unconfigured: true,
+    hadUnusableKey: false,
+    dataDir: tmp,
+    policyFile: path.join(tmp, "policy.json"),
+    runtimeFile: path.join(tmp, "runtime.json"),
+    apiKey: "",
+    backendEndpoint: PROD,
+    debug: false,
+  };
+  const start = (session_id) =>
+    handleSessionStart({ hook_event_name: "SessionStart", session_id }, config);
+  const first = await start("once-1");
+  const resumed = await start("once-1");
+  const other = await start("once-2");
+  assert.deepEqual(
+    [first, resumed, other].map((o) => o?.systemMessage),
+    [LOGIN_LINE, undefined, LOGIN_LINE]
+  );
+  for (const o of [first, resumed, other]) {
+    const ctx = o?.hookSpecificOutput?.additionalContext || "";
+    assert.ok(ctx.includes("MONITOR") && ctx.includes(LOGIN_LINE), ctx);
+  }
+});
+
+test("the login command names the CLI the installed SDK package declares", () => {
+  const { bin } = createRequire(import.meta.url)("@armoriq/sdk/package.json");
+  assert.deepEqual(Object.keys(bin), ["armoriq"]);
+  assert.equal(loginCommand(), "armoriq login --product armorclaude");
+  assert.equal(
+    loginCommand(PROD),
+    "armoriq login --product armorclaude --backend https://api.armoriq.ai"
+  );
+});
+
+test("the SDK package must declare exactly one CLI by name, or the login command fails", () => {
+  assert.equal(
+    declaredCli({ name: "@armoriq/sdk", bin: { "armoriq-dev": "x.js" } }),
+    "armoriq-dev"
+  );
+  for (const bin of ["dist/cli/index.js", {}, { a: "a.js", b: "b.js" }, undefined]) {
+    assert.throws(() => declaredCli({ name: "@armoriq/sdk", bin }), /@armoriq\/sdk/);
+  }
 });

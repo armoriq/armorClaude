@@ -1,13 +1,5 @@
 import { legacyRulesToPolicyIr, normalizePolicyIr } from "./policy-ir.mjs";
 
-/**
- * ArmorClaude IR -> OPA input mapper.
- *
- * OPA receives canonical statements plus a compatibility clientRule envelope
- * for existing rego bundles that still read allowedTools/blockedTools. The
- * source data remains the IR statement.
- */
-
 function policyFromInput(policy) {
   return Array.isArray(policy) ? legacyRulesToPolicyIr(policy) : normalizePolicyIr(policy);
 }
@@ -96,10 +88,6 @@ export function compilePolicyForSdkIntent(policy, policyHash = "") {
     }
   }
   return {
-    // CSRG verifies Merkle paths like /steps/[0]/tool. ArmorClaude has
-    // already evaluated the local IR before token minting, so the CSRG token
-    // policy should authorize proof verification for the registered plan
-    // paths while carrying statement-level metadata for backend/proxy layers.
     allow: ["*"],
     deny: [],
     allowed_tools: uniqueStrings(allowedTools),

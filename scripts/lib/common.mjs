@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { sdkModule } from "./sdk.mjs";
 
 export function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -118,24 +119,12 @@ export function sanitizeParams(params, limits) {
   return isPlainObject(sanitized) ? sanitized : {};
 }
 
-// ---------------------------------------------------------------------------
-// Secret redaction — applied to audit payloads before they leave the host.
-// Kept deliberately cheap: a handful of regexes run against strings only,
-// no deep rebuild when nothing matches.
-// ---------------------------------------------------------------------------
-
 const SECRET_PATTERNS = [
-  // Bearer / Authorization tokens in free text
   /\b(Bearer\s+)[A-Za-z0-9._\-+/=]{12,}/gi,
-  // AWS access keys
   /\bAKIA[0-9A-Z]{16}\b/g,
-  // Generic long hex / base64 tokens prefixed by common secret field names
   /\b((?:api[_-]?key|secret|token|password|passwd|pwd|authorization)\s*[:=]\s*)["']?[A-Za-z0-9._\-+/=]{12,}["']?/gi,
-  // GitHub personal access tokens
   /\bghp_[A-Za-z0-9]{30,}\b/g,
-  // JWT-ish three-part tokens
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
-  // Private key blocks
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
 ];
 
@@ -194,10 +183,6 @@ export function sha256Hex(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-// ---------------------------------------------------------------------------
-// HTTP helpers (shared by intent.mjs and iap-service.mjs)
-// ---------------------------------------------------------------------------
-
 export async function postJson(url, payload, headers, timeoutMs) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -224,11 +209,12 @@ export async function postJson(url, payload, headers, timeoutMs) {
 }
 
 export function buildAuthHeaders(config) {
-  const headers = { "Content-Type": "application/json" };
-  if (config.clientVersion) headers["X-ArmorIQ-Client"] = config.clientVersion;
+  const headers = {
+    "Content-Type": "application/json",
+    ...sdkModule("client_identity").clientHeaders(config.client),
+  };
   if (config.apiKey) {
     headers.Authorization = `Bearer ${config.apiKey}`;
-    headers["X-API-Key"] = config.apiKey;
     headers["x-api-key"] = config.apiKey;
   }
   return headers;

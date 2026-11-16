@@ -21,7 +21,6 @@ function buildConfig(tmpDir, overrides = {}) {
     dataDir: tmpDir,
     policyFile: path.join(tmpDir, "policy.json"),
     runtimeFile: path.join(tmpDir, "runtime.json"),
-    useProduction: false,
     backendEndpoint: "http://127.0.0.1:3000",
     csrgEndpoint: "http://127.0.0.1:8080",
     apiKey: "",
@@ -75,10 +74,6 @@ function startMockServer(handler) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Backend client: no-backend graceful fallback
-// ---------------------------------------------------------------------------
-
 test("autoRegisterMcp returns error when no apiKey", async () => {
   const result = await autoRegisterMcp({ apiKey: "", backendEndpoint: "http://x" }, "github");
   assert.equal(result.ok, false);
@@ -106,10 +101,6 @@ test("syncMcpRegistry returns error when no apiKey", async () => {
   assert.equal(result.ok, false);
   assert.deepEqual(result.servers, []);
 });
-
-// ---------------------------------------------------------------------------
-// Backend client: with mock server
-// ---------------------------------------------------------------------------
 
 test("autoRegisterMcp sends POST to /mcp/auto-register", async () => {
   let receivedBody = null;
@@ -188,30 +179,26 @@ test("syncPolicy stages a draft then a proposal", async () => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// /armor policy command wiring
-// ---------------------------------------------------------------------------
-
 test("/armor policy sync without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
   const config = buildConfig(tmp);
   await seedPolicy(config, [{ id: "p1", action: "allow", tool: "*" }]);
   const out = await handleArmorPolicyCommand("/armor policy sync", config);
-  assert.ok(out.includes("API key"));
+  assert.ok(out.includes("armoriq login --product armorclaude"));
 });
 
 test("/armor policy profile push without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor policy profile push my-profile", config);
-  assert.ok(out.includes("API key"));
+  assert.ok(out.includes("armoriq login --product armorclaude"));
 });
 
 test("/armor policy profile pull without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "backend-test-"));
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor policy profile pull", config);
-  assert.ok(out.includes("API key"));
+  assert.ok(out.includes("armoriq login --product armorclaude"));
 });
 
 test("/armor policy profile push with apiKey sends to backend", async () => {

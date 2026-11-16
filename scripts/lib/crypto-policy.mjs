@@ -1,30 +1,8 @@
-/**
- * Crypto-Bound Policy Service
- *
- * Embeds policy rules into CSRG tokens with cryptographic (Merkle tree) proofs.
- * Ported from ArmorClaw's CryptoPolicyService (crypto-policy.service.ts).
- *
- * Flow:
- *  1. Policy update -> build policy metadata -> call CSRG /intent
- *  2. CSRG hashes policy into Merkle tree -> signs with Ed25519
- *  3. Tool execution -> verify policy digest matches token
- *
- * State is persisted to disk because hooks are stateless short-lived processes.
- */
-
 import { isPlainObject, postJson, sha256Hex } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 import { canonicalPolicyHash, normalizePolicyIr, POLICY_IR_VERSION } from "./policy-ir.mjs";
 import path from "node:path";
 
-// ---------------------------------------------------------------------------
-// Policy digest computation
-// ---------------------------------------------------------------------------
-
-/**
- * Compute a canonical SHA-256 digest of policy rules.
- * Must match ArmorClaw's computePolicyDigest exactly.
- */
 export function computePolicyDigest(rules) {
   if (!Array.isArray(rules)) return sha256Hex("policy|[]");
   const canonical = JSON.stringify(
@@ -50,14 +28,6 @@ export function computeCryptoPolicyDigest(policyState) {
   return computePolicyDigest(policy?.rules || []);
 }
 
-// ---------------------------------------------------------------------------
-// Service factory
-// ---------------------------------------------------------------------------
-
-/**
- * Create a CryptoPolicyService instance.
- * Adapted for stateless hook execution with file-based persistence.
- */
 export function createCryptoPolicyService(config) {
   const csrgEndpoint = config.csrgEndpoint || "";
   const timeoutMs = config.timeoutMs || 30000;
@@ -65,9 +35,6 @@ export function createCryptoPolicyService(config) {
   const stateFilePath = path.join(config.dataDir, "crypto-policy-state.json");
 
   return {
-    /**
-     * Issue a new CSRG policy token with policy embedded in Merkle tree.
-     */
     async issuePolicyToken(policyState, identity, validitySeconds = 3600) {
       const digest = computeCryptoPolicyDigest(policyState);
 
@@ -115,7 +82,6 @@ export function createCryptoPolicyService(config) {
         policy_digest: digest,
       };
 
-      // Persist to disk
       await writeJson(stateFilePath, {
         token,
         policyDigest: digest,
@@ -125,10 +91,6 @@ export function createCryptoPolicyService(config) {
       return token;
     },
 
-    /**
-     * Verify that the current policy digest matches the cached token digest.
-     * Returns { valid, reason }.
-     */
     verifyPolicyDigest(currentDigest, tokenDigest) {
       if (!tokenDigest) {
         return {
@@ -145,9 +107,6 @@ export function createCryptoPolicyService(config) {
       return { valid: true, reason: "Policy digest verified" };
     },
 
-    /**
-     * Verify a policy rule is included in the token using CSRG /verify/action.
-     */
     async verifyPolicyRule(ruleId, toolName) {
       const cached = await this.loadCachedState();
       if (!cached?.token) {
@@ -186,16 +145,10 @@ export function createCryptoPolicyService(config) {
       return response.data;
     },
 
-    /**
-     * Load persisted crypto policy state from disk.
-     */
     async loadCachedState() {
       return await readJson(stateFilePath, null);
     },
 
-    /**
-     * Clear persisted crypto policy state.
-     */
     async clearCache() {
       try {
         await writeJson(stateFilePath, null);
@@ -206,15 +159,6 @@ export function createCryptoPolicyService(config) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Convert canonical policy IR statements into a plan structure for CSRG
- * hashing. The token binds the exact IR statement set; legacy flat rules are
- * accepted only through normalizePolicyIr's one-time migration path.
- */
 function buildPolicyPlan(policy) {
   const ir = normalizePolicyIr(policy);
   const steps = ir.statements.map((statement) => ({

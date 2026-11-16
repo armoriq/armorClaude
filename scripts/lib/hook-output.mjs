@@ -1,22 +1,19 @@
-export function denyPreTool(reason) {
+export const DECISION_CODE = Symbol("armorclaude.decisionCode");
+
+function preToolDecision(code, permissionDecision, permissionDecisionReason) {
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: reason,
+      permissionDecision,
+      permissionDecisionReason,
     },
+    [DECISION_CODE]: code,
   };
 }
 
-export function askPreTool(reason) {
-  return {
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "ask",
-      permissionDecisionReason: reason,
-    },
-  };
-}
+export const denyPreTool = (code, reason) => preToolDecision(code, "deny", reason);
+
+export const askPreTool = (code, reason) => preToolDecision(code, "ask", reason);
 
 /**
  * Phase 4 A3: actionable deny output.
@@ -27,23 +24,22 @@ export function askPreTool(reason) {
  * follow-up turn instead of 3 (deny → re-prompt user → re-prompt for the
  * right format → finally register).
  *
+ * @param {string} code              the rule or check that denied the call
  * @param {string} reason            free-form explanation
  * @param {object} args
  * @param {string} args.toolName     the tool that was blocked (will end up in the suggested plan)
- * @param {object} [args.toolInput]  the exact arguments — will be embedded into metadata.inputs
+ * @param {object} [args.toolInput]  the exact arguments — will be embedded as the step's arguments
  * @param {string} [args.goal]       inferred goal from session.lastPrompt or the tool name
  * @param {object} [args.knownPlan]  the currently-cached plan (if any) — we'll suggest extending it
  */
-export function denyPreToolWithHint(reason, args = {}) {
+export function denyPreToolWithHint(code, reason, args = {}) {
   const { toolName = "Tool", toolInput, goal, knownPlan } = args;
   const newStep = {
     action: toolName,
     description: `Use ${toolName} to ${goal || "make progress on the user's task"}`,
   };
   if (toolInput && typeof toolInput === "object" && Object.keys(toolInput).length > 0) {
-    // Don't pin params strictly — Phase 3 made metadata.inputs advisory.
-    // Include them for documentation only.
-    newStep.metadata = { inputs: toolInput };
+    newStep.arguments = toolInput;
   }
   let suggestedPlan;
   if (knownPlan && Array.isArray(knownPlan.steps) && knownPlan.steps.length > 0) {
@@ -62,25 +58,10 @@ export function denyPreToolWithHint(reason, args = {}) {
     "```json\n" +
     JSON.stringify(suggestedPlan, null, 2) +
     "\n```";
-  return {
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: reason + hint,
-    },
-  };
+  return denyPreTool(code, reason + hint);
 }
 
-/**
- * Freemium fallback: allow the tool to proceed WITHOUT ArmorClaude enforcement,
- * surfacing a one-time upgrade nudge to the user via `systemMessage`.
- *
- * We deliberately DO NOT set `permissionDecision` — that leaves Claude Code's
- * own permission flow untouched (ArmorClaude simply steps aside / runs in
- * observe-only mode) rather than force-allowing. Used when intent-token
- * issuance fails for a *billing* reason so a free user isn't hard-blocked with
- * a cryptic error that looks like a policy denial.
- */
+/** Omitting permissionDecision defers to Claude Code's own permission prompts; setting allow would bypass them. */
 export function allowWithNotice(systemMessage) {
   return {
     systemMessage,
@@ -90,11 +71,6 @@ export function allowWithNotice(systemMessage) {
   };
 }
 
-/**
- * True when an intent-token failure is a billing/subscription gate (HTTP 402
- * from the backend quota service) rather than a real enforcement error. Matches
- * the backend messages in conmap-auto/src/billing/quota.service.ts.
- */
 export function isBillingError(message) {
   return /subscription is required|active ArmorIQ Pro|billing cannot be verified|payment required|\b402\b/i.test(
     String(message || "")
@@ -108,16 +84,7 @@ export function blockPrompt(reason) {
   };
 }
 
-/**
- * Reply to a handled `/armor` slash command.
- *
- * Mechanically this is still a `block` decision — that's the only hook output
- * that keeps the command text away from the LLM while showing our own output.
- * Claude Code's UI prints a fixed "operation blocked by hook:" prefix for any
- * block, which reads as an error even though the command succeeded. We can't
- * suppress that prefix, but we can lead the reason with a subtle tag so the
- * message reads as a normal, handled command rather than a failure.
- */
+/** Only a block hides /armor text from the model; Claude Code prefixes it with "operation blocked by hook:". */
 export function armorReply(reason) {
   return blockPrompt(`(ArmorClaude — handled OK)\n${reason}`);
 }

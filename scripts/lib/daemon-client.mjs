@@ -12,17 +12,23 @@
  * and flushes asynchronously, hook process exits immediately.
  */
 
+import { assertTrustedSocketPath, daemonSocketPath } from "./daemon-socket.mjs";
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensurePrivateDirSync, openPrivateSync } from "./fs-store.mjs";
+import { capDaemonLog, daemonLogPath } from "./daemon-log.mjs";
 import { DAEMON_VERSION } from "./daemon-version.mjs";
+import { REQUEST_CONFIG_KEYS } from "./config.mjs";
+import { loginTag } from "./audit-wal.mjs";
+import { sanitizeParams } from "./common.mjs";
 
 const CONNECT_TIMEOUT_MS = 1_500; // give up fast — we want to fall back if daemon is hung
 const REPLY_TIMEOUT_MS = 10_000; // reply may include a backend call (token mint, audit ship)
-const SPAWN_RETRY_DELAY_MS = 150;
-const SPAWN_RETRIES = 3;
+const SPAWN_POLL_MS = 50;
+const DAEMON_START_TIMEOUT_MS = 10_000;
 
 let nextReqId = 1;
 function makeReqId() {
@@ -35,6 +41,12 @@ function makeReqId() {
  */
 function connectOnce(socketPath) {
   return new Promise((resolve, reject) => {
+    try {
+      assertTrustedSocketPath(socketPath);
+    } catch (err) {
+      reject(err);
+      return;
+    }
     const sock = createConnection(socketPath);
     const timer = setTimeout(() => {
       sock.destroy();
@@ -51,10 +63,6 @@ function connectOnce(socketPath) {
   });
 }
 
-/**
- * Spawn the daemon as a detached child and return once it accepts a
- * connection (up to SPAWN_RETRIES × SPAWN_RETRY_DELAY_MS).
- */
 async function spawnDaemon(socketPath, dataDir, config) {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const daemonScript = path.resolve(here, "..", "daemon.mjs");
@@ -67,34 +75,45 @@ async function spawnDaemon(socketPath, dataDir, config) {
     ARMORCLAUDE_RUNTIME_FILE: config?.runtimeFile || path.join(dataDir, "runtime.json"),
     ARMORCLAUDE_POLICY_FILE: config?.policyFile || path.join(dataDir, "policy.json"),
   };
-  mkdirSync(dataDir, { recursive: true });
+  ensurePrivateDirSync(dataDir);
+  const logPath = daemonLogPath(dataDir);
+  capDaemonLog(logPath);
+  const logFd = openPrivateSync(logPath, "a");
   const nodeBin = existsSync(process.execPath) ? process.execPath : "node";
-  const child = spawn(nodeBin, [daemonScript], {
-    detached: true,
-    stdio: "ignore",
-    cwd: dataDir,
-    env: childEnv,
-  });
-  let spawnError = null;
+  let child;
+  try {
+    child = spawn(nodeBin, [daemonScript], {
+      detached: true,
+      stdio: ["ignore", "ignore", logFd],
+      cwd: dataDir,
+      env: childEnv,
+    });
+  } finally {
+    closeSync(logFd);
+  }
+  let failure = null;
   child.once("error", (err) => {
-    spawnError = err;
+    failure ??= err;
+  });
+  child.once("exit", (code, signal) => {
+    failure ??= new Error(
+      `daemon exited (code=${code}, signal=${signal}) before accepting connections; see ${logPath}`
+    );
   });
   child.unref();
 
-  for (let i = 0; i < SPAWN_RETRIES; i++) {
-    if (spawnError) throw spawnError;
-    await new Promise((r) => setTimeout(r, SPAWN_RETRY_DELAY_MS));
-    if (spawnError) throw spawnError;
-    if (existsSync(socketPath)) {
-      try {
-        const sock = await connectOnce(socketPath);
-        return sock;
-      } catch {
-        /* try again */
-      }
+  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, SPAWN_POLL_MS));
+    const sock = existsSync(socketPath) && (await connectOnce(socketPath).catch(() => null));
+    if (sock) return sock;
+    if (failure) throw failure;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `daemon did not accept connections within ${DAEMON_START_TIMEOUT_MS}ms; see ${logPath}`
+      );
     }
   }
-  throw new Error("daemon spawn did not become reachable");
 }
 
 async function shutdownDaemon(socketPath) {
@@ -203,33 +222,20 @@ function exchange(sock, payload) {
  * to fall back to in-process dispatch on throw.
  */
 export async function dispatchViaDaemon({ event, input, config }) {
-  const socketPath = path.join(config.dataDir, "daemon.sock");
+  const socketPath = daemonSocketPath(config.dataDir);
   const debug = !!config?.debug;
   const t0 = debug ? Date.now() : 0;
   const sock = await ensureFreshDaemonSocket(socketPath, config);
   const tConnected = debug ? Date.now() : 0;
   try {
     const reqId = makeReqId();
-    // Forward the obs/auth-relevant slice of THIS hook's freshly-loaded config
-    // so the long-lived daemon can serve observability + backend calls with the
-    // live session's credentials, even if the daemon was first spawned by an
-    // env-poor hook (the zero-traces root cause). The daemon merges this per
-    // request and refreshes its cached config when the signature changes.
     const configEnv = config
-      ? {
-          armoriqEnv: config.armoriqEnv,
-          apiKey: config.apiKey,
-          orgId: config.orgId,
-          backendEndpoint: config.backendEndpoint,
-          observabilityEnabled: config.observabilityEnabled,
-          observabilityEndpoint: config.observabilityEndpoint,
-          observabilityProduct: config.observabilityProduct,
-          auditEnabled: config.auditEnabled,
-          csrgVerifyEnabled: config.csrgVerifyEnabled,
-          cryptoPolicyEnabled: config.cryptoPolicyEnabled,
-        }
+      ? Object.fromEntries(REQUEST_CONFIG_KEYS.map((k) => [k, config[k]]))
       : undefined;
-    const reply = await exchange(sock, { type: "hook", event, input, reqId, configEnv });
+    const sent = Object.hasOwn(input, "tool_response")
+      ? { ...input, tool_response: sanitizeParams(input.tool_response, config.sanitize) }
+      : input;
+    const reply = await exchange(sock, { type: "hook", event, input: sent, reqId, configEnv });
     if (debug) {
       const tDone = Date.now();
       process.stderr.write(
@@ -259,7 +265,7 @@ export async function dispatchViaDaemon({ event, input, config }) {
  * createAuditLog.
  */
 export async function enqueueAuditViaDaemon({ dto, config }) {
-  const socketPath = path.join(config.dataDir, "daemon.sock");
+  const socketPath = daemonSocketPath(config.dataDir);
   let sock;
   try {
     sock = await connectOnce(socketPath);
@@ -267,7 +273,14 @@ export async function enqueueAuditViaDaemon({ dto, config }) {
     return false;
   }
   try {
-    sock.write(JSON.stringify({ type: "audit_enqueue", dto, reqId: makeReqId() }) + "\n");
+    sock.write(
+      JSON.stringify({
+        type: "audit_enqueue",
+        dto,
+        login: loginTag(config.backendEndpoint, config.apiKey),
+        reqId: makeReqId(),
+      }) + "\n"
+    );
     return true;
   } catch {
     return false;
@@ -287,7 +300,7 @@ export async function enqueueAuditViaDaemon({ dto, config }) {
 
 /** Liveness probe — used by daemon-supervisor and tests. */
 export async function pingDaemon(config) {
-  const socketPath = path.join(config.dataDir, "daemon.sock");
+  const socketPath = daemonSocketPath(config.dataDir);
   let sock;
   try {
     sock = await connectOnce(socketPath);

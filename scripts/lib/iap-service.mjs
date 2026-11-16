@@ -1,14 +1,3 @@
-/**
- * IAP Verification Service
- *
- * Abstraction over ArmorIQ IAP backend operations:
- *  - verifyStep:    POST /iap/verify-step
- *  - verifyWithCsrg: POST /verify/action (CSRG Merkle proof)
- *  - createAuditLog: POST /iap/audit
- *
- * Ported from ArmorClaw's IAPVerificationService (iap-verfication.service.ts).
- */
-
 import {
   buildAuthHeaders,
   isPlainObject,
@@ -17,9 +6,6 @@ import {
   readString,
 } from "./common.mjs";
 
-/**
- * Create an IAP service instance from config.
- */
 export function createIapService(config) {
   const backendEndpoint =
     config.backendEndpoint || config.verifyStepEndpoint?.replace(/\/iap\/verify-step$/, "") || "";
@@ -28,10 +14,6 @@ export function createIapService(config) {
   const headers = buildAuthHeaders(config);
 
   return {
-    /**
-     * Verify a tool execution step with the IAP backend.
-     * Equivalent to ArmorClaw IAPVerificationService.verifyStep()
-     */
     async verifyStep(intentTokenRaw, csrgProofs, toolName) {
       const endpoint = config.verifyStepEndpoint;
       if (!endpoint || !config.csrgVerifyEnabled) {
@@ -102,10 +84,6 @@ export function createIapService(config) {
       };
     },
 
-    /**
-     * Verify action directly with CSRG service using Merkle proof.
-     * Equivalent to ArmorClaw IAPVerificationService.verifyWithCsrg()
-     */
     async verifyWithCsrg(path, value, proof, token, context) {
       if (!config.csrgVerifyEnabled) {
         throw new Error("CSRG verification is disabled");
@@ -139,10 +117,6 @@ export function createIapService(config) {
       };
     },
 
-    /**
-     * Create an audit log entry in the IAP service.
-     * Equivalent to ArmorClaw IAPVerificationService.createAuditLog()
-     */
     async createAuditLog(dto) {
       const response = await postJson(`${backendEndpoint}/iap/audit`, dto, headers, timeoutMs);
 
@@ -156,14 +130,6 @@ export function createIapService(config) {
       return response.data;
     },
 
-    /**
-     * Phase 4 C2: send N audit DTOs in one HTTP roundtrip.
-     * Used by armorclaude-daemon's audit-buffer flush. The daemon batches
-     * up to 100 rows or 5s, whichever first, then ships them here.
-     *
-     * Returns { written, failures } so the daemon knows whether to
-     * re-queue any rows that failed.
-     */
     async createAuditLogBatch(rows) {
       if (!Array.isArray(rows) || rows.length === 0) {
         return { written: 0, failures: [] };
@@ -192,10 +158,6 @@ export function createIapService(config) {
     },
   };
 }
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
 
 function getTokenForVerification(intentTokenRaw) {
   if (typeof intentTokenRaw !== "string") {
@@ -260,13 +222,6 @@ function parseStepIndexFromPath(path) {
   return Number.isFinite(index) ? index : null;
 }
 
-// ---------------------------------------------------------------------------
-// Trust Update primitives (Phase 3) — thin wrappers over the SDK methods
-// already shipped in @armoriq/sdk's Client. All three are best-effort: a
-// failure logs and returns { ok: false }; it never throws to the caller.
-// The hook handlers must not block on Trust Update plumbing failures.
-// ---------------------------------------------------------------------------
-
 /**
  * Sign a ReAnchor delta linking the previous plan hash to the new one.
  * Returns { ok, trustId?, fromHash?, toHash? }.
@@ -308,11 +263,6 @@ export async function reanchorViaSdk({ getClient, config, intentToken, updatedPl
   }
 }
 
-/**
- * Sign a Revoke delta for the given token, propagating to PEPs. Accepts
- * either a full intent token object OR a planId/tokenId for operator-driven
- * revocation (the controller in conmap-auto handles either shape).
- */
 export async function revokeViaSdk({
   getClient,
   config,
@@ -330,9 +280,6 @@ export async function revokeViaSdk({
     if (typeof client?.revoke !== "function") {
       return { ok: false, error: "client.revoke not available" };
     }
-    // The SDK's revoke signature takes an IntentToken; if only planId/tokenId
-    // is available (operator path), synthesize a minimal token shape that the
-    // backend's relaxed RevokeDto will accept.
     const token = intentToken ?? {
       tokenId: tokenId,
       token_id: tokenId,
@@ -360,9 +307,6 @@ export async function revokeViaSdk({
   }
 }
 
-/**
- * Issue a subtree-bounded delegated token + Merkle inclusion proof.
- */
 export async function delegateSubtreeViaSdk({ getClient, config, intentToken, opts }) {
   if (!intentToken || !opts?.delegatePublicKey || !opts?.subtreePath) {
     return { ok: false, error: "missing intentToken / delegatePublicKey / subtreePath" };
