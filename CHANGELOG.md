@@ -4,6 +4,12 @@ Changes to the ArmorClaude plugin, newest first. A stable install picks up code 
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-11-16
+
+- fix(update): the stable installer writes auto-update into the Claude config dir in use, keeps a user's choice, a symlinked settings file and its mode; the daemon is replaced after an update (#487)
+- feat(config): the armorclaude plugin defaults to production and armorclaude-dev to staging, from one tree on both branches
+- feat(release): plugin.json carries no version; the stable version lives in marketplace.json and the dev channel updates on every dev commit
+- feat(install): the dev-channel installer is install_armorclaude_dev.sh
 - feat(update): the dev installer turns on auto-update for the `armoriq` marketplace, and a session tells the user once per version when auto-update is off
 - Publish armorclaude-dev variant in the marketplace catalog (#142)
 - Track latest compatible SDK on both branches with Dependabot (#143)
