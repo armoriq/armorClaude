@@ -96,25 +96,30 @@ enable_auto_update() {
     const fs = require("fs");
     const path = require("path");
     const dir = process.env.ARMORIQ_CLAUDE_DIR;
-    const file = path.join(dir, "settings.json");
+    const link = path.join(dir, "settings.json");
+    const file = fs.existsSync(link) ? fs.realpathSync(link) : link;
     const read = (f) => (fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {});
     const settings = read(file);
+    const known = read(path.join(dir, "plugins", "known_marketplaces.json")).armoriq;
     const places = (settings.extraKnownMarketplaces ??= {});
-    const added = read(path.join(dir, "plugins", "known_marketplaces.json")).armoriq?.source;
     const armoriq = (places.armoriq ??= {
-      source: added ?? { source: "github", repo: process.env.ARMORIQ_MARKETPLACE_REPO },
+      source: known?.source ?? { source: "github", repo: process.env.ARMORIQ_MARKETPLACE_REPO },
     });
     if (armoriq.autoUpdate === true) process.exit(2);
+    if (armoriq.autoUpdate === false || known?.autoUpdate === false) process.exit(3);
     armoriq.autoUpdate = true;
-    fs.mkdirSync(dir, { recursive: true });
-    const temporary = `${file}.armoriq.tmp`;
-    fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`);
+    const mode = fs.existsSync(file) ? fs.statSync(file).mode & 0o777 : 0o644;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temporary = `${file}.armoriq-${process.pid}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode });
+    fs.chmodSync(temporary, mode);
     fs.renameSync(temporary, file);
   ' 2>/dev/null || status=$?
 
   case "${status}" in
     0) ok "updates are automatic (new versions install during your next session)" ;;
     2) ok "updates are already automatic" ;;
+    3) info "leaving updates manual: auto-update for armoriq is turned off on this machine" ;;
     *) warn "couldn't turn on automatic updates; run ${B}claude plugin update ${PLUGIN_REF}${N} to update" ;;
   esac
 }
