@@ -9,6 +9,9 @@ import { sdkModule } from "./sdk.mjs";
 
 const PRODUCT = "armorclaude";
 const DEV_PLUGIN_DATA = `${PRODUCT}-dev-armoriq`;
+const STAGING_BACKEND = "https://staging-api.armoriq.ai";
+// The dev installer signs in to staging with the armoriq-dev CLI from @armoriq/sdk-dev.
+const DEV_CLI = "armoriq-dev";
 const PLUGIN_VERSION = createRequire(import.meta.url)("../../.claude-plugin/plugin.json").version;
 
 function clientIdentity(dataDir) {
@@ -32,7 +35,10 @@ export function loginCommand(backend) {
     const sdkPackage = createRequire(import.meta.url)("@armoriq/sdk/package.json");
     cachedLoginCommand = `${declaredCli(sdkPackage)} login --product ${PRODUCT}`;
   }
-  return backend ? `${cachedLoginCommand} --backend ${backend}` : cachedLoginCommand;
+  if (!backend) return cachedLoginCommand;
+  const command =
+    backend === STAGING_BACKEND ? cachedLoginCommand.replace(/^\S+/, DEV_CLI) : cachedLoginCommand;
+  return `${command} --backend ${backend}`;
 }
 
 export function statusCommand() {
@@ -102,8 +108,8 @@ function normalizeArmoriqEnv(value) {
  *   env vars                → paths + debug
  *   everything else         → hardcoded to the tested-good default
  *
- * ARMORIQ_ENV:
- *   production/default -> api.armoriq.ai + iap.armoriq.ai
+ * ARMORIQ_ENV (unset: staging for the armorclaude-dev plugin, else production):
+ *   production/prod -> api.armoriq.ai + iap.armoriq.ai
  *   staging/stage -> staging-api.armoriq.ai + iap-staging.armoriq.ai
  *   development/local/test -> local URLs, overridable for local stacks only
  */
@@ -121,7 +127,9 @@ export function loadConfig(env = process.env) {
   // File-based flag avoids shell env var gymnastics on Windows.
   // Delete ~/.armoriq/local-mode to restore production mode.
   const localModeFile = path.join(homedir(), ".armoriq", "local-mode");
-  const requestedEnv = normalizeArmoriqEnv(env.ARMORIQ_ENV) || "production";
+  const requestedEnv =
+    normalizeArmoriqEnv(env.ARMORIQ_ENV) ||
+    (path.basename(dataDir) === DEV_PLUGIN_DATA ? "staging" : "production");
   const localMock =
     parseBoolean(env.ARMORIQ_LOCAL_MOCK, false) ||
     existsSync(localModeFile) ||
@@ -132,7 +140,7 @@ export function loadConfig(env = process.env) {
       ? env.ARMORIQ_BACKEND_URL?.trim() || "http://localhost:8000"
       : activeEnv === "production"
         ? "https://api.armoriq.ai"
-        : "https://staging-api.armoriq.ai";
+        : STAGING_BACKEND;
   const csrgEndpoint =
     activeEnv === "local"
       ? env.ARMORIQ_CSRG_URL?.trim() || "http://localhost:8000"

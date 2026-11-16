@@ -99,12 +99,23 @@ test("loadConfig: a signed-in key enables crypto policy", () => {
   assert.equal(config.cryptoPolicyEnabled, true);
 });
 
-test("loadConfig: defaults to production endpoints", () => {
-  const config = loadConfig({});
-  assert.equal(config.armoriqEnv, "production");
-  assert.equal(config.backendEndpoint, "https://api.armoriq.ai");
-  assert.equal(config.csrgEndpoint, "https://iap.armoriq.ai");
-});
+for (const [plugin, env, backend, csrg] of [
+  ["armorclaude", "production", "https://api.armoriq.ai", "https://iap.armoriq.ai"],
+  [
+    "armorclaude-dev",
+    "staging",
+    "https://staging-api.armoriq.ai",
+    "https://iap-staging.armoriq.ai",
+  ],
+]) {
+  test(`loadConfig: the ${plugin} plugin defaults to ${env} endpoints`, () => {
+    const dataDir = path.join(os.tmpdir(), `${plugin}-armoriq`);
+    const config = loadConfig({ CLAUDE_PLUGIN_DATA: dataDir });
+    assert.equal(config.armoriqEnv, env);
+    assert.equal(config.backendEndpoint, backend);
+    assert.equal(config.csrgEndpoint, csrg);
+  });
+}
 
 test("loadConfig: ARMORIQ_ENV=staging uses only staging endpoints", () => {
   const config = loadConfig({

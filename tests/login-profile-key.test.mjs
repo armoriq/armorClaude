@@ -26,7 +26,7 @@ const usageWorker = path.join(repoRoot, "scripts", "usage-worker.mjs");
 const golden = JSON.parse(readFileSync(GOLDEN_CREDENTIALS, "utf8")).profiles;
 const LOGIN_KEY = "ak_live_loginprofile00000000000000";
 const reloginNotice = (backend) =>
-  `ArmorIQ: sign in again to keep sending armorclaude data. Run: armoriq login --product armorclaude --backend ${backend} --force`;
+  `ArmorIQ: sign in again to keep sending armorclaude data. Run: ${backend === STAGING ? "armoriq-dev" : "armoriq"} login --product armorclaude --backend ${backend} --force`;
 
 test("ARMORIQ_API_KEY and the API_KEY plugin option are not key sources", () => {
   const env = {

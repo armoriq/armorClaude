@@ -95,6 +95,10 @@ test("the login command names the CLI the installed SDK package declares", () =>
     loginCommand(PROD),
     "armoriq login --product armorclaude --backend https://api.armoriq.ai"
   );
+  assert.equal(
+    loginCommand("https://staging-api.armoriq.ai"),
+    "armoriq-dev login --product armorclaude --backend https://staging-api.armoriq.ai"
+  );
 });
 
 test("the SDK package must declare exactly one CLI by name, or the login command fails", () => {
