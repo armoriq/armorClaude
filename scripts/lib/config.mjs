@@ -9,7 +9,10 @@ import { sdkModule } from "./sdk.mjs";
 
 const PRODUCT = "armorclaude";
 const DEV_PLUGIN_DATA = `${PRODUCT}-dev-armoriq`;
-const PLUGIN_VERSION = createRequire(import.meta.url)("../../.claude-plugin/plugin.json").version;
+const STAGING_BACKEND = "https://staging-api.armoriq.ai";
+// The dev installer signs in to staging with the armoriq-dev CLI from @armoriq/sdk-dev.
+const DEV_CLI = "armoriq-dev";
+const PLUGIN_VERSION = createRequire(import.meta.url)("../../package.json").version;
 
 function clientIdentity(dataDir) {
   const product = path.basename(dataDir) === DEV_PLUGIN_DATA ? `${PRODUCT}-dev` : PRODUCT;
@@ -25,14 +28,17 @@ export function declaredCli({ name, bin }) {
   return clis[0];
 }
 
-// @armoriq/sdk-dev logs in to staging unless told otherwise, so name the
-// backend this plugin reads its key from.
+// Name the backend this plugin reads its key from, so the login lands where
+// the plugin looks for it.
 export function loginCommand(backend) {
   if (!cachedLoginCommand) {
-    const sdkPackage = createRequire(import.meta.url)("@armoriq/sdk-dev/package.json");
+    const sdkPackage = createRequire(import.meta.url)("@armoriq/sdk/package.json");
     cachedLoginCommand = `${declaredCli(sdkPackage)} login --product ${PRODUCT}`;
   }
-  return backend ? `${cachedLoginCommand} --backend ${backend}` : cachedLoginCommand;
+  if (!backend) return cachedLoginCommand;
+  const command =
+    backend === STAGING_BACKEND ? cachedLoginCommand.replace(/^\S+/, DEV_CLI) : cachedLoginCommand;
+  return `${command} --backend ${backend}`;
 }
 
 export function statusCommand() {
@@ -94,22 +100,9 @@ function normalizeArmoriqEnv(value) {
 }
 
 /**
- * armorClaude config — main branch (production).
- *
- *   API key and org         → the armorclaude profile `armoriq login` saved
- *                             for this backend, nothing else
- *   userConfig (plugin UI)  → default_template, disable_observability
- *   env vars                → paths + debug
- *   everything else         → hardcoded to the tested-good default
- *
- * Dev-branch default: staging. Main must keep production-hardcoded behavior
- * before release, but the dev plugin must never send staging keys to the
- * production API by accident.
- *
- * ARMORIQ_ENV:
- *   staging/default -> staging-api.armoriq.ai + iap-staging.armoriq.ai
- *   production/prod -> api.armoriq.ai + iap.armoriq.ai
- *   development/local/test -> local URLs, overridable for local stacks only
+ * The key and org come only from the armorclaude profile `armoriq login` saved for
+ * the backend. ARMORIQ_ENV picks the backend: production/prod, staging/stage, or
+ * development/local/test; unset, armorclaude-dev uses staging and armorclaude production.
  */
 export function loadConfig(env = process.env) {
   // ── Paths ──
@@ -125,7 +118,9 @@ export function loadConfig(env = process.env) {
   // File-based flag avoids shell env var gymnastics on Windows.
   // Delete ~/.armoriq/local-mode to restore production mode.
   const localModeFile = path.join(homedir(), ".armoriq", "local-mode");
-  const requestedEnv = normalizeArmoriqEnv(env.ARMORIQ_ENV) || "staging";
+  const requestedEnv =
+    normalizeArmoriqEnv(env.ARMORIQ_ENV) ||
+    (path.basename(dataDir) === DEV_PLUGIN_DATA ? "staging" : "production");
   const localMock =
     parseBoolean(env.ARMORIQ_LOCAL_MOCK, false) ||
     existsSync(localModeFile) ||
@@ -136,7 +131,7 @@ export function loadConfig(env = process.env) {
       ? env.ARMORIQ_BACKEND_URL?.trim() || "http://localhost:8000"
       : activeEnv === "production"
         ? "https://api.armoriq.ai"
-        : "https://staging-api.armoriq.ai";
+        : STAGING_BACKEND;
   const csrgEndpoint =
     activeEnv === "local"
       ? env.ARMORIQ_CSRG_URL?.trim() || "http://localhost:8000"
@@ -166,14 +161,9 @@ export function loadConfig(env = process.env) {
     false
   );
 
-  // A key is only usable if it matches the @armoriq/sdk key format
-  // (ak_test_/ak_live_/ak_claw_). Anything else — empty, or a stale/old-format
-  // key left over from a prior install — is treated as "not connected":
-  //   • handing a bad-format key to `new ArmorIQClient(...)` throws in the
-  //     constructor, which crashed the policy MCP server ("-32000").
-  //   • enforcing without a working key just hard-blocks every tool, bricking
-  //     the session on a fresh `claude plugin install` (no onboarding ran).
-  // So we drop an unusable key and fall into monitor mode (see loginEnforcement).
+  // A key outside the SDK format (ak_test_/ak_live_/ak_claw_) makes
+  // new ArmorIQClient throw, crashing the policy MCP server, and enforcing without
+  // a working key blocks every tool. Treat it as not connected: monitor mode.
   const keyLooksUsable = USABLE_KEY.test(apiKey);
   const hadUnusableKey = Boolean(apiKey) && !keyLooksUsable;
   if (hadUnusableKey) apiKey = "";
@@ -214,12 +204,8 @@ export function loadConfig(env = process.env) {
     autoReanchor: true,
     autoRevokeOnEnd: true,
     daemonEnabled: true,
-    // csrgVerifyEnabled drives verify-step heartbeats → activeSessions counter.
-    // Production: false — org native policy on api.armoriq.io denies all paths
-    //   for gmail.com domain, so verify-step always returns "blocked". Keeping
-    //   this false lets tools run while the org policy issue is resolved upstream.
-    // Local mock: true — mock always returns allowed, so heartbeats work and
-    //   activeSessions shows the real count on the dashboard.
+    // Off in production: the api.armoriq.io org policy blocks verify-step for
+    // gmail.com, so enabling it would block every tool.
     csrgVerifyEnabled: localMock,
     requireCsrgProofs: false,
     // Crypto policy requires a caller-owned credential. The local-mock

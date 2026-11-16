@@ -1,4 +1,4 @@
-import armoriqSdk from "@armoriq/sdk-dev";
+import armoriqSdk from "@armoriq/sdk";
 
 const { claudeSessionTitle, MAX_BATCH_SNAPSHOTS } = armoriqSdk;
 const MAX_TITLE_LENGTH = 200;

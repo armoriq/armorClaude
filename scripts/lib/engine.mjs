@@ -62,10 +62,7 @@ import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { decideV2, resolveV2Hold } from "./v2-decision.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+import { autoUpdateNotice, withNotice } from "./update-notice.mjs";
 
 // In-memory store for tool-call start timestamps. Keyed by tool_use_id
 // (or sessionId:toolName fallback). Entries are deleted after PostToolUse /
@@ -111,18 +108,8 @@ function shouldDeny(config) {
   return config.mode === "enforce";
 }
 
-/**
- * True when the active policy permits everything with no friction — default
- * decision "allow" and every statement is a plain permit (no deny/forbid,
- * no require_approval). This is the "All Allow" template the user picks at
- * onboarding when they want ArmorClaude out of the way.
- *
- * When true, we treat intent as NOT required: no register_intent_plan gate,
- * no token needed, no drift blocking. The user asked for everything allowed —
- * so tools just run, exactly like Claude Code without the plugin. (balanced /
- * strict / lockdown all have a deny or require_approval statement, so they do
- * NOT qualify and keep full enforcement.)
- */
+// An all-permit policy disables the intent gate entirely: no plan, no token,
+// no drift blocking. Any deny or require_approval statement keeps enforcement.
 function isFrictionlessAllowPolicy(policy) {
   try {
     const ir = normalizePolicyIr(policy);
@@ -167,13 +154,8 @@ function mergeIntentIntoSession(session, intentResponse, config) {
 }
 
 /**
- * Auto-invalidate cached token when the API key has changed (different
- * prefix). Triggered when `armoriq login` saves a new armorclaude key.
- * Without this, the plugin keeps reusing the old token after the key
- * changes, and audit rows land in the old org until the user clears
- * runtime.json.
- *
- * Returns true if the cache was invalidated (caller should re-mint).
+ * Drop the cached intent token when a new `armoriq login` changed the key prefix,
+ * or audit rows keep landing in the old org. True means the caller must re-mint.
  */
 function invalidateTokenOnKeyChange(session, config) {
   if (!session?.intentTokenRaw) return false;
@@ -368,14 +350,7 @@ function isPluginPlumbingTool(toolName) {
   return PLUGIN_PLUMBING_TOOLS.has(norm);
 }
 
-/**
- * Emit an audit row. Routing order:
- *   1. daemon (if enabled and reachable) → fire-and-forget, daemon writes to WAL
- *   2. WAL directly (if enabled, when daemon path fails) → durable, recoverable
- *   3. synchronous HTTP POST (legacy fallback when both above are off/down)
- *
- * Returns a short label ("daemon" | "wal" | "http") for debug logging.
- */
+// Routes daemon, then WAL, then synchronous HTTP; returns which one was used.
 async function emitAudit({ dto: row, config, iapService }) {
   const { createAuditWal, fitAuditRow, loginTag } = await import("./audit-wal.mjs");
   let dto;
@@ -453,10 +428,6 @@ async function claimAuditedStep(config, runtimeState, sessionId, toolName, input
   return step;
 }
 
-// ---------------------------------------------------------------------------
-// SessionStart
-// ---------------------------------------------------------------------------
-
 function claimLoginNotice(runtimeState, sessionId, config) {
   if (!config.unconfigured || getSession(runtimeState, sessionId)?.loginNoticeShown) return false;
   upsertSession(runtimeState, sessionId, { loginNoticeShown: true });
@@ -498,6 +469,16 @@ function usageSyncOffNotice(config) {
 }
 
 export async function handleSessionStart(input, config) {
+  const result = await startSession(input, config);
+  if (!input?.session_id) return result;
+  const notice = await autoUpdateNotice({
+    cwd: typeof input.cwd === "string" ? input.cwd : undefined,
+    dataDir: config.dataDir,
+  });
+  return withNotice(result, notice);
+}
+
+async function startSession(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
 
@@ -614,10 +595,6 @@ export async function handleSessionStart(input, config) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// UserPromptSubmit
-// ---------------------------------------------------------------------------
-
 export async function handleUserPromptExpansion(input, config) {
   const prompt = typeof input?.prompt === "string" ? input.prompt.trim() : "";
   if (isArmorPolicyCommand(prompt)) {
@@ -707,10 +684,6 @@ export async function handleUserPromptSubmit(input, config) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// PreToolUse
-// ---------------------------------------------------------------------------
-
 export async function handlePreToolUse(input, config) {
   const output = await decidePreToolUse(input, config);
   if (output?.hookSpecificOutput?.permissionDecision === "deny") {
@@ -759,16 +732,10 @@ async function decidePreToolUse(input, config) {
     return denyOrAllow(config, "missing_tool_name", "ArmorClaude: missing tool_name on PreToolUse");
   }
 
-  // --- Allowlist: ArmorClaude's own MCP tools must never be blocked,
-  //     otherwise the agent can't register a plan or read/update policy.
-  //     Match the exact MCP prefix from .mcp.json (armorclaude-policy),
-  //     not any suffix --- an evil server called evil__policy_update would
-  //     previously have been allowlisted. ---
+  // Never block ArmorClaude's own MCP tools, or the agent cannot register the plan
+  // that unblocks it. Match the exact .mcp.json prefix (armorclaude-policy), not a
+  // suffix, so a server named evil__policy_update is not allowlisted.
   const norm = normalizeToolName(toolName);
-  // ArmorClaude's own MCP tools — meta-tools for managing the plugin itself
-  // (declare a plan, inspect/update policy, drive Trust Update primitives).
-  // Blocking these creates a deadlock: the agent can't register a plan to
-  // unblock itself.
   const armorTools = [
     "register_intent_plan",
     "policy_read",
@@ -776,13 +743,8 @@ async function decidePreToolUse(input, config) {
     "trust_reanchor",
     "trust_delegate",
   ];
-  // Claude Code surfaces MCP tools under different prefixes depending on how
-  // the server is loaded:
-  //   .mcp.json (top-level)       → mcp__<server>__<tool>
-  //   Claude Code plugin manifest → mcp__plugin_<plugin>_<server>__<tool>
-  // Match both. The deadlock the user hit ("intent drift: tool not in plan
-  // (mcp__plugin_armorclaude_armorclaude-policy__register_intent_plan)")
-  // was caused by the plugin-prefix variant being missed.
+  // Claude Code prefixes MCP tools differently for .mcp.json and plugin-loaded
+  // servers. Missing either variant deadlocks the session on register_intent_plan.
   const armorMcpPrefixes = [
     "mcp__armorclaude-policy__",
     "mcp__plugin_armorclaude_armorclaude-policy__",
@@ -791,13 +753,8 @@ async function decidePreToolUse(input, config) {
     return null;
   }
 
-  // --- Allowlist: ArmorClaude's own management skill (/armorclaude:armor) is
-  //     the escape hatch for fixing an over-restrictive policy. Under a
-  //     default-deny policy an agent's Skill(armorclaude:armor) call would
-  //     otherwise be denied ("no statement matched tool Skill"), deadlocking
-  //     the user out of the very command that fixes the policy. Exempt it.
-  //     (Invoking the skill isn't itself a security-relevant action — any tool
-  //     the skill goes on to run is still policy-checked at its own PreToolUse.)
+  // Denying /armorclaude:armor under default-deny locks the user out of the
+  // command that fixes the policy. Tools the skill runs are still checked.
   if (norm === "skill") {
     const skillRef = String(toolInput?.skill ?? toolInput?.name ?? "")
       .trim()
@@ -855,18 +812,8 @@ async function decidePreToolUse(input, config) {
     return await handleExitPlanModeCapture(input, sessionId, config);
   }
 
-  // --- Allowlist: Claude Code introspection / coordination tools that have
-  //     no side effects on user files or systems. Blocking these makes the
-  //     agent fight itself (e.g. ToolSearch is needed to fetch deferred MCP
-  //     tool schemas before they can be called). ---
-  //
-  // Phase 4 A1 (2026-05-08): expanded with built-in read-only Claude Code
-  // tools that observe filesystem/network without mutating either. These get
-  // a hot-path return before any disk read, plan check, or backend HTTP —
-  // saves 30-350 ms per call. Bash is intentionally NOT here: it can do
-  // anything (rm -rf, curl, kill) and must continue through the full
-  // pipeline. Same for Edit/Write/NotebookEdit (mutating) and any MCP tool
-  // that isn't an ArmorClaude meta-tool (already handled above).
+  // Side-effect-free tools skip the pipeline. Bash, Edit, Write and NotebookEdit
+  // must never be added here: they mutate state and would bypass enforcement.
   const coordinationTools = new Set([
     // Claude Code coordination (no side effects)
     "toolsearch",
@@ -955,10 +902,8 @@ async function decidePreToolUse(input, config) {
   if (pending && (pending.tokenRaw || pending.plan)) {
     const pendingPolicyState = await loadPolicyState(config.policyFile);
     const pendingPolicyHash = computePolicyHash(pendingPolicyState.policy);
-    // --- Auto-reanchor (Phase 3): if the previous plan + token exist for
-    // this session and the new plan hash differs, sign a ReAnchor delta
-    // *before* overwriting the cached plan. The audit log now reads
-    // Commit → ReAnchor → ... instead of orphan Commits.
+    // Sign the ReAnchor delta before overwriting the cached plan, or the
+    // audit log shows orphan Commits.
     if (config.autoReanchor && pending.plan) {
       const priorSession = getSession(runtimeState, sessionId);
       const priorTokenRaw = priorSession?.intentTokenRaw;
@@ -976,12 +921,8 @@ async function decidePreToolUse(input, config) {
           if (priorTokenObj) {
             const canonicalPriorHash =
               priorTokenObj?.planHash || priorTokenObj?.rawToken?.token?.plan_hash || "";
-            // Prefer the canonical planHash from pending.tokenRaw (if a new
-            // token was minted alongside the new plan) so trustOpsLog hashes
-            // stay cross-referencable with backend trust_deltas rows even
-            // when the SDK reanchor call fails. sha256(JSON.stringify(plan))
-            // is a last-resort identifier — different from the CSRG canonical
-            // hash and therefore not auditable against TrustDelta.payload.
+            // The local sha256 differs from the CSRG canonical hash and cannot be
+            // matched against backend trust_deltas, so prefer the token's planHash.
             let canonicalNextHash = "";
             if (pending.tokenRaw && typeof pending.tokenRaw === "string") {
               try {
@@ -1050,7 +991,7 @@ async function decidePreToolUse(input, config) {
   const allowAll = isFrictionlessAllowPolicy(policyState.policy);
   const enforceIntent = config.intentRequired && !allowAll;
 
-  // Crypto policy digest check (Phase 4 integration point)
+  // Crypto policy digest check
   if (config.cryptoPolicyEnabled) {
     try {
       const { createCryptoPolicyService } = await import("./crypto-policy.mjs");
@@ -1106,11 +1047,8 @@ async function decidePreToolUse(input, config) {
   let localExpiresAt = session.expiresAt;
   let remoteAllowed = false;
   let tokenCheckMatched = false;
-  // Set when the backend billing/subscription gate (402) makes the remote
-  // layer (intent tokens, CSRG proofs, dashboard audit) unavailable. It does
-  // NOT relax local policy — deny/hold/allow are still enforced from the
-  // configured policy; it only drops the remote-token requirement so a free
-  // user isn't blocked with a cryptic "intent plan missing".
+  // Set on a backend 402. Drops only the remote-token requirement; local
+  // policy deny/hold/allow is still enforced.
   let billingDegraded = false;
   let billingNotice = "";
   let usedStepIndices =
@@ -1161,13 +1099,9 @@ async function decidePreToolUse(input, config) {
     }
   }
 
-  // Check the registered plan BEFORE acquiring a token. The mint below sends
-  // toolName/toolInput to the backend, which builds a plan around them — so
-  // minting first meant an off-plan call replaced the registered plan and was
-  // then validated against a plan derived from itself. With an API key
-  // configured that made drift enforcement a no-op: a session whose plan
-  // declared only Read would happily run Bash, and runtime.json would show the
-  // Read step overwritten by the Bash call. Gate the mint instead.
+  // Check the plan before minting: the backend builds the minted plan from
+  // toolName/toolInput, so minting first lets an off-plan call validate
+  // against a plan derived from itself and drift enforcement fails open.
   if (!intentTokenRaw && config.apiKey && !allowAll && enforceIntent && shouldDeny(config)) {
     if (isPlainObject(localPlan)) {
       const preMintCheck = checkToolAgainstPlan({
@@ -1238,12 +1172,9 @@ async function decidePreToolUse(input, config) {
     } catch (error) {
       if (allowAll) upsertSession(runtimeState, sessionId, { intentRequestFailed: true });
       const message = error instanceof Error ? error.message : String(error);
-      // A billing/subscription 402 only means the REMOTE layer is unavailable —
-      // it is NOT a policy decision. The configured policy is still enforced
-      // locally: a deny already returned above (policyDecision), and hold/allow
-      // are handled below. So don't hard-block (cryptic) and don't blanket-allow
-      // (that would ignore deny/hold) — degrade the remote layer, fall through,
-      // and nudge to upgrade once per session.
+      // A billing 402 only takes the remote layer away; local deny/hold/allow still
+      // apply below. Neither block nor blanket-allow: degrade, fall through, and
+      // nudge to upgrade once per session.
       if (isBillingError(message)) {
         billingDegraded = true;
         debugLog(
@@ -1386,8 +1317,6 @@ async function decidePreToolUse(input, config) {
     if (localCheck.allowed) {
       localPlanMatched = true;
     } else {
-      // Phase 4 A3: include the exact register_intent_plan JSON in the deny
-      // reason so the LLM auto-corrects in 1 follow-up turn.
       if (shouldDeny(config) && !allowAll) {
         return denyPreToolWithHint(
           "intent_drift",
@@ -1472,10 +1401,6 @@ async function decidePreToolUse(input, config) {
   return billingNotice ? allowWithNotice(billingNotice) : null;
 }
 
-// ---------------------------------------------------------------------------
-// ExitPlanMode capture — intercept Claude's built-in plan approval
-// ---------------------------------------------------------------------------
-
 async function handleExitPlanModeCapture(input, sessionId, config) {
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   const session = getSession(runtimeState, sessionId) || {};
@@ -1548,10 +1473,6 @@ async function handleExitPlanModeCapture(input, sessionId, config) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// PostToolUse — audit logging
-// ---------------------------------------------------------------------------
-
 export async function handlePostToolUse(input, config) {
   if (!config.auditEnabled || !config.apiKey) {
     return null;
@@ -1586,14 +1507,8 @@ export async function handlePostToolUse(input, config) {
         duration_ms: _computeToolDuration(input),
       };
     } else {
-      // No intent token. Under an all-allow (frictionless) policy this is
-      // expected — no plan is registered, so no token is minted (see
-      // isFrictionlessAllowPolicy). But the action should still be recorded,
-      // otherwise the audit trail goes silent whenever enforcement is off
-      // (#116). Emit a session-scoped row: no token, attributed via explicit
-      // identity; the backend stores it as an orphan row (planId null). In
-      // enforce mode a missing token is not a valid audit context, so we do
-      // NOT fabricate one — keep returning null there.
+      // Frictionless policies mint no token but must still audit, as an orphan
+      // session-scoped row. In enforce mode never fabricate a token context.
       const policyState = await loadPolicyState(config.policyFile);
       if (!isFrictionlessAllowPolicy(policyState.policy)) return null;
       dto = {
@@ -1612,10 +1527,6 @@ export async function handlePostToolUse(input, config) {
       };
     }
 
-    // Phase 4 A4 (via Tier B): if daemon is enabled, enqueue the audit DTO
-    // for fire-and-forget batched flush. This actually delivers the
-    // latency win — without daemon, we still need to await the POST because
-    // the hook process can't exit while a socket is open.
     const target = await emitAudit({ dto, config, iapService });
     debugLog(config, `audit log ${target} for ${toolName}`);
   } catch (error) {
@@ -1625,10 +1536,6 @@ export async function handlePostToolUse(input, config) {
 
   return null;
 }
-
-// ---------------------------------------------------------------------------
-// PostToolUseFailure — audit logging for failed tool calls
-// ---------------------------------------------------------------------------
 
 export async function handlePostToolUseFailure(input, config) {
   if (!config.auditEnabled || !config.apiKey) {
@@ -1674,10 +1581,6 @@ export async function handlePostToolUseFailure(input, config) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Stop — end of turn
-// ---------------------------------------------------------------------------
-
 export async function handleStop(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
@@ -1691,15 +1594,6 @@ export async function handleStop(input, config) {
     debugLog(config, "intent token expired during turn");
   }
 
-  // --- Phase 4 A2: proactive token refresh at turn boundary ---
-  // The original refresh fires INSIDE handlePreToolUse when a token is near
-  // expiry (engine.mjs:444-486). That's the worst place — Claude is mid-turn
-  // and every subsequent tool waits the 150-300 ms HTTP RTT.
-  //
-  // Move that refresh here, to Stop hook (between turns). The user is reading
-  // Claude's output; nothing is gated. Next turn starts with a fresh token,
-  // zero latency on the PreToolUse critical path. The PreToolUse refresh
-  // stays as a fallback for edge cases (very short turns, long pauses).
   const refreshThresholdSec = Number.isFinite(config.refreshThresholdSeconds)
     ? config.refreshThresholdSeconds
     : 30;
@@ -1750,10 +1644,6 @@ export async function handleStop(input, config) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// SessionEnd — cleanup
-// ---------------------------------------------------------------------------
-
 export async function handleSessionEnd(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
@@ -1761,9 +1651,7 @@ export async function handleSessionEnd(input, config) {
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   const session = runtimeState.sessions ? runtimeState.sessions[sessionId] : undefined;
 
-  // --- Auto-revoke (Phase 3): kill the active intent token at session end
-  // so the 15-minute lifetime can't outlive the Claude Code session. The
-  // SDK's revoke is best-effort; failure logs but doesn't block cleanup.
+  // Revoke at session end so the token cannot outlive the session.
   if (config.autoRevokeOnEnd && session?.intentTokenRaw) {
     if (!Number.isFinite(session.expiresAt) || session.expiresAt > nowEpochSeconds()) {
       let intentToken = null;

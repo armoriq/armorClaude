@@ -11,7 +11,7 @@ D=$'\033[0;90m'
 N=$'\033[0m'
 
 MARKETPLACE_REPO="${ARMORCLAUDE_MARKETPLACE_REPO:-armoriq/armorClaude}"
-PLUGIN_REF="armorclaude-dev@armoriq"
+PLUGIN_REF="armorclaude@armoriq"
 DASHBOARD_URL="https://tools.armoriq.ai"
 
 if ! pwd >/dev/null 2>&1; then
@@ -62,6 +62,47 @@ check_node_version() {
   fi
 }
 
+# A third-party marketplace defaults to no auto-update and the CLI has no flag
+# for it, so without this entry a release reaches nobody.
+enable_auto_update() {
+  if [[ "${ARMORCLAUDE_NO_AUTO_UPDATE:-}" == "1" ]]; then
+    info "leaving updates manual (ARMORCLAUDE_NO_AUTO_UPDATE=1)"
+    return 0
+  fi
+
+  local status=0
+  ARMORIQ_CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}" ARMORIQ_MARKETPLACE_REPO="${MARKETPLACE_REPO}" node -e '
+    const fs = require("fs");
+    const path = require("path");
+    const dir = process.env.ARMORIQ_CLAUDE_DIR;
+    const link = path.join(dir, "settings.json");
+    const file = fs.existsSync(link) ? fs.realpathSync(link) : link;
+    const read = (f) => (fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {});
+    const settings = read(file);
+    const known = read(path.join(dir, "plugins", "known_marketplaces.json")).armoriq;
+    const places = (settings.extraKnownMarketplaces ??= {});
+    const armoriq = (places.armoriq ??= {
+      source: known?.source ?? { source: "github", repo: process.env.ARMORIQ_MARKETPLACE_REPO },
+    });
+    if (armoriq.autoUpdate === true) process.exit(2);
+    if (armoriq.autoUpdate === false || known?.autoUpdate === false) process.exit(3);
+    armoriq.autoUpdate = true;
+    const mode = fs.existsSync(file) ? fs.statSync(file).mode & 0o7777 : 0o644;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temporary = `${file}.armoriq-${process.pid}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode });
+    fs.chmodSync(temporary, mode);
+    fs.renameSync(temporary, file);
+  ' 2>/dev/null || status=$?
+
+  case "${status}" in
+    0) ok "updates are automatic (new versions install during your next session)" ;;
+    2) ok "updates are already automatic" ;;
+    3) info "leaving updates manual: auto-update for armoriq is turned off on this machine" ;;
+    *) warn "couldn't turn on automatic updates; run ${B}claude plugin update ${PLUGIN_REF}${N} to update" ;;
+  esac
+}
+
 install_plugin() {
   section "Installing plugin"
 
@@ -70,6 +111,8 @@ install_plugin() {
     claude plugin marketplace update armoriq >/dev/null 2>&1 || true
   fi
   ok "marketplace ready"
+
+  enable_auto_update
 
   info "installing plugin ${B}${PLUGIN_REF}${N}"
   claude plugin install "${PLUGIN_REF}" >/dev/null
@@ -80,7 +123,7 @@ install_plugin() {
   # "Failed to connect — MCP error -32000: Connection closed".
   info "preparing plugin dependencies"
   local plugin_dir
-  plugin_dir="$(ls -d "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"/plugins/cache/armoriq/armorclaude-dev/*/ 2>/dev/null | sort -V | tail -1)"
+  plugin_dir="$(ls -d "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"/plugins/cache/armoriq/armorclaude/*/ 2>/dev/null | sort -V | tail -1)"
   if [[ -n "${plugin_dir}" && -f "${plugin_dir}scripts/bootstrap.mjs" ]]; then
     if node "${plugin_dir}scripts/bootstrap.mjs" warm >/dev/null 2>&1; then
       ok "dependencies ready"
@@ -91,23 +134,23 @@ install_plugin() {
     warn "couldn't locate the installed plugin — the first Claude Code start may be slow"
   fi
 
-  info "installing ArmorIQ CLI ${B}(@armoriq/sdk-dev)${N}"
-  npm install -g @armoriq/sdk-dev@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
-    && ok "armoriq-dev CLI ready" \
-    || warn "couldn't install globally — use ${B}npx @armoriq/sdk-dev${N} instead"
+  info "installing ArmorIQ CLI ${B}(@armoriq/sdk)${N}"
+  npm install -g @armoriq/sdk@latest --silent --no-audit --no-fund >/dev/null 2>&1 \
+    && ok "armoriq CLI ready" \
+    || warn "couldn't install globally — use ${B}npx @armoriq/sdk${N} instead"
 }
 
 verify_install() {
   section "Verifying"
   local listing status
   listing="$(claude plugin list 2>/dev/null || true)"
-  status="$(printf '%s\n' "$listing" | grep -A3 "armorclaude-dev@armoriq" | grep -m1 "Status:" || true)"
+  status="$(printf '%s\n' "$listing" | grep -A3 "armorclaude@armoriq" | grep -m1 "Status:" || true)"
   if [[ -z "$status" ]]; then
-    warn "couldn't confirm armorclaude-dev is installed — run: ${B}claude plugin list${N}"
+    warn "couldn't confirm armorclaude is installed — run: ${B}claude plugin list${N}"
   elif [[ "$status" == *disabled* ]]; then
-    warn "armorclaude-dev is installed but ${B}disabled${N} — enable it with: ${B}claude plugin enable armorclaude-dev@armoriq${N}"
+    warn "armorclaude is installed but ${B}disabled${N} — enable it with: ${B}claude plugin enable armorclaude@armoriq${N}"
   else
-    ok "armorclaude-dev is enabled"
+    ok "armorclaude is enabled"
   fi
 
   if claude mcp list 2>/dev/null | grep -q "armorclaude-policy.*Connected"; then
@@ -147,23 +190,23 @@ connect_to_armoriq() {
 EOF
 
   if ! is_promptable; then
-    printf "  Run ${G}${B}armoriq-dev login --product armorclaude${N} to connect later.\n\n"
+    printf "  Run ${G}${B}armoriq login --product armorclaude${N} to connect later.\n\n"
     return 0
   fi
 
   if ! prompt_yes_no "Connect your ArmorIQ account now?" "Y"; then
     echo
-    printf "  No problem. Run ${G}${B}armoriq-dev login --product armorclaude${N} anytime to connect.\n\n"
+    printf "  No problem. Run ${G}${B}armoriq login --product armorclaude${N} anytime to connect.\n\n"
     return 0
   fi
 
   echo
-  if command -v armoriq-dev >/dev/null 2>&1; then
-    armoriq-dev login --product armorclaude
+  if command -v armoriq >/dev/null 2>&1; then
+    armoriq login --product armorclaude
   elif command -v npx >/dev/null 2>&1; then
-    npx @armoriq/sdk-dev login --product armorclaude
+    npx @armoriq/sdk login --product armorclaude
   else
-    warn "armoriq-dev CLI not found. Run ${B}npx @armoriq/sdk-dev login --product armorclaude${N} manually."
+    warn "armoriq CLI not found. Run ${B}npx @armoriq/sdk login --product armorclaude${N} manually."
     return 0
   fi
 
@@ -212,9 +255,9 @@ EOF
   cat <<EOF
 
   ${D}claude plugin list${N}
-  ${D}claude plugin disable armorclaude-dev${N}
-  ${D}claude plugin enable  armorclaude-dev${N}
-  ${D}claude plugin update  armorclaude-dev${N}
+  ${D}claude plugin disable armorclaude${N}
+  ${D}claude plugin enable  armorclaude${N}
+  ${D}claude plugin update  armorclaude${N}
 
   Docs: ${C}https://github.com/armoriq/armorClaude${N}
 

@@ -67,7 +67,7 @@ async function loadConfigFor(dataDir) {
   return withHome(env.HOME, () => loadConfig(env));
 }
 
-test("daemon: ping responds with the plugin's package version + uptime", async () => {
+test("daemon: ping responds with the package version and install directory + uptime", async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-daemon-ping-"));
   const { child } = await spawnDaemonChild(dataDir);
   try {
@@ -77,7 +77,7 @@ test("daemon: ping responds with the plugin's package version + uptime", async (
     assert.ok(reply, "ping should return a reply");
     assert.equal(reply.ok, true);
     const pkg = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8"));
-    assert.equal(reply.version, pkg.version);
+    assert.equal(reply.version, `${pkg.version}+${repoRoot}${path.sep}`);
     assert.ok(reply.uptime >= 0);
   } finally {
     await killDaemon(child);
@@ -368,7 +368,7 @@ test("hook-router: a daemon-answered hook loads neither the engine nor the SDK r
   const { child } = await spawnDaemonChild(dataDir);
   try {
     const loadHook = `export async function load(u,c,n){if(/\\/lib\\/(engine|observability)\\.mjs$/.test(u))process.stderr.write("loaded "+u+"\\n");return n(u,c)}`;
-    const reportCjs = `process.on("exit",()=>{for(const k of Object.keys(Module._cache))if(/@armoriq\\/sdk-dev\\/dist\\/index\\.js$/.test(k))process.stderr.write("loaded "+k+"\\n")});`;
+    const reportCjs = `process.on("exit",()=>{for(const k of Object.keys(Module._cache))if(/@armoriq\\/sdk\\/dist\\/index\\.js$/.test(k))process.stderr.write("loaded "+k+"\\n")});`;
     const trace = `data:text/javascript,${encodeURIComponent(
       `import Module,{register}from"node:module";register(${JSON.stringify("data:text/javascript," + encodeURIComponent(loadHook))});${reportCjs}`
     )}`;

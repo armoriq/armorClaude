@@ -222,18 +222,7 @@ function parseStepIndexFromPath(path) {
   return Number.isFinite(index) ? index : null;
 }
 
-/**
- * Sign a ReAnchor delta linking the previous plan hash to the new one.
- * Returns { ok, trustId?, fromHash?, toHash? }.
- *
- * @param {object} args
- * @param {(config:any)=>any} args.getClient — getSdkClient resolver (passed in
- *   to avoid a circular import between iap-service.mjs and intent.mjs).
- * @param {object} args.config
- * @param {object} args.intentToken — current intent token (raw object, parsed)
- * @param {object} args.updatedPlan — the new plan structure
- * @param {string} [args.reason]
- */
+// getClient is injected to avoid a circular import with intent.mjs.
 export async function reanchorViaSdk({ getClient, config, intentToken, updatedPlan, reason }) {
   if (!intentToken || !updatedPlan) {
     return { ok: false, error: "missing intentToken or updatedPlan" };

@@ -11,7 +11,6 @@ const FIELDS = [
     (j) => [j.version, j.packages[""].version],
     [TOP_LEVEL, /("": \{\n(?: {6}.*\n)*? {6}"version": ")[^"]+(")/],
   ],
-  [".claude-plugin/plugin.json", (j) => j.version, [TOP_LEVEL]],
   [
     ".claude-plugin/marketplace.json",
     (j) => j.plugins.find((p) => p.name === "armorclaude")?.version,
@@ -34,6 +33,8 @@ function fail(message) {
 }
 
 function check(version) {
+  if (JSON.parse(read(".claude-plugin/plugin.json")).version !== undefined)
+    fail(".claude-plugin/plugin.json must not set a version: it would freeze the dev channel");
   const wrong = mismatches(version);
   if (wrong.length) fail(`version files disagree with ${version}: ${wrong.join("; ")}`);
 }

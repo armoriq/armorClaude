@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import armoriqSdk from "@armoriq/sdk-dev";
+import armoriqSdk from "@armoriq/sdk";
 import {
   STAGING,
   loadConfigWithLogins,
@@ -16,7 +16,7 @@ import {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
 const loginLine = (backend) =>
-  `No ArmorClaude login for ${backend}. Run: armoriq-dev login --product armorclaude --backend ${backend}`;
+  `No ArmorClaude login for ${backend}. Run: ${backend === STAGING ? "armoriq-dev" : "armoriq"} login --product armorclaude --backend ${backend}`;
 
 function pluginEnv(home, dataDir, backend) {
   const target =

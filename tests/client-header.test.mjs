@@ -17,9 +17,7 @@ import {
 } from "./helpers/live-usage.mjs";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const { version } = JSON.parse(
-  readFileSync(path.join(repo, ".claude-plugin", "plugin.json"), "utf8")
-);
+const { version } = JSON.parse(readFileSync(path.join(repo, "package.json"), "utf8"));
 
 const tokenReply = () => [
   200,

@@ -82,7 +82,7 @@ export async function decideV2(config, toolName, toolArgs) {
     return {
       allowed: false,
       action: "block",
-      reason: "policy-bundle-unavailable: the installed @armoriq/sdk-dev has no v2 evaluator",
+      reason: "policy-bundle-unavailable: the installed @armoriq/sdk has no v2 evaluator",
     };
   }
   const read = capabilityOf(toolName) === "read";

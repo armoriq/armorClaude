@@ -9,7 +9,7 @@ import { createConnection } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import armoriqSdk from "@armoriq/sdk-dev";
+import armoriqSdk from "@armoriq/sdk";
 import {
   __resetObsForTests,
   __setOtelTestHooksForTests,

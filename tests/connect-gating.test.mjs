@@ -9,7 +9,7 @@ import { handleSessionStart } from "../scripts/lib/engine.mjs";
 import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
 
 const PROD = "https://api.armoriq.ai";
-const LOGIN_LINE = `No ArmorClaude login for ${PROD}. Run: armoriq-dev login --product armorclaude --backend ${PROD}`;
+const LOGIN_LINE = `No ArmorClaude login for ${PROD}. Run: armoriq login --product armorclaude --backend ${PROD}`;
 
 test("loadConfig: a usable ak_ key connects → enforce + intent required", () => {
   const config = loadConfigWithLogins([{ backend: PROD, apiKey: "ak_live_abc1234567890" }], {
@@ -88,21 +88,25 @@ test("SessionStart when unconfigured: the login line shows once per session, the
 });
 
 test("the login command names the CLI the installed SDK package declares", () => {
-  const { bin } = createRequire(import.meta.url)("@armoriq/sdk-dev/package.json");
-  assert.deepEqual(Object.keys(bin), ["armoriq-dev"]);
-  assert.equal(loginCommand(), "armoriq-dev login --product armorclaude");
+  const { bin } = createRequire(import.meta.url)("@armoriq/sdk/package.json");
+  assert.deepEqual(Object.keys(bin), ["armoriq"]);
+  assert.equal(loginCommand(), "armoriq login --product armorclaude");
   assert.equal(
     loginCommand(PROD),
-    "armoriq-dev login --product armorclaude --backend https://api.armoriq.ai"
+    "armoriq login --product armorclaude --backend https://api.armoriq.ai"
+  );
+  assert.equal(
+    loginCommand("https://staging-api.armoriq.ai"),
+    "armoriq-dev login --product armorclaude --backend https://staging-api.armoriq.ai"
   );
 });
 
 test("the SDK package must declare exactly one CLI by name, or the login command fails", () => {
   assert.equal(
-    declaredCli({ name: "@armoriq/sdk-dev", bin: { "armoriq-dev": "x.js" } }),
+    declaredCli({ name: "@armoriq/sdk", bin: { "armoriq-dev": "x.js" } }),
     "armoriq-dev"
   );
   for (const bin of ["dist/cli/index.js", {}, { a: "a.js", b: "b.js" }, undefined]) {
-    assert.throws(() => declaredCli({ name: "@armoriq/sdk-dev", bin }), /@armoriq\/sdk-dev/);
+    assert.throws(() => declaredCli({ name: "@armoriq/sdk", bin }), /@armoriq\/sdk/);
   }
 });

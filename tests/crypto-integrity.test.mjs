@@ -93,18 +93,29 @@ test("loadConfig: cryptoPolicyEnabled is tied to real apiKey presence", () => {
 
 test("loadConfig: a signed-in key enables crypto policy", () => {
   const config = loadConfigWithLogins([
-    { backend: "https://staging-api.armoriq.ai", apiKey: "ak_test_explicit0000000000000" },
+    { backend: "https://api.armoriq.ai", apiKey: "ak_test_explicit0000000000000" },
   ]);
   assert.equal(config.apiKey, "ak_test_explicit0000000000000");
   assert.equal(config.cryptoPolicyEnabled, true);
 });
 
-test("loadConfig: dev branch defaults to staging endpoints", () => {
-  const config = loadConfig({});
-  assert.equal(config.armoriqEnv, "staging");
-  assert.equal(config.backendEndpoint, "https://staging-api.armoriq.ai");
-  assert.equal(config.csrgEndpoint, "https://iap-staging.armoriq.ai");
-});
+for (const [plugin, env, backend, csrg] of [
+  ["armorclaude", "production", "https://api.armoriq.ai", "https://iap.armoriq.ai"],
+  [
+    "armorclaude-dev",
+    "staging",
+    "https://staging-api.armoriq.ai",
+    "https://iap-staging.armoriq.ai",
+  ],
+]) {
+  test(`loadConfig: the ${plugin} plugin defaults to ${env} endpoints`, () => {
+    const dataDir = path.join(os.tmpdir(), `${plugin}-armoriq`);
+    const config = loadConfig({ CLAUDE_PLUGIN_DATA: dataDir });
+    assert.equal(config.armoriqEnv, env);
+    assert.equal(config.backendEndpoint, backend);
+    assert.equal(config.csrgEndpoint, csrg);
+  });
+}
 
 test("loadConfig: ARMORIQ_ENV=staging uses only staging endpoints", () => {
   const config = loadConfig({

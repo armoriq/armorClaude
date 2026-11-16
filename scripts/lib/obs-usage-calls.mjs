@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
-import armoriqSdk from "@armoriq/sdk-dev";
+import armoriqSdk from "@armoriq/sdk";
 import { ensurePrivateDir, writePrivateFile } from "./fs-store.mjs";
 import { OBS_RECORD_MAX_AGE_MS } from "./obs-ages.mjs";
 

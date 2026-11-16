@@ -61,7 +61,7 @@ to stderr:
   it stays connected on subsequent runs without reinstalling.
 - **No API key is needed to start.** Until you sign in, the plugin runs in **local-only mode**
   (no data leaves your machine, see [Data & Privacy](#data--privacy)). Signing in with
-  `armoriq-dev login --product armorclaude` adds backend audit, intent tokens, and CSRG proofs.
+  `armoriq login --product armorclaude` adds backend audit, intent tokens, and CSRG proofs.
 
 If `claude mcp list` does not show `✓ Connected`, run the server directly from the plugin
 directory to surface the install/startup error:
@@ -71,6 +71,13 @@ node scripts/bootstrap.mjs mcp
 ```
 
 ### Update / disable / uninstall
+
+The installer turns on auto-update for the `armoriq` marketplace, so Claude Code installs each new
+release by itself during your next session (`Plugin updated ... Run /reload-plugins to apply`).
+The stable plugin moves when its version in `marketplace.json` changes; `armorclaude-dev` moves with
+every commit on `dev`. If you installed another way,
+ArmorClaude tells you once at session start; turn it on in `/plugin`, Marketplaces, `armoriq`,
+Enable auto-update. Set `ARMORCLAUDE_NO_AUTO_UPDATE=1` before installing to keep updates manual.
 
 ```bash
 claude plugin update armorclaude
@@ -98,7 +105,8 @@ armorClaude/
 │   └── marketplace.json          # Marketplace listing for `claude plugin install`
 ├── hooks/hooks.json              # Hook registration (7 lifecycle events)
 ├── .mcp.json                     # MCP server for policy + intent tools
-├── install_armorclaude.sh        # Curl-able installer
+├── install_armorclaude.sh        # Curl-able installer (armorclaude, production)
+├── install_armorclaude_dev.sh    # Same for armorclaude-dev (staging)
 ├── scripts/
 │   ├── bootstrap.mjs             # Auto-installs npm deps on first run
 │   ├── hook-router.mjs           # Hook entrypoint (dispatches events)
@@ -120,7 +128,7 @@ armorClaude/
 
 ## Configuration
 
-ArmorClaude takes its ArmorIQ key and org only from `armoriq-dev login --product armorclaude`,
+ArmorClaude takes its ArmorIQ key and org only from `armoriq login --product armorclaude`,
 which saves them in `~/.armoriq/credentials.json` for the backend ArmorClaude calls. There is no
 key setting, and `ARMORIQ_API_KEY` is ignored.
 

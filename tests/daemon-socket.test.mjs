@@ -1,4 +1,4 @@
-// The daemon socket path fits in sun_path however long the data dir is (#169).
+// regression: #169
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

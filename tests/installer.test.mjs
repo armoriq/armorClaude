@@ -4,8 +4,10 @@ import { spawn } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -16,6 +18,7 @@ import { tempHome } from "./helpers/login-profile.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const installer = path.join(repoRoot, "install_armorclaude.sh");
+const devInstaller = path.join(repoRoot, "install_armorclaude_dev.sh");
 const PTY = `
 import os, select, sys
 pid, fd = os.forkpty()
@@ -43,10 +46,10 @@ sys.exit(os.waitstatus_to_exitcode(status))
 const CLAUDE_STUB = `#!/bin/sh
 case "$*" in
   --version) echo "2.0.0 (Claude Code)" ;;
-  "plugin install armorclaude-dev@armoriq")
-    dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/armoriq/armorclaude-dev/0.0.0"
+  "plugin install armorclaude@armoriq"|"plugin install armorclaude-dev@armoriq")
+    dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/armoriq/\${3%@armoriq}/0.0.0"
     mkdir -p "$dir/scripts" && : > "$dir/scripts/bootstrap.mjs" ;;
-  "plugin list") printf 'armorclaude-dev@armoriq\\n  Status: enabled\\n' ;;
+  "plugin list") printf 'armorclaude@armoriq\\n  Status: enabled\\n' ;;
   "mcp list") echo "plugin:armorclaude:armorclaude-policy: node - Connected" ;;
 esac
 exit 0
@@ -64,7 +67,7 @@ function sandbox() {
   mkdirSync(bin);
   writeFileSync(calls, "");
   const stubs = { claude: CLAUDE_STUB, git: "#!/bin/sh\nexit 0\n" };
-  for (const name of ["npm", "npx", "armoriq", "armoriq-dev"]) stubs[name] = recorder(name, calls);
+  for (const name of ["npm", "npx", "armoriq", "armoriq"]) stubs[name] = recorder(name, calls);
   for (const [name, body] of Object.entries(stubs)) {
     writeFileSync(path.join(bin, name), body);
     chmodSync(path.join(bin, name), 0o755);
@@ -85,15 +88,15 @@ function run(cmd, args, { env, input, detached }) {
   });
 }
 
-const guarded = (home) => [
+const guarded = (home, script = installer) => [
   "-c",
-  `[ "$HOME" = "${home}" ] && [ "$(command -v armoriq-dev)" = "${home}/stub-bin/armoriq-dev" ] || exit 99; exec bash "${installer}"`,
+  `[ "$HOME" = "${home}" ] && [ "$(command -v armoriq)" = "${home}/stub-bin/armoriq" ] || exit 99; exec bash "${script}"`,
 ];
 
 const ptyAvailable = existsSync("/usr/bin/python3");
 
 test(
-  "the installer signs in with armoriq-dev when the user agrees",
+  "the installer signs in with armoriq when the user agrees",
   { skip: !ptyAvailable },
   async () => {
     const { home, calls, env } = sandbox();
@@ -107,19 +110,19 @@ test(
     );
     assert.equal(code, 0, out);
     const log = readFileSync(calls, "utf8");
-    assert.match(log, new RegExp(`^armoriq-dev HOME=${home} login --product armorclaude$`, "m"));
-    assert.match(log, /^npm HOME=\S+ install -g @armoriq\/sdk-dev@latest /m);
-    assert.doesNotMatch(log, /^armoriq HOME=/m);
-    assert.match(out, /armoriq-dev CLI ready/);
+    assert.match(log, new RegExp(`^armoriq HOME=${home} login --product armorclaude$`, "m"));
+    assert.match(log, /^npm HOME=\S+ install -g @armoriq\/sdk@latest /m);
+    assert.doesNotMatch(log, /^armoriq-dev HOME=/m);
+    assert.match(out, /armoriq CLI ready/);
   }
 );
 
-test("the installer points at armoriq-dev when it cannot prompt", async () => {
+test("the installer points at armoriq when it cannot prompt", async () => {
   const { home, calls, env } = sandbox();
   const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
   assert.equal(code, 0, out);
-  assert.match(out, /Run armoriq-dev login --product armorclaude to connect later\./);
-  assert.doesNotMatch(out, /\barmoriq login\b/);
+  assert.match(out, /Run armoriq login --product armorclaude to connect later\./);
+  assert.doesNotMatch(out, /\barmoriq-dev login\b/);
   assert.doesNotMatch(readFileSync(calls, "utf8"), /^armoriq(-dev)? HOME=/m);
 });
 
@@ -131,5 +134,75 @@ for (const configDir of [undefined, ".claude-second"]) {
     const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
     assert.equal(code, 0, out);
     assert.match(out, /dependencies ready/);
+    const settings = path.join(
+      env.CLAUDE_CONFIG_DIR ?? path.join(home, ".claude"),
+      "settings.json"
+    );
+    assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")).extraKnownMarketplaces.armoriq, {
+      source: { source: "github", repo: "armoriq/armorClaude" },
+      autoUpdate: true,
+    });
   });
 }
+
+test("the installer turns on auto-update without disturbing the user's settings", async () => {
+  const { home, env } = sandbox();
+  const settings = path.join(home, ".claude", "settings.json");
+  const target = path.join(home, "dotfiles", "claude-settings.json");
+  mkdirSync(path.dirname(settings), { recursive: true });
+  mkdirSync(path.dirname(target), { recursive: true });
+  const source = { source: "git", url: "https://example.test/fork.git" };
+  writeFileSync(
+    target,
+    JSON.stringify({ theme: "dark", extraKnownMarketplaces: { armoriq: { source } } }),
+    { mode: 0o600 }
+  );
+  symlinkSync(target, settings);
+  const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
+  assert.equal(code, 0, out);
+  assert.match(out, /updates are automatic/);
+  assert.equal(lstatSync(settings).isSymbolicLink(), true);
+  assert.equal(statSync(target).mode & 0o777, 0o600);
+  assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), {
+    theme: "dark",
+    extraKnownMarketplaces: { armoriq: { source, autoUpdate: true } },
+  });
+});
+
+test("the installer keeps auto-update off when the user turned it off", async () => {
+  const { home, env } = sandbox();
+  const settings = path.join(home, ".claude", "settings.json");
+  mkdirSync(path.dirname(settings), { recursive: true });
+  const before = JSON.stringify({
+    extraKnownMarketplaces: {
+      armoriq: { source: { source: "github", repo: "armoriq/armorClaude" }, autoUpdate: false },
+    },
+  });
+  writeFileSync(settings, before);
+  const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
+  assert.equal(code, 0, out);
+  assert.match(out, /leaving updates manual/);
+  assert.equal(readFileSync(settings, "utf8"), before);
+});
+
+test("the installer leaves updates manual when asked to", async () => {
+  const { home, env } = sandbox();
+  env.ARMORCLAUDE_NO_AUTO_UPDATE = "1";
+  const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
+  assert.equal(code, 0, out);
+  assert.equal(existsSync(path.join(home, ".claude", "settings.json")), false);
+});
+
+test("the dev installer installs armorclaude-dev, points at armoriq-dev and turns on auto-update", async () => {
+  const { home, calls, env } = sandbox();
+  const { code, out } = await run("/bin/bash", guarded(home, devInstaller), {
+    env,
+    detached: true,
+  });
+  assert.equal(code, 0, out);
+  assert.match(out, /dependencies ready/);
+  assert.match(out, /Run armoriq-dev login --product armorclaude to connect later\./);
+  assert.match(readFileSync(calls, "utf8"), /^npm HOME=\S+ install -g @armoriq\/sdk-dev@latest /m);
+  const settings = JSON.parse(readFileSync(path.join(home, ".claude", "settings.json"), "utf8"));
+  assert.equal(settings.extraKnownMarketplaces.armoriq.autoUpdate, true);
+});

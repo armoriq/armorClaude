@@ -228,14 +228,14 @@ test("/armor policy profile push without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "profiles-test-"));
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor policy profile push my-setup", config);
-  assert.ok(out.includes("armoriq-dev login --product armorclaude"));
+  assert.ok(out.includes("armoriq login --product armorclaude"));
 });
 
 test("/armor policy profile pull without apiKey returns error", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "profiles-test-"));
   const config = buildConfig(tmp);
   const out = await handleArmorPolicyCommand("/armor policy profile pull", config);
-  assert.ok(out.includes("armoriq-dev login --product armorclaude"));
+  assert.ok(out.includes("armoriq login --product armorclaude"));
 });
 
 test("round-trip: save custom → switch to template → switch back to custom", async () => {

@@ -1,4 +1,4 @@
-import armoriqSdk from "@armoriq/sdk-dev";
+import armoriqSdk from "@armoriq/sdk";
 import { newUsageCalls } from "./obs-usage-calls.mjs";
 
 const { MAX_BATCH_BYTES, MAX_BATCH_ENTRIES, MAX_BATCH_SNAPSHOTS, usageCallRecords } = armoriqSdk;

@@ -37,7 +37,7 @@ test("isObsEnabled reflects config flag", () => {
   assert.equal(isObsEnabled(undefined), false);
 });
 
-import armoriqSdk from "@armoriq/sdk-dev";
+import armoriqSdk from "@armoriq/sdk";
 import {
   observeHook,
   obsServeAsDaemon,

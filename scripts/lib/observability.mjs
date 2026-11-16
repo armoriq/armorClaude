@@ -1,6 +1,6 @@
 // Every process that records a session ships its own copy of the session's
 // root span; the backend merges copies that share a span id.
-import armoriqSdk from "@armoriq/sdk-dev";
+import armoriqSdk from "@armoriq/sdk";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";

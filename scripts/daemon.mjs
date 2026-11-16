@@ -1,33 +1,6 @@
 #!/usr/bin/env node
-/**
- * armorclaude-daemon — Phase 4 Tier B
- *
- * Long-running Node process listening on a Unix domain socket. Hooks become
- * thin clients (scripts/lib/daemon-client.mjs) that send a JSON line per
- * event and read the decision back. This eliminates the per-hook fresh-node
- * spawn (~80-150 ms) and the per-hook SDK init (~50 ms), and lets us own
- * the audit-batch lifecycle without forcing the hook to wait on HTTP.
- *
- * Protocol (newline-delimited JSON over the socket):
- *   client → daemon:  {"type":"hook","event":"PreToolUse","input":{...},"reqId":"…"}
- *   daemon → client:  {"reqId":"…","output":<hook output JSON or null>}
- *   client → daemon:  {"type":"audit_enqueue","dto":{…},"reqId":"…"}     (fire and forget; no reply)
- *   client → daemon:  {"type":"ping","reqId":"…"}
- *   daemon → client:  {"reqId":"…","ok":true,"version":"…","uptime":…}
- *   client → daemon:  {"type":"shutdown","reqId":"…"}
- *
- * Concurrency: every connection runs handlers concurrently; runtime-state
- * persistence is serialized through a per-session promise chain so atomic
- * read-modify-write semantics hold across simultaneous hooks.
- *
- * Lifecycle: PID file at ${dataDir}/daemon.pid claims ownership at startup;
- * exits if another daemon is already running. Idle-exits after 30 minutes
- * of no requests so we don't leak processes when Claude Code closes.
- *
- * Crash mode: if any handler throws, daemon logs to stderr and continues
- * serving other connections. Persistent state (runtime-state.json, audit
- * buffer) is flushed to disk before exit on SIGTERM/SIGINT.
- */
+// Handlers run concurrently; runtime-state writes are serialized per session,
+// or simultaneous hooks lose each other's read-modify-write updates.
 
 import { createServer } from "node:net";
 import { readFileSync, readdirSync, rmSync, unlinkSync, existsSync, chmodSync } from "node:fs";
@@ -72,7 +45,6 @@ const socketPath = daemonSocketPath(config.dataDir);
 prepareDaemonSocketDir(socketPath);
 const pidPath = path.join(config.dataDir, "daemon.pid");
 
-// ---- PID file: claim ownership or refuse to start ------------------------
 function claimPid() {
   if (existsSync(pidPath)) {
     try {
@@ -99,7 +71,6 @@ function claimPid() {
   writePrivateFileSync(pidPath, String(process.pid));
 }
 
-// ---- Socket cleanup ------------------------------------------------------
 function cleanupSocket() {
   try {
     if (existsSync(socketPath)) unlinkSync(socketPath);
@@ -150,7 +121,6 @@ function effectiveConfigFor(configEnv) {
   return merged;
 }
 
-// ---- Per-session serialization ------------------------------------------
 // All hooks for the same session_id execute in order, even if they arrive
 // concurrently from multiple connections, so runtime-state.json read/write
 // stays atomic. Different sessions run independently (in parallel).
@@ -255,7 +225,6 @@ const auditTimer = setInterval(() => {
 }, AUDIT_FLUSH_INTERVAL_MS);
 auditTimer.unref();
 
-// ---- Hook dispatch -------------------------------------------------------
 // `cfg` is the per-request effective config snapshot (see effectiveConfigFor)
 // so enforcement + audit gating never read a module-global that a concurrent
 // session mutated between enqueue and execution.
@@ -289,12 +258,10 @@ async function dispatchHook(event, input, cfg) {
   }
 }
 
-// ---- Token usage sync ----------------------------------------------------
 function syncUsageAfter(event, cfg, input) {
   if (event === "Stop") launchLiveUsage(cfg, input);
 }
 
-// ---- Idle timeout --------------------------------------------------------
 let lastActivity = Date.now();
 const idleTimer = setInterval(() => {
   try {
@@ -317,7 +284,6 @@ function bumpActivity() {
   lastActivity = Date.now();
 }
 
-// ---- Server -------------------------------------------------------------
 const server = createServer((socket) => {
   let buf = "";
   socket.on("data", (chunk) => {
@@ -430,7 +396,6 @@ server.listen(socketPath, () => {
   );
 });
 
-// ---- Shutdown handlers ---------------------------------------------------
 let stopping = null;
 function shutdown(code) {
   stopping ??= stopAndExit(code);
@@ -448,12 +413,7 @@ async function stopAndExit(code) {
 
 process.on("SIGTERM", () => shutdown(0));
 process.on("SIGINT", () => shutdown(0));
-// SIGHUP — operator signals "config / creds changed, reload yourself".
-// Re-reads the login profile via loadConfig().
-// The engine's invalidateTokenOnKeyChange detects per-session token drift
-// independently, so this signal is rarely needed — but it's the right
-// idiomatic knob for ops who want to force a reload without restarting
-// the daemon.
+// SIGHUP re-reads the login profile without restarting the daemon.
 process.on("SIGHUP", () => {
   try {
     const fresh = loadConfig();

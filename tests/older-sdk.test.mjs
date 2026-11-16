@@ -24,14 +24,14 @@ async function pluginWithOlderSdk() {
   });
   await cp(path.join(repoRoot, "package.json"), path.join(root, "package.json"));
   const modules = path.join(repoRoot, "node_modules");
-  await mkdir(path.join(root, "node_modules", "@armoriq", "sdk-dev"), { recursive: true });
+  await mkdir(path.join(root, "node_modules", "@armoriq", "sdk"), { recursive: true });
   for (const name of await readdir(modules)) {
     if (name === "@armoriq") continue;
     await symlink(path.join(modules, name), path.join(root, "node_modules", name));
   }
-  const realSdk = path.join(modules, "@armoriq", "sdk-dev");
+  const realSdk = path.join(modules, "@armoriq", "sdk");
   const pkg = JSON.parse(await readFile(path.join(realSdk, "package.json"), "utf8"));
-  const stub = path.join(root, "node_modules", "@armoriq", "sdk-dev");
+  const stub = path.join(root, "node_modules", "@armoriq", "sdk");
   await writeFile(path.join(stub, "package.json"), JSON.stringify({ ...pkg, main: "older.cjs" }));
   await writeFile(
     path.join(stub, "older.cjs"),

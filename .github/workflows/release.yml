@@ -46,7 +46,7 @@ jobs:
       - name: Read the version
         id: version
         run: |
-          version=$(node -p "require('./.claude-plugin/plugin.json').version")
+          version=$(node -p "require('./package.json').version")
           if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
             echo "::error::v$version is already tagged"
             exit 1
