@@ -39,9 +39,12 @@ export async function startBackend(routes = {}) {
         res.end(JSON.stringify({ written: body.rows.length, failures: [] }));
         return;
       }
-      const handler = routes[route] ?? routes[`${req.method} ${req.url.split("?")[0]}`];
+      const key = [route, `${req.method} ${req.url.split("?")[0]}`].find((k) =>
+        Object.hasOwn(routes, k)
+      );
+      const handler = key === undefined ? undefined : routes[key];
       const [status, reply] =
-        handler?.(body, req) ??
+        (typeof handler === "function" ? handler(body, req) : undefined) ??
         (route.startsWith("GET /policy/bundles/current")
           ? [200, { orgId: "org-test", agents: [] }]
           : [404, {}]);

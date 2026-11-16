@@ -100,18 +100,9 @@ function normalizeArmoriqEnv(value) {
 }
 
 /**
- * armorClaude config — main branch (production).
- *
- *   API key and org         → the armorclaude profile `armoriq login` saved
- *                             for this backend, nothing else
- *   userConfig (plugin UI)  → default_template, disable_observability
- *   env vars                → paths + debug
- *   everything else         → hardcoded to the tested-good default
- *
- * ARMORIQ_ENV (unset: staging for the armorclaude-dev plugin, else production):
- *   production/prod -> api.armoriq.ai + iap.armoriq.ai
- *   staging/stage -> staging-api.armoriq.ai + iap-staging.armoriq.ai
- *   development/local/test -> local URLs, overridable for local stacks only
+ * The key and org come only from the armorclaude profile `armoriq login` saved for
+ * the backend. ARMORIQ_ENV picks the backend: production/prod, staging/stage, or
+ * development/local/test; unset, armorclaude-dev uses staging and armorclaude production.
  */
 export function loadConfig(env = process.env) {
   // ── Paths ──
