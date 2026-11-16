@@ -31,3 +31,28 @@ jobs:
 
       - name: Test
         run: npm test
+
+  # Claude Code updates an installed plugin only when plugin.json's version
+  # changes, so code merged to main without a bump reaches no existing install.
+  version-bump:
+    if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Changed plugin code carries a higher plugin version
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          shipped="$(git diff --name-only "$BASE"...HEAD -- .claude-plugin hooks scripts commands .mcp.json package.json package-lock.json)"
+          if [ -z "$shipped" ]; then echo "no plugin code changed"; exit 0; fi
+          base="$(git show "$BASE:.claude-plugin/plugin.json" | jq -r .version)"
+          head="$(jq -r .version .claude-plugin/plugin.json)"
+          newest="$(printf '%s\n%s\n' "$base" "$head" | sort -V | tail -1)"
+          if [ "$head" = "$base" ] || [ "$newest" != "$head" ]; then
+            echo "::error::plugin code changed but plugin.json stays at $head (main has $base). Bump the version in plugin.json, package.json, package-lock.json and marketplace.json so installs update."
+            exit 1
+          fi
+          echo "version $base -> $head"
