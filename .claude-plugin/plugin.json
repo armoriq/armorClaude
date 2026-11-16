@@ -24,6 +24,16 @@
       "type": "boolean",
       "title": "Disable observability",
       "description": "Observability (execution traces sent to your ArmorIQ dashboard) is enabled by default. Set to true to turn it off."
+    },
+    "disable_signin_reminder": {
+      "type": "boolean",
+      "title": "Disable the daily sign in reminder",
+      "description": "Set to true to hide the daily reminder to sign in to ArmorIQ. You can also set ARMORIQ_SIGNIN_REMINDER_DISABLED=1."
+    },
+    "disable_usage_ping": {
+      "type": "boolean",
+      "title": "Disable the anonymous daily usage ping",
+      "description": "Set to true to turn off the anonymous daily usage ping (a random install id, plugin and host versions, OS, signed in status, and daily counts of plans and blocks). You can also set ARMORIQ_USAGE_PING_DISABLED=1 or DO_NOT_TRACK=1."
     }
   }
 }

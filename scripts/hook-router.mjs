@@ -12,6 +12,8 @@ import {
 } from "./lib/engine.mjs";
 import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 import { observeHook, obsFlush } from "./lib/observability.mjs";
+import { launchReach } from "./lib/reach.mjs";
+import { withReloginNotice } from "./lib/relogin.mjs";
 
 async function readStdin() {
   const chunks = [];
@@ -52,6 +54,7 @@ async function main() {
   }
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   debugLog(config, `hook=${event}`);
+  launchReach(event, input, config);
 
   // Phase 4 Tier B: try the daemon first if enabled. The daemon dispatches
   // exactly the same handlers in-process (long-lived) and replies with the
@@ -60,7 +63,12 @@ async function main() {
   // because of daemon trouble.
   if (config.daemonEnabled) {
     try {
-      const output = await dispatchViaDaemon({ event, input, config });
+      const output = await withReloginNotice(
+        event,
+        input,
+        config,
+        await dispatchViaDaemon({ event, input, config })
+      );
       if (output) emitJson(output);
       return;
     } catch (err) {
@@ -101,6 +109,7 @@ async function main() {
       return;
   }
 
+  output = await withReloginNotice(event, input, config, output);
   if (output) {
     emitJson(output);
   }

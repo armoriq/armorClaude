@@ -1,3 +1,4 @@
 node_modules
 dist
 *.md
+tests/fixtures/install-ping-v1.json
