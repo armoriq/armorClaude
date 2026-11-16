@@ -39,12 +39,10 @@ export async function startBackend(routes = {}) {
         res.end(JSON.stringify({ written: body.rows.length, failures: [] }));
         return;
       }
-      const key = [route, `${req.method} ${req.url.split("?")[0]}`].find((k) =>
-        Object.hasOwn(routes, k)
-      );
-      const handler = key === undefined ? undefined : routes[key];
+      const handlers = new Map(Object.entries(routes));
+      const handler = handlers.get(route) ?? handlers.get(`${req.method} ${req.url.split("?")[0]}`);
       const [status, reply] =
-        (typeof handler === "function" ? handler(body, req) : undefined) ??
+        handler?.(body, req) ??
         (route.startsWith("GET /policy/bundles/current")
           ? [200, { orgId: "org-test", agents: [] }]
           : [404, {}]);
