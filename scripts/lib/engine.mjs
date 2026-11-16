@@ -60,6 +60,7 @@ import { invokesPolicyAdmin, writesProtectedPath } from "./shell-guard.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { decideV2, resolveV2Hold } from "./v2-decision.mjs";
+import { dropWouldBe, rememberWouldBe, takeWouldBe } from "./org-mode.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
 import { selfUpdateOnHook, withNotice } from "./self-update.mjs";
@@ -387,6 +388,17 @@ async function emitAudit({ dto: row, config, iapService }) {
   return "sent (http)";
 }
 
+/** Wire fields conmap-auto reads at audit ingest. */
+function withWouldBe(dto, wouldBe) {
+  if (!wouldBe) return dto;
+  return {
+    ...dto,
+    would_be: wouldBe.action,
+    would_be_code: wouldBe.code ?? null,
+    would_be_reason: redactSecrets(String(wouldBe.reason ?? "")).slice(0, 1000),
+  };
+}
+
 function auditLink(config, sessionId, intentTokenRaw) {
   let planId;
   try {
@@ -541,6 +553,8 @@ async function startSession(input, config) {
   // interactive installer/onboarding. ---
   if (config.unconfigured) return notConnectedStart(config, loginNoticeDue);
 
+  if (config.orgMonitor) return null;
+
   // --- First-run onboarding: if no policy.json, show template picker ---
   const onboardingFlag = path.join(config.dataDir, "onboarding-shown");
   let onboardingMsg = "";
@@ -694,7 +708,18 @@ async function promptSubmit(input, config) {
 
 export async function handlePreToolUse(input, config) {
   const output = await decidePreToolUse(input, config);
-  if (output?.hookSpecificOutput?.permissionDecision === "deny") {
+  const decision = output?.hookSpecificOutput?.permissionDecision;
+  if (config.orgMonitor) {
+    if (decision === "deny" || decision === "ask") {
+      await rememberWouldBe(config.dataDir, input, {
+        action: decision === "deny" ? "block" : "hold",
+        code: output[DECISION_CODE],
+        reason: output.hookSpecificOutput.permissionDecisionReason,
+      }).catch((err) => debugLog(config, `would-be record failed: ${err?.message ?? err}`));
+    }
+    return null;
+  }
+  if (decision === "deny") {
     await auditBlocked(input, withBackendPosture(config), output[DECISION_CODE]);
   }
   return output;
@@ -1374,6 +1399,7 @@ async function decidePreToolUse(input, config) {
   // --- Record tool for discovery ---
   upsertDiscoveredTool(runtimeState, toolName);
   await saveRuntimeState(config.runtimeFile, runtimeState);
+  if (v2?.action === "hold" && config.orgMonitor) return askPreTool("policy_v2_hold", v2.reason);
   if (v2?.action === "hold") {
     const v2Session = getSession(runtimeState, sessionId) || {};
     const held = await resolveV2Hold(config, {
@@ -1499,6 +1525,7 @@ export async function handlePostToolUse(input, config) {
 
     const intentTokenRaw = session.intentTokenRaw || "";
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
+    const wouldBe = config.orgMonitor ? await takeWouldBe(config.dataDir, input) : null;
 
     let dto;
     if (intentTokenRaw) {
@@ -1518,7 +1545,7 @@ export async function handlePostToolUse(input, config) {
       // Frictionless policies mint no token but must still audit, as an orphan
       // session-scoped row. In enforce mode never fabricate a token context.
       const policyState = await loadPolicyState(config.policyFile);
-      if (!isFrictionlessAllowPolicy(policyState.policy)) return null;
+      if (!config.orgMonitor && !isFrictionlessAllowPolicy(policyState.policy)) return null;
       dto = {
         session_id: sessionId,
         user_id: config.userId,
@@ -1535,7 +1562,7 @@ export async function handlePostToolUse(input, config) {
       };
     }
 
-    const target = await emitAudit({ dto, config, iapService });
+    const target = await emitAudit({ dto: withWouldBe(dto, wouldBe), config, iapService });
     debugLog(config, `audit log ${target} for ${toolName}`);
   } catch (error) {
     // Audit is best-effort — don't block
@@ -1562,11 +1589,12 @@ export async function handlePostToolUseFailure(input, config) {
     const iapService = createIapService(config);
 
     const intentTokenRaw = session.intentTokenRaw || "";
-    if (!intentTokenRaw) return null;
+    const wouldBe = config.orgMonitor ? await takeWouldBe(config.dataDir, input) : null;
+    if (!intentTokenRaw && !config.orgMonitor) return null;
 
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
     const used = auditedSteps(session, intentTokenRaw);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs, 0, used);
+    const stepIdx = intentTokenRaw ? pickStepIndex(session.plan, toolName, inputs, 0, used) : -1;
     const dto = {
       ...auditLink(config, sessionId, intentTokenRaw),
       step_index: stepIdx,
@@ -1580,7 +1608,7 @@ export async function handlePostToolUseFailure(input, config) {
       duration_ms: _computeToolDuration(input),
     };
 
-    const target = await emitAudit({ dto, config, iapService });
+    const target = await emitAudit({ dto: withWouldBe(dto, wouldBe), config, iapService });
     debugLog(config, `audit log (failure) ${target} for ${toolName}`);
   } catch (error) {
     debugLog(config, `audit log (failure) failed: ${error}`);
@@ -1655,6 +1683,7 @@ export async function handleStop(input, config) {
 export async function handleSessionEnd(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
+  await dropWouldBe(config.dataDir, sessionId).catch(() => {});
 
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   const session = runtimeState.sessions ? runtimeState.sessions[sessionId] : undefined;

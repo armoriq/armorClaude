@@ -75,6 +75,7 @@ export async function startHookSession(t, backend, extraEnv = {}) {
     HOME: home,
     CLAUDE_PLUGIN_DATA: dataDir,
     ARMORIQ_ENV: "local",
+    ARMORIQ_ORG_MODE: "enforce",
     ARMORIQ_BACKEND_URL: backend.url,
     ARMORIQ_CSRG_URL: backend.url,
     ...(process.env.NODE_OPTIONS ? { NODE_OPTIONS: process.env.NODE_OPTIONS } : {}),

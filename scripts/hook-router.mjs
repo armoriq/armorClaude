@@ -71,7 +71,7 @@ async function main() {
   try {
     input = JSON.parse(rawInput);
   } catch {
-    if (config.mode === "enforce") {
+    if (config.mode === "enforce" && !config.orgMonitor) {
       emitJson(denyPreTool("invalid_payload", "ArmorClaude hook payload invalid JSON"));
     }
     return;
@@ -107,7 +107,7 @@ main().catch((error) => {
   let debug = false;
   try {
     const config = loadConfig();
-    mode = config.mode;
+    mode = config.orgMonitor ? "monitor" : config.mode;
     debug = config.debug;
   } catch {
     // loadConfig itself threw (e.g. malformed credentials file). Stay

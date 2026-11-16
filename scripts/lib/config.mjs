@@ -5,6 +5,7 @@ import path from "node:path";
 import { claudeConfigDir } from "./claude-paths.mjs";
 import { parseBoolean } from "./common.mjs";
 import { signedOut } from "./backend-posture.mjs";
+import { orgMonitorFor } from "./org-mode.mjs";
 import { sdkModule } from "./sdk.mjs";
 
 const PRODUCT = "armorclaude";
@@ -76,16 +77,18 @@ export const REQUEST_CONFIG_KEYS = [
   "csrgVerifyEnabled",
   "cryptoPolicyEnabled",
   "signedOut",
+  "orgMonitor",
 ];
 
 const USABLE_KEY = /^ak_(test|live|claw)_/;
 
-export function loginEnforcement(apiKey, localMock) {
+export function loginEnforcement(apiKey, localMock, orgMonitor = false) {
   const connected = localMock || USABLE_KEY.test(apiKey);
   return {
     mode: connected ? "enforce" : "monitor",
-    intentRequired: connected,
+    intentRequired: connected && !orgMonitor,
     unconfigured: !connected,
+    orgMonitor: connected && orgMonitor,
   };
 }
 
@@ -198,7 +201,7 @@ export function loadConfig(env = process.env) {
     auditEnabled: Boolean(effectiveApiKey),
     defaultTemplate,
 
-    ...loginEnforcement(effectiveApiKey, localMock),
+    ...loginEnforcement(effectiveApiKey, localMock, orgMonitorFor(dataDir, env)),
     hadUnusableKey,
     auditWal: true,
     autoReanchor: true,

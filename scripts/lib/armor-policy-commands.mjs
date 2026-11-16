@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isPlainObject } from "./common.mjs";
 import { loginCommand } from "./config.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
+import { saveOrgMode } from "./org-mode.mjs";
 import { loadPolicyState, savePolicyState } from "./policy.mjs";
 import { canonicalPolicyHash, normalizePolicyIr, validatePolicyIr } from "./policy-ir.mjs";
 import { getTemplate, getTemplateNames } from "./policy-templates.mjs";
@@ -2594,6 +2595,7 @@ export async function syncActivePolicyFromBackend(config) {
   const result = await pullProfilesFromBackend(config);
   if (!result.ok)
     return { ok: false, changed: false, reason: result.reason || `HTTP ${result.status}` };
+  await saveOrgMode(config.dataDir, result.mode);
 
   const active = result.profiles.find((p) => p?.policy);
   if (!active?.policy) return { ok: false, changed: false, reason: "no active org policy" };

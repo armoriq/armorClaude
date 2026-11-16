@@ -95,6 +95,7 @@ test("PreToolUse still denies when the installed SDK lacks the batch exports", a
       NODE_OPTIONS: process.env.NODE_OPTIONS ?? "",
       ARMORCLAUDE_DATA_DIR: dataDir,
       ARMORIQ_ENV: "local",
+      ARMORIQ_ORG_MODE: "enforce",
     },
   });
   let stdout = "";
