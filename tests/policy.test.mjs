@@ -61,11 +61,8 @@ function startMockServer(handler) {
   });
 }
 
-// An all-allow policy puts the plugin in frictionless mode, which disables the
-// intent gate entirely (see isFrictionlessAllowPolicy in engine.mjs). That is
-// also what a config with no policy.json falls back to, so any test exercising
-// intent enforcement has to write a policy carrying at least one non-permit
-// statement first.
+// An all-allow policy, also the default with no policy.json, disables the
+// intent gate, so intent tests need at least one non-permit statement.
 async function writeEnforcingPolicy(config) {
   await writeJson(config.policyFile, {
     version: 1,
@@ -657,9 +654,7 @@ test("handlePreToolUse denies missing intent when strict", async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { intentRequired: true });
   await writeEnforcingPolicy(config);
-  // Use Edit (mutating, NOT in the Phase 4 A1 read-only fast-path) so the
-  // full intent-required pipeline runs. Read/Grep/Glob/WebSearch/etc are
-  // intentionally fast-pathed and bypass this check by design.
+  // Read-only tools skip the intent check, so this needs a mutating tool.
   const output = await handlePreToolUse(
     {
       hook_event_name: "PreToolUse",

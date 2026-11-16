@@ -16,21 +16,8 @@ export const denyPreTool = (code, reason) => preToolDecision(code, "deny", reaso
 export const askPreTool = (code, reason) => preToolDecision(code, "ask", reason);
 
 /**
- * Phase 4 A3: actionable deny output.
- *
- * When a tool is blocked by drift / missing plan / missing token, return a
- * deny that *also* tells the LLM the exact JSON to call register_intent_plan
- * with. Claude reads `permissionDecisionReason` and can self-correct in 1
- * follow-up turn instead of 3 (deny → re-prompt user → re-prompt for the
- * right format → finally register).
- *
- * @param {string} code              the rule or check that denied the call
- * @param {string} reason            free-form explanation
- * @param {object} args
- * @param {string} args.toolName     the tool that was blocked (will end up in the suggested plan)
- * @param {object} [args.toolInput]  the exact arguments — will be embedded as the step's arguments
- * @param {string} [args.goal]       inferred goal from session.lastPrompt or the tool name
- * @param {object} [args.knownPlan]  the currently-cached plan (if any) — we'll suggest extending it
+ * A deny that also gives the model the exact register_intent_plan JSON, read from
+ * permissionDecisionReason, so it can correct itself in one turn.
  */
 export function denyPreToolWithHint(code, reason, args = {}) {
   const { toolName = "Tool", toolInput, goal, knownPlan } = args;

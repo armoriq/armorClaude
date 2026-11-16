@@ -1,17 +1,3 @@
-/**
- * Phase 4 Tier B — daemon socket client.
- *
- * Used by hook-router.mjs as a fast path: connect to the local daemon over
- * Unix socket, send the hook event as one JSON line, await one JSON line of
- * response. Falls back to in-process handling on any error so the plugin
- * never breaks if the daemon is missing/broken.
- *
- * Round-trip target: <5 ms p50, <20 ms p95 (vs 30-350 ms in-process).
- *
- * Audit DTOs go via fire-and-forget audit_enqueue messages — daemon batches
- * and flushes asynchronously, hook process exits immediately.
- */
-
 import { assertTrustedSocketPath, daemonSocketPath } from "./daemon-socket.mjs";
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
@@ -209,18 +195,7 @@ function exchange(sock, payload) {
   });
 }
 
-/**
- * Public entry: dispatch a hook event through the daemon.
- *
- * @param {object} args
- * @param {string} args.event           hook_event_name
- * @param {object} args.input           full hook payload (matches handler signature)
- * @param {object} args.config          loaded config (for socket path resolution)
- * @returns {Promise<object|null>}      hook output JSON, or null
- *
- * Throws if the daemon is unreachable. Caller (hook-router.mjs) is expected
- * to fall back to in-process dispatch on throw.
- */
+// Throws if the daemon is unreachable; the caller falls back to in-process dispatch.
 export async function dispatchViaDaemon({ event, input, config }) {
   const socketPath = daemonSocketPath(config.dataDir);
   const debug = !!config?.debug;
