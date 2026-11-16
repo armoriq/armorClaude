@@ -83,65 +83,37 @@ check_node_version() {
 # Plugin install
 # ---------------------------------------------------------------------------
 
-# Claude Code auto-updates a plugin only when its marketplace entry says so, and
-# a third-party marketplace defaults to false, so a published fix otherwise
-# reaches nobody until each user runs `claude plugin update` by hand. There is no
-# CLI flag for it, so the settings entry is written here. Exit 2 means it was
-# already on. Set ARMORCLAUDE_NO_AUTO_UPDATE=1 to keep updates manual.
+# A third-party marketplace defaults to no auto-update and the CLI has no flag
+# for it, so without this entry a release reaches nobody.
 enable_auto_update() {
   if [[ "${ARMORCLAUDE_NO_AUTO_UPDATE:-}" == "1" ]]; then
     info "leaving updates manual (ARMORCLAUDE_NO_AUTO_UPDATE=1)"
     return 0
   fi
 
-  local settings="${HOME}/.claude/settings.json"
   local status=0
-  if command -v node >/dev/null 2>&1; then
-    ARMORIQ_SETTINGS="${settings}" ARMORIQ_MARKETPLACE_REPO="${MARKETPLACE_REPO}" node -e '
-      const fs = require("fs");
-      const path = require("path");
-      const file = process.env.ARMORIQ_SETTINGS;
-      const settings = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
-      const places = (settings.extraKnownMarketplaces ??= {});
-      const armoriq = (places.armoriq ??= {
-        source: { source: "github", repo: process.env.ARMORIQ_MARKETPLACE_REPO },
-      });
-      if (armoriq.autoUpdate === true) process.exit(2);
-      armoriq.autoUpdate = true;
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      const temporary = `${file}.armoriq.tmp`;
-      fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`);
-      fs.renameSync(temporary, file);
-    ' 2>/dev/null || status=$?
-  elif command -v python3 >/dev/null 2>&1; then
-    ARMORIQ_SETTINGS="${settings}" ARMORIQ_MARKETPLACE_REPO="${MARKETPLACE_REPO}" python3 -c '
-import json, os, sys
-file = os.environ["ARMORIQ_SETTINGS"]
-settings = {}
-if os.path.exists(file):
-    with open(file) as handle:
-        settings = json.load(handle)
-places = settings.setdefault("extraKnownMarketplaces", {})
-armoriq = places.setdefault(
-    "armoriq",
-    {"source": {"source": "github", "repo": os.environ["ARMORIQ_MARKETPLACE_REPO"]}},
-)
-if armoriq.get("autoUpdate") is True:
-    sys.exit(2)
-armoriq["autoUpdate"] = True
-os.makedirs(os.path.dirname(file), exist_ok=True)
-temporary = file + ".armoriq.tmp"
-with open(temporary, "w") as handle:
-    json.dump(settings, handle, indent=2)
-    handle.write("\n")
-os.replace(temporary, file)
-' 2>/dev/null || status=$?
-  else
-    status=127
-  fi
+  ARMORIQ_CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}" ARMORIQ_MARKETPLACE_REPO="${MARKETPLACE_REPO}" node -e '
+    const fs = require("fs");
+    const path = require("path");
+    const dir = process.env.ARMORIQ_CLAUDE_DIR;
+    const file = path.join(dir, "settings.json");
+    const read = (f) => (fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {});
+    const settings = read(file);
+    const places = (settings.extraKnownMarketplaces ??= {});
+    const added = read(path.join(dir, "plugins", "known_marketplaces.json")).armoriq?.source;
+    const armoriq = (places.armoriq ??= {
+      source: added ?? { source: "github", repo: process.env.ARMORIQ_MARKETPLACE_REPO },
+    });
+    if (armoriq.autoUpdate === true) process.exit(2);
+    armoriq.autoUpdate = true;
+    fs.mkdirSync(dir, { recursive: true });
+    const temporary = `${file}.armoriq.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`);
+    fs.renameSync(temporary, file);
+  ' 2>/dev/null || status=$?
 
   case "${status}" in
-    0) ok "updates are automatic (new versions install at your next session)" ;;
+    0) ok "updates are automatic (new versions install during your next session)" ;;
     2) ok "updates are already automatic" ;;
     *) warn "couldn't turn on automatic updates; run ${B}claude plugin update ${PLUGIN_REF}${N} to update" ;;
   esac
@@ -168,7 +140,7 @@ install_plugin() {
   # "Failed to connect — MCP error -32000: Connection closed".
   info "preparing plugin dependencies"
   local plugin_dir
-  plugin_dir="$(ls -d "${HOME}"/.claude/plugins/cache/armoriq/armorclaude/*/ 2>/dev/null | sort -V | tail -1)"
+  plugin_dir="$(ls -d "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"/plugins/cache/armoriq/armorclaude/*/ 2>/dev/null | sort -V | tail -1)"
   if [[ -n "${plugin_dir}" && -f "${plugin_dir}scripts/bootstrap.mjs" ]]; then
     if node "${plugin_dir}scripts/bootstrap.mjs" warm >/dev/null 2>&1; then
       ok "dependencies ready"
