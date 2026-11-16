@@ -35,7 +35,7 @@ jobs:
   # Claude Code updates an installed plugin only when plugin.json's version
   # changes, so code merged to main without a bump reaches no existing install.
   version-bump:
-    if: github.event_name == 'pull_request' && github.base_ref == 'main' && github.actor != 'dependabot[bot]'
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +50,10 @@ jobs:
           if [ -z "$shipped" ]; then echo "no plugin code changed"; exit 0; fi
           base="$(git show "$BASE:.claude-plugin/plugin.json" | jq -r .version)"
           head="$(jq -r .version .claude-plugin/plugin.json)"
+          if ! printf '%s' "$head" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::plugin.json version must be MAJOR.MINOR.PATCH, got '$head'"
+            exit 1
+          fi
           newest="$(printf '%s\n%s\n' "$base" "$head" | sort -V | tail -1)"
           if [ "$head" = "$base" ] || [ "$newest" != "$head" ]; then
             echo "::error::plugin code changed but plugin.json stays at $head (main has $base). Run npm run release:version <next> so installs update."
