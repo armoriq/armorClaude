@@ -29,17 +29,18 @@ test("MCP server is launched via an absolute plugin-root path", async () => {
   assert.equal(entry, "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.mjs");
 });
 
-// A fix that ships without a version bump never reaches existing installs:
-// `claude plugin update` compares versions and reports "already at the latest
-// version", leaving users pinned to the old commit.
-test("plugin version is consistent across every manifest", async () => {
+// Claude Code takes a plugin's version from plugin.json first, then from its
+// marketplace entry, then from the commit. Stable installs update when the
+// armorclaude entry moves; the dev variant has neither, so every dev commit is
+// a new version. A version in plugin.json would freeze the dev channel.
+test("the stable version lives in the marketplace entry and package.json, not plugin.json", async () => {
   const pkg = await readJson("package.json");
   const plugin = await readJson(".claude-plugin/plugin.json");
   const marketplace = await readJson(".claude-plugin/marketplace.json");
   const entry = marketplace.plugins.find((p) => p.name === "armorclaude");
 
   assert.ok(entry, "armorclaude must be listed in marketplace.json");
-  assert.equal(plugin.version, pkg.version, "plugin.json version must match package.json");
+  assert.equal(plugin.version, undefined, "plugin.json must not set a version");
   assert.equal(entry.version, pkg.version, "marketplace.json version must match package.json");
 });
 
@@ -58,6 +59,6 @@ test("dev variant stays discoverable from the published catalog", async () => {
   assert.equal(
     entry.version,
     undefined,
-    "dev variant must not pin a version; plugin.json on the dev branch is the only one"
+    "dev variant must not pin a version, so Claude Code versions it by dev's commit"
   );
 });

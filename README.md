@@ -74,7 +74,8 @@ node scripts/bootstrap.mjs mcp
 
 The installer turns on auto-update for the `armoriq` marketplace, so Claude Code installs each new
 release by itself during your next session (`Plugin updated ... Run /reload-plugins to apply`).
-Claude Code picks up a release only when the plugin version changes. If you installed another way,
+The stable plugin moves when its version in `marketplace.json` changes; `armorclaude-dev` moves with
+every commit on `dev`. If you installed another way,
 ArmorClaude tells you once at session start; turn it on in `/plugin`, Marketplaces, `armoriq`,
 Enable auto-update. Set `ARMORCLAUDE_NO_AUTO_UPDATE=1` before installing to keep updates manual.
 

@@ -12,7 +12,7 @@ const DEV_PLUGIN_DATA = `${PRODUCT}-dev-armoriq`;
 const STAGING_BACKEND = "https://staging-api.armoriq.ai";
 // The dev installer signs in to staging with the armoriq-dev CLI from @armoriq/sdk-dev.
 const DEV_CLI = "armoriq-dev";
-const PLUGIN_VERSION = createRequire(import.meta.url)("../../.claude-plugin/plugin.json").version;
+const PLUGIN_VERSION = createRequire(import.meta.url)("../../package.json").version;
 
 function clientIdentity(dataDir) {
   const product = path.basename(dataDir) === DEV_PLUGIN_DATA ? `${PRODUCT}-dev` : PRODUCT;

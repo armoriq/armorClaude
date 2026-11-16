@@ -1,6 +1,6 @@
 # Changelog
 
-Changes to the ArmorClaude plugin, newest first. An install picks up code only when the plugin version changes, so each pull request is listed under the first version that shipped it. Versions 0.2.3 to 0.2.9 shipped on the stable channel (`armorclaude`, from `main`); 0.2.9 to 0.2.19 on the dev channel (`armorclaude-dev`, from `dev`).
+Changes to the ArmorClaude plugin, newest first. A stable install picks up code only when the `armorclaude` version in `marketplace.json` changes, so each pull request is listed under the first version that shipped it. From 0.2.20 the dev channel updates on every commit to `dev`. Versions 0.2.3 to 0.2.9 shipped on the stable channel (`armorclaude`, from `main`); 0.2.9 to 0.2.19 on the dev channel (`armorclaude-dev`, from `dev`).
 
 ## [Unreleased]
 

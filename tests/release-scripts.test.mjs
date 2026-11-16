@@ -45,9 +45,7 @@ function copyRepo(changelog = CHANGELOG) {
 const run = (script, args, cwd) =>
   spawnSync(process.execPath, [script, ...args], { cwd, encoding: "utf8" });
 const json = (dir, file) => JSON.parse(readFileSync(path.join(dir, file), "utf8"));
-const current = JSON.parse(
-  readFileSync(path.join(repo, ".claude-plugin/plugin.json"), "utf8")
-).version;
+const current = JSON.parse(readFileSync(path.join(repo, "package.json"), "utf8")).version;
 
 function changedLines(dir, file) {
   const before = readFileSync(path.join(repo, file), "utf8").split("\n");
@@ -56,14 +54,14 @@ function changedLines(dir, file) {
   return after.filter((line, i) => line !== before[i]);
 }
 
-test("release:version sets the version in all five places and nowhere else", () => {
+test("release:version sets the version in all four places and leaves plugin.json alone", () => {
   const dir = copyRepo();
   const res = run(versionScript, ["0.3.0", "--date", "2026-10-13"], dir);
   assert.equal(res.status, 0, res.stderr);
   assert.equal(json(dir, "package.json").version, "0.3.0");
   assert.equal(json(dir, "package-lock.json").version, "0.3.0");
   assert.equal(json(dir, "package-lock.json").packages[""].version, "0.3.0");
-  assert.equal(json(dir, ".claude-plugin/plugin.json").version, "0.3.0");
+  assert.equal(json(dir, ".claude-plugin/plugin.json").version, undefined);
   const market = json(dir, ".claude-plugin/marketplace.json");
   assert.equal(market.plugins.find((p) => p.name === "armorclaude").version, "0.3.0");
   assert.equal(market.plugins.find((p) => p.name === "armorclaude-dev").version, undefined);
@@ -76,7 +74,7 @@ test("release:version sets the version in all five places and nowhere else", () 
     '  "version": "0.3.0",',
     '      "version": "0.3.0",',
   ]);
-  assert.deepEqual(changedLines(dir, ".claude-plugin/plugin.json"), ['  "version": "0.3.0",']);
+  assert.deepEqual(changedLines(dir, ".claude-plugin/plugin.json"), []);
   assert.deepEqual(changedLines(dir, ".claude-plugin/marketplace.json"), [
     '      "version": "0.3.0",',
   ]);
@@ -110,17 +108,27 @@ test("release:version refuses a bad version, a version already in the CHANGELOG,
   assert.match(res.stderr, /Unreleased/);
 });
 
-test("--check passes when all five fields agree and names the file that does not", () => {
+test("--check passes when all four fields agree and names the file that does not", () => {
   const dir = copyRepo();
   assert.equal(run(versionScript, ["--check", current], dir).status, 0);
-  const plugin = path.join(dir, ".claude-plugin/plugin.json");
+  const market = path.join(dir, ".claude-plugin/marketplace.json");
   writeFileSync(
-    plugin,
-    readFileSync(plugin, "utf8").replace(`"version": "${current}"`, '"version": "9.9.9"')
+    market,
+    readFileSync(market, "utf8").replace(`"version": "${current}"`, '"version": "9.9.9"')
   );
   const res = run(versionScript, ["--check", current], dir);
   assert.notEqual(res.status, 0);
-  assert.match(res.stderr, /\.claude-plugin\/plugin\.json/);
+  assert.match(res.stderr, /\.claude-plugin\/marketplace\.json/);
+});
+
+test("--check fails when plugin.json sets a version", () => {
+  const dir = copyRepo();
+  const plugin = path.join(dir, ".claude-plugin/plugin.json");
+  const manifest = json(dir, ".claude-plugin/plugin.json");
+  writeFileSync(plugin, JSON.stringify({ ...manifest, version: current }, null, 2));
+  const res = run(versionScript, ["--check", current], dir);
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /plugin\.json must not set a version/);
 });
 
 test("release:notes prints one version's section and fails for a missing or empty one", () => {

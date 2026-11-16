@@ -35,8 +35,10 @@ jobs:
       - name: Test
         run: npm test
 
-  # Claude Code updates an installed plugin only when plugin.json's version
+  # Stable installs update only when the armorclaude marketplace entry's version
   # changes, so code merged to main without a bump reaches no existing install.
+  # plugin.json must not set a version: it would win over that entry and freeze
+  # the dev channel, which otherwise updates on every dev commit.
   version-bump:
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: ubuntu-latest
@@ -45,21 +47,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Changed plugin code carries a higher plugin version
+      - name: Changed plugin code carries a higher marketplace version
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
+          stable='.plugins[] | select(.name == "armorclaude") | .version'
+          if [ "$(jq -r .version .claude-plugin/plugin.json)" != null ]; then
+            echo "::error::.claude-plugin/plugin.json must not set a version; set it with npm run release:version"
+            exit 1
+          fi
           shipped="$(git diff --name-only "$BASE"...HEAD -- .claude-plugin hooks scripts commands .mcp.json package.json package-lock.json)"
           if [ -z "$shipped" ]; then echo "no plugin code changed"; exit 0; fi
-          base="$(git show "$BASE:.claude-plugin/plugin.json" | jq -r .version)"
-          head="$(jq -r .version .claude-plugin/plugin.json)"
+          base="$(git show "$BASE:.claude-plugin/marketplace.json" | jq -r "$stable")"
+          head="$(jq -r "$stable" .claude-plugin/marketplace.json)"
           if ! printf '%s' "$head" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::plugin.json version must be MAJOR.MINOR.PATCH, got '$head'"
+            echo "::error::the armorclaude marketplace version must be MAJOR.MINOR.PATCH, got '$head'"
             exit 1
           fi
           newest="$(printf '%s\n%s\n' "$base" "$head" | sort -V | tail -1)"
           if [ "$head" = "$base" ] || [ "$newest" != "$head" ]; then
-            echo "::error::plugin code changed but plugin.json stays at $head (main has $base). Run npm run release:version <next> so installs update."
+            echo "::error::plugin code changed but the armorclaude version stays at $head (main has $base). Run npm run release:version <next> so installs update."
             exit 1
           fi
           echo "version $base -> $head"
