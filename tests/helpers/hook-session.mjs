@@ -39,8 +39,10 @@ export async function startBackend(routes = {}) {
         res.end(JSON.stringify({ written: body.rows.length, failures: [] }));
         return;
       }
-      const handlers = new Map(Object.entries(routes));
-      const handler = handlers.get(route) ?? handlers.get(`${req.method} ${req.url.split("?")[0]}`);
+      const bare = `${req.method} ${req.url.split("?")[0]}`;
+      const handler =
+        Object.entries(routes).find(([name]) => name === route)?.[1] ??
+        Object.entries(routes).find(([name]) => name === bare)?.[1];
       const [status, reply] =
         handler?.(body, req) ??
         (route.startsWith("GET /policy/bundles/current")
