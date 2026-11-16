@@ -1,0 +1,62 @@
+# Every promotion merges dev into main and leaves a merge commit on main that
+# dev does not have. main then stops being an ancestor of dev, the next
+# promotion PR reads as out of date, and someone has to notice and back-merge
+# by hand. Nobody does, so dev drifts and fixes merged there reach no one.
+#
+# dev requires a pull request, so this cannot push the merge itself. It opens
+# the back-merge PR instead, which is the step that was being forgotten.
+name: Back-merge main into dev
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: back-merge
+  cancel-in-progress: false
+
+jobs:
+  back-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Open a back-merge PR when dev is missing commits from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main dev
+
+          if git merge-base --is-ancestor origin/main origin/dev; then
+            echo "::notice::main is an ancestor of dev, nothing to back-merge"
+            exit 0
+          fi
+
+          behind="$(git rev-list --count origin/dev..origin/main)"
+          echo "::warning::dev is missing $behind commit(s) from main"
+
+          open="$(gh pr list --base dev --head main --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$open" ]; then
+            echo "::notice::back-merge PR #$open is already open"
+            exit 0
+          fi
+
+          gh pr create --base dev --head main \
+            --title "Back-merge main into dev" \
+            --body "$(printf '%s\n' \
+              "dev is missing $behind commit(s) that are on main, so main is no longer an ancestor of dev." \
+              "" \
+              "Until this merges, every promotion PR from dev to main reads as out of date and has to be updated by hand." \
+              "" \
+              "Opened automatically by .github/workflows/branch-sync.yml.")"
