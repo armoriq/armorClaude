@@ -4,8 +4,10 @@ import { spawn } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -145,19 +147,41 @@ for (const configDir of [undefined, ".claude-second"]) {
 test("the installer turns on auto-update without disturbing the user's settings", async () => {
   const { home, env } = sandbox();
   const settings = path.join(home, ".claude", "settings.json");
+  const target = path.join(home, "dotfiles", "claude-settings.json");
   mkdirSync(path.dirname(settings), { recursive: true });
+  mkdirSync(path.dirname(target), { recursive: true });
   const source = { source: "git", url: "https://example.test/fork.git" };
   writeFileSync(
-    settings,
-    JSON.stringify({ theme: "dark", extraKnownMarketplaces: { armoriq: { source } } })
+    target,
+    JSON.stringify({ theme: "dark", extraKnownMarketplaces: { armoriq: { source } } }),
+    { mode: 0o600 }
   );
+  symlinkSync(target, settings);
   const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
   assert.equal(code, 0, out);
   assert.match(out, /updates are automatic/);
-  assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), {
+  assert.equal(lstatSync(settings).isSymbolicLink(), true);
+  assert.equal(statSync(target).mode & 0o777, 0o600);
+  assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), {
     theme: "dark",
     extraKnownMarketplaces: { armoriq: { source, autoUpdate: true } },
   });
+});
+
+test("the installer keeps auto-update off when the user turned it off", async () => {
+  const { home, env } = sandbox();
+  const settings = path.join(home, ".claude", "settings.json");
+  mkdirSync(path.dirname(settings), { recursive: true });
+  const before = JSON.stringify({
+    extraKnownMarketplaces: {
+      armoriq: { source: { source: "github", repo: "armoriq/armorClaude" }, autoUpdate: false },
+    },
+  });
+  writeFileSync(settings, before);
+  const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
+  assert.equal(code, 0, out);
+  assert.match(out, /leaving updates manual/);
+  assert.equal(readFileSync(settings, "utf8"), before);
 });
 
 test("the installer leaves updates manual when asked to", async () => {
