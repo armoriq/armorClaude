@@ -131,5 +131,39 @@ for (const configDir of [undefined, ".claude-second"]) {
     const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
     assert.equal(code, 0, out);
     assert.match(out, /dependencies ready/);
+    const settings = path.join(
+      env.CLAUDE_CONFIG_DIR ?? path.join(home, ".claude"),
+      "settings.json"
+    );
+    assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")).extraKnownMarketplaces.armoriq, {
+      source: { source: "github", repo: "armoriq/armorClaude" },
+      autoUpdate: true,
+    });
   });
 }
+
+test("the installer turns on auto-update without disturbing the user's settings", async () => {
+  const { home, env } = sandbox();
+  const settings = path.join(home, ".claude", "settings.json");
+  mkdirSync(path.dirname(settings), { recursive: true });
+  const source = { source: "git", url: "https://example.test/fork.git" };
+  writeFileSync(
+    settings,
+    JSON.stringify({ theme: "dark", extraKnownMarketplaces: { armoriq: { source } } })
+  );
+  const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
+  assert.equal(code, 0, out);
+  assert.match(out, /updates are automatic/);
+  assert.deepEqual(JSON.parse(readFileSync(settings, "utf8")), {
+    theme: "dark",
+    extraKnownMarketplaces: { armoriq: { source, autoUpdate: true } },
+  });
+});
+
+test("the installer leaves updates manual when asked to", async () => {
+  const { home, env } = sandbox();
+  env.ARMORCLAUDE_NO_AUTO_UPDATE = "1";
+  const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
+  assert.equal(code, 0, out);
+  assert.equal(existsSync(path.join(home, ".claude", "settings.json")), false);
+});

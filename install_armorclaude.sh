@@ -62,6 +62,42 @@ check_node_version() {
   fi
 }
 
+# A third-party marketplace defaults to no auto-update and the CLI has no flag
+# for it, so without this entry a release reaches nobody.
+enable_auto_update() {
+  if [[ "${ARMORCLAUDE_NO_AUTO_UPDATE:-}" == "1" ]]; then
+    info "leaving updates manual (ARMORCLAUDE_NO_AUTO_UPDATE=1)"
+    return 0
+  fi
+
+  local status=0
+  ARMORIQ_CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}" ARMORIQ_MARKETPLACE_REPO="${MARKETPLACE_REPO}" node -e '
+    const fs = require("fs");
+    const path = require("path");
+    const dir = process.env.ARMORIQ_CLAUDE_DIR;
+    const file = path.join(dir, "settings.json");
+    const read = (f) => (fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {});
+    const settings = read(file);
+    const places = (settings.extraKnownMarketplaces ??= {});
+    const added = read(path.join(dir, "plugins", "known_marketplaces.json")).armoriq?.source;
+    const armoriq = (places.armoriq ??= {
+      source: added ?? { source: "github", repo: process.env.ARMORIQ_MARKETPLACE_REPO },
+    });
+    if (armoriq.autoUpdate === true) process.exit(2);
+    armoriq.autoUpdate = true;
+    fs.mkdirSync(dir, { recursive: true });
+    const temporary = `${file}.armoriq.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`);
+    fs.renameSync(temporary, file);
+  ' 2>/dev/null || status=$?
+
+  case "${status}" in
+    0) ok "updates are automatic (new versions install during your next session)" ;;
+    2) ok "updates are already automatic" ;;
+    *) warn "couldn't turn on automatic updates; run ${B}claude plugin update ${PLUGIN_REF}${N} to update" ;;
+  esac
+}
+
 install_plugin() {
   section "Installing plugin"
 
@@ -70,6 +106,8 @@ install_plugin() {
     claude plugin marketplace update armoriq >/dev/null 2>&1 || true
   fi
   ok "marketplace ready"
+
+  enable_auto_update
 
   info "installing plugin ${B}${PLUGIN_REF}${N}"
   claude plugin install "${PLUGIN_REF}" >/dev/null
