@@ -105,7 +105,8 @@ armorClaude/
 │   └── marketplace.json          # Marketplace listing for `claude plugin install`
 ├── hooks/hooks.json              # Hook registration (7 lifecycle events)
 ├── .mcp.json                     # MCP server for policy + intent tools
-├── install_armorclaude.sh        # Curl-able installer
+├── install_armorclaude.sh        # Curl-able installer (armorclaude, production)
+├── install_armorclaude_dev.sh    # Same for armorclaude-dev (staging)
 ├── scripts/
 │   ├── bootstrap.mjs             # Auto-installs npm deps on first run
 │   ├── hook-router.mjs           # Hook entrypoint (dispatches events)
