@@ -4,6 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const OWN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const MANAGED_SETTINGS = {
+  darwin: "/Library/Application Support/ClaudeCode/managed-settings.json",
+  linux: "/etc/claude-code/managed-settings.json",
+  win32: "C:\\Program Files\\ClaudeCode\\managed-settings.json",
+}[process.platform];
 const UPDATER_OFF = [
   "DISABLE_AUTOUPDATER",
   "DISABLE_UPDATES",
@@ -33,12 +38,16 @@ export function installedFrom(pluginRoot) {
 
 /**
  * The marketplace's autoUpdate as Claude Code resolves it: an extraKnownMarketplaces
- * entry in local, then project, then user settings, then known_marketplaces.json
+ * entry in managed, local, project, then user settings, then known_marketplaces.json
  * (what the /plugin toggle writes). undefined means nobody chose, which is off for
  * a third-party marketplace.
  */
-export async function autoUpdateSetting(marketplace, { configDir, cwd }) {
+export async function autoUpdateSetting(
+  marketplace,
+  { configDir, cwd, managed = MANAGED_SETTINGS }
+) {
   const settingsFiles = [
+    managed,
     cwd && path.join(cwd, ".claude", "settings.local.json"),
     cwd && path.join(cwd, ".claude", "settings.json"),
     path.join(configDir, "settings.json"),
@@ -52,7 +61,13 @@ export async function autoUpdateSetting(marketplace, { configDir, cwd }) {
   return typeof value === "boolean" ? value : undefined;
 }
 
-export async function autoUpdateNotice({ pluginRoot = OWN_ROOT, env = process.env, cwd, dataDir }) {
+export async function autoUpdateNotice({
+  pluginRoot = OWN_ROOT,
+  env = process.env,
+  cwd,
+  dataDir,
+  managed,
+}) {
   try {
     if (env.ARMORCLAUDE_NO_AUTO_UPDATE === "1") return null;
     if (env.FORCE_AUTOUPDATE_PLUGINS !== "1" && UPDATER_OFF.some((name) => env[name])) return null;
@@ -61,6 +76,7 @@ export async function autoUpdateNotice({ pluginRoot = OWN_ROOT, env = process.en
     const setting = await autoUpdateSetting(install.marketplace, {
       configDir: claudeConfigDir(env),
       cwd,
+      ...(managed && { managed }),
     });
     if (setting !== undefined) return null;
 
