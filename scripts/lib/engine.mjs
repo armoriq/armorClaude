@@ -62,6 +62,7 @@ import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { decideV2, resolveV2Hold } from "./v2-decision.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
+import { autoUpdateNotice, withNotice } from "./update-notice.mjs";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -498,6 +499,16 @@ function usageSyncOffNotice(config) {
 }
 
 export async function handleSessionStart(input, config) {
+  const result = await startSession(input, config);
+  if (!input?.session_id) return result;
+  const notice = await autoUpdateNotice({
+    cwd: typeof input.cwd === "string" ? input.cwd : undefined,
+    dataDir: config.dataDir,
+  });
+  return withNotice(result, notice);
+}
+
+async function startSession(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
 

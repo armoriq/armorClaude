@@ -4,6 +4,7 @@ Changes to the ArmorClaude plugin, newest first. An install picks up code only w
 
 ## [Unreleased]
 
+- feat(update): the dev installer turns on auto-update for the `armoriq` marketplace, and a session tells the user once per version when auto-update is off
 - Publish armorclaude-dev variant in the marketplace catalog (#142)
 - Track latest compatible SDK on both branches with Dependabot (#143)
 - feat(enforce): while the backend is unreachable (2 second timeout, rechecked every 30 seconds), block writes, shell, MCP, web and other calls with `backend_unreachable`, and treat a 401 as signed out. Every audit row now carries its `capability`. Deliberate exception: reads keep running while the backend is down, where before every call was blocked.
