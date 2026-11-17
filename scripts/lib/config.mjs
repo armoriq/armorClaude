@@ -233,6 +233,10 @@ export function loadConfig(env = process.env) {
     loggedInAt: profile?.loggedInAt ?? "",
     loginHistory: login?.loginHistory ?? null,
     agentId: "claude-code",
+    // v2 bundles are requested by product slug; backends that predate slug
+    // resolution only know the agent row named "claude-code".
+    policyAgentId: "armorclaude",
+    legacyPolicyAgentId: "claude-code",
     contextId: "default",
 
     // Tuning — sane defaults nobody tunes.

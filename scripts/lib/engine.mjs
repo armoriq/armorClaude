@@ -68,6 +68,8 @@ import { autoUpdateNotice, withNotice } from "./update-notice.mjs";
 // (or sessionId:toolName fallback). Entries are deleted after PostToolUse /
 // PostToolUseFailure so the map doesn't grow unboundedly.
 const _toolStartTimes = new Map();
+// Which policy decided each allowed call, keyed like _toolStartTimes, for its PostToolUse row.
+const _toolPolicySources = new Map();
 
 /** Derive a stable key for the tool-start-time map. */
 function _toolTimingKey(input) {
@@ -95,6 +97,13 @@ export function _computeToolDuration(input) {
   _toolStartTimes.delete(key);
   if (start == null) return null;
   return Date.now() - start;
+}
+
+function takePolicySource(input) {
+  const key = _toolTimingKey(input);
+  const source = _toolPolicySources.get(key);
+  _toolPolicySources.delete(key);
+  return source;
 }
 
 // Exposed for testing only — clear all entries.
@@ -685,14 +694,74 @@ export async function handleUserPromptSubmit(input, config) {
 }
 
 export async function handlePreToolUse(input, config) {
-  const output = await decidePreToolUse(input, config);
+  const ctx = {};
+  const output = await decidePreToolUse(input, config, ctx);
+  const code = output?.[DECISION_CODE];
+  const source = policySource(code, ctx);
   if (output?.hookSpecificOutput?.permissionDecision === "deny") {
-    await auditBlocked(input, withBackendPosture(config), output[DECISION_CODE]);
+    await auditBlocked(input, withBackendPosture(config), code, source, ctx.v2);
+  } else if (source) {
+    _toolPolicySources.set(_toolTimingKey(input), source);
   }
-  return output;
+  if (!ctx.notice) return output;
+  if (!output) return allowWithNotice(ctx.notice);
+  return {
+    ...output,
+    systemMessage: [ctx.notice, output.systemMessage].filter(Boolean).join("\n\n"),
+  };
 }
 
-async function auditBlocked(input, config, code) {
+/**
+ * v2 and the v1 policy both run and the strictest verdict wins, so a deny or
+ * ask names whichever produced it; an allow names the active v2 policy, else
+ * the v1 rule.
+ */
+function policySource(code, { v1, v2 }) {
+  const local = v1 && {
+    source: v1.matchedRule?.id ? "local" : "default",
+    ...(v1.matchedRule?.id && { rule_id: v1.matchedRule.id }),
+  };
+  let source;
+  if (code === "policy_v2_block" || code === "policy_v2_hold") source = v2?.source;
+  else if (code === "policy_denied" || code === "policy_requires_approval") source = local;
+  else if (code) source = { source: "builtin", rule_id: code };
+  else source = v2?.source ?? local;
+  if (!source) return null;
+  return v2?.shadow?.length ? { ...source, shadow: v2.shadow } : source;
+}
+
+/** One line for the person when the active v2 policies differ from the last call this session made. */
+async function policyChangeNotice(config, sessionId, active) {
+  if (!sessionId) return "";
+  const key = active.map((p) => `${p.policyId}@${p.policyHash ?? ""}`).join(",");
+  const runtimeState = await loadRuntimeState(config.runtimeFile);
+  const seen = getSession(runtimeState, sessionId)?.v2PolicyKey;
+  if (seen === key) return "";
+  upsertSession(runtimeState, sessionId, { v2PolicyKey: key });
+  await saveRuntimeState(config.runtimeFile, runtimeState);
+  if (seen === undefined) return "";
+  return active.length
+    ? `ArmorIQ policy updated: now enforcing ${active.map((p) => `"${p.name}"`).join(" and ")}.`
+    : "ArmorIQ policy updated: no v2 policy is active, the local policy applies.";
+}
+
+async function logShadowVerdicts(config, toolName, shadow) {
+  const flagged = (shadow ?? []).filter((s) => s.verdict !== "allow");
+  if (!flagged.length) return;
+  const { appendDaemonLog } = await import("./daemon-log.mjs");
+  for (const s of flagged) {
+    appendDaemonLog(
+      config.dataDir,
+      `[armorclaude] shadow: policy "${s.policy_name}" would ${s.verdict} ${toolName} (not enforced)`
+    );
+  }
+}
+
+function withPolicySource(inputs, source) {
+  return source ? { ...(isPlainObject(inputs) ? inputs : {}), armoriq_policy: source } : inputs;
+}
+
+async function auditBlocked(input, config, code, source, v2) {
   if (!config.auditEnabled || !config.apiKey) return;
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
@@ -704,8 +773,19 @@ async function auditBlocked(input, config, code) {
       step_index: pickStepIndex(session.plan, toolName, inputs, -1),
       action: toolName,
       tool: toolName,
-      input: redactSecrets(inputs),
-      output: null,
+      input: withPolicySource(redactSecrets(inputs), source),
+      // The console names a row's policy from output.matchedPolicy.
+      output:
+        source?.source === "v2"
+          ? {
+              matchedPolicy: {
+                policyId: source.policy_id,
+                name: source.policy_name,
+                policyVersion: source.policy_hash,
+              },
+              reason: v2?.reason,
+            }
+          : null,
       status: "blocked",
       error_message: code,
       executed_at: new Date().toISOString(),
@@ -718,7 +798,7 @@ async function auditBlocked(input, config, code) {
   }
 }
 
-async function decidePreToolUse(input, config) {
+async function decidePreToolUse(input, config, ctx = {}) {
   // Record start timestamp BEFORE any deny/early-return so even denied calls
   // have timing data available for PostToolUse/PostToolUseFailure.
   _recordToolStart(input);
@@ -829,10 +909,14 @@ async function decidePreToolUse(input, config) {
   // --- Policy v2: the org's verdict for this exact call, from the raw input
   //     (sanitizeParams truncates long values, which a rule could miss). ---
   const v2 = config.apiKey ? await decideV2(config, toolName, input.tool_input) : null;
+  ctx.v2 = v2;
   if (v2?.code === "backend_unreachable") return denyPreTool("backend_unreachable", v2.reason);
   if (v2?.reason === "signed_out") config = localOnly(config);
+  if (v2?.active) ctx.notice = await policyChangeNotice(config, sessionId, v2.active);
+  await logShadowVerdicts(config, toolName, v2?.shadow);
   if (v2?.action === "block") {
-    const reason = `ArmorIQ policy blocked ${toolName} (${v2.reason})`;
+    const policy = v2.matchedPolicy ? ` "${v2.matchedPolicy}"` : "";
+    const reason = `ArmorIQ policy${policy} blocked ${toolName} (${v2.reason})`;
     if (shouldDeny(config)) return denyPreTool("policy_v2_block", reason);
     const { appendDaemonLog } = await import("./daemon-log.mjs");
     appendDaemonLog(config.dataDir, `[armorclaude] monitor: ${reason}`);
@@ -847,6 +931,7 @@ async function decidePreToolUse(input, config) {
       toolName,
       toolInput
     );
+    ctx.v1 = safePolicyDecision;
     const safePolicyOutput = preToolPolicyOutput(safePolicyDecision, toolName);
     if (safePolicyOutput) return safePolicyOutput;
     return null;
@@ -1014,6 +1099,7 @@ async function decidePreToolUse(input, config) {
 
   // --- Policy evaluation: dispatch based on enforcement engine ---
   let policyDecision = await evaluateConfiguredPolicy(config, policyState, toolName, toolInput);
+  ctx.v1 = policyDecision;
   const requiresUserApproval = policyDecisionRequiresApproval(policyDecision);
   if (!policyDecision.allowed && !requiresUserApproval) {
     return denyPreTool("policy_denied", policyDecision.reason || "ArmorClaude policy denied");
@@ -1373,6 +1459,7 @@ async function decidePreToolUse(input, config) {
       toolName,
       toolArgs: input.tool_input,
       session: v2Session,
+      agentId: v2.agentId,
     });
     if (v2Session.v2Delegations) {
       upsertSession(runtimeState, sessionId, { v2Delegations: v2Session.v2Delegations });
@@ -1474,6 +1561,7 @@ async function handleExitPlanModeCapture(input, sessionId, config) {
 }
 
 export async function handlePostToolUse(input, config) {
+  const policySourceOfCall = takePolicySource(input);
   if (!config.auditEnabled || !config.apiKey) {
     return null;
   }
@@ -1500,7 +1588,7 @@ export async function handlePostToolUse(input, config) {
         step_index: stepIdx,
         action: toolName,
         tool: toolName,
-        input: redactSecrets(inputs),
+        input: withPolicySource(redactSecrets(inputs), policySourceOfCall),
         output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
         status: "success",
         executed_at: new Date().toISOString(),
@@ -1519,7 +1607,7 @@ export async function handlePostToolUse(input, config) {
         step_index: -1,
         action: toolName,
         tool: toolName,
-        input: redactSecrets(inputs),
+        input: withPolicySource(redactSecrets(inputs), policySourceOfCall),
         output: redactSecrets(sanitizeParams(input.tool_response, config.sanitize)),
         status: "success",
         executed_at: new Date().toISOString(),
@@ -1538,6 +1626,7 @@ export async function handlePostToolUse(input, config) {
 }
 
 export async function handlePostToolUseFailure(input, config) {
+  const policySourceOfCall = takePolicySource(input);
   if (!config.auditEnabled || !config.apiKey) {
     return null;
   }
@@ -1564,7 +1653,7 @@ export async function handlePostToolUseFailure(input, config) {
       step_index: stepIdx,
       action: toolName,
       tool: toolName,
-      input: redactSecrets(inputs),
+      input: withPolicySource(redactSecrets(inputs), policySourceOfCall),
       output: null,
       status: "failed",
       error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error",
