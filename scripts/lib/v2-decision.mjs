@@ -100,13 +100,13 @@ async function bundleState(config, read) {
   const primary = bundleCache(config, config.policyAgentId);
   if (!primary) return null;
   await revalidate(primary, config, read);
-  const state = { ...primary.state(), agentId: config.policyAgentId };
+  const state = primary.state();
   const legacyId = config.legacyPolicyAgentId;
   const decisive = bundlePolicies(state.agent).length || state.agent?.inactive;
   if (!legacyId || (state.status === "current" && decisive)) return state;
   const legacy = bundleCache(config, legacyId);
   await revalidate(legacy, config, read);
-  const legacyState = { ...legacy.state(), agentId: legacyId };
+  const legacyState = legacy.state();
   // A legacy bundle that cannot be read must block as it did before, not fall back to v1.
   return legacyState.status === "current" || state.status === "current" ? legacyState : state;
 }
@@ -115,6 +115,20 @@ let policyIr;
 async function loadPolicyIr() {
   policyIr ??= await import("@armoriq/policy-ir").catch(() => null);
   return policyIr;
+}
+
+/** Names of the v2 policies that decide calls, or null when the bundle cannot be read. */
+export async function activeV2PolicyNames(config) {
+  if (!config.apiKey || signedOut(config)) return [];
+  try {
+    const state = await bundleState(config, true);
+    if (state?.status !== "current") return null;
+    return bundlePolicies(state.agent)
+      .filter((p) => p.status === "active")
+      .map((p) => p.name);
+  } catch {
+    return null;
+  }
 }
 
 export async function decideV2(config, toolName, toolArgs) {
@@ -152,7 +166,7 @@ export async function decideV2(config, toolName, toolArgs) {
     mcpServer,
     userEmail: config.userEmail || undefined,
   });
-  return { ...decision, agentId: state.agentId };
+  return decision;
 }
 
 /**
@@ -260,13 +274,14 @@ function signedToken(intentTokenRaw) {
 
 export async function resolveV2Hold(
   config,
-  { intentTokenRaw, toolName, toolArgs, session, agentId }
+  { intentTokenRaw, toolName, toolArgs, session, policyName }
 ) {
+  const policy = policyName ? ` "${policyName}"` : "";
   const intentToken = intentTokenRaw ? signedToken(intentTokenRaw) : null;
   if (!intentToken?.plan_id) {
     return {
       action: "hold",
-      reason: `ArmorIQ policy holds ${toolName} for approval, but this session has no intent plan to attach the request to. Call register_intent_plan, then retry.`,
+      reason: `ArmorIQ policy${policy} holds ${toolName} for approval, but this session has no intent plan to attach the request to. Call register_intent_plan, then retry.`,
     };
   }
   const { tool, mcpServer } = v2Call(toolName);
@@ -276,7 +291,8 @@ export async function resolveV2Hold(
     mcp: mcpServer ?? config.mcpName,
     arguments: args,
     intent_token: intentToken,
-    agent_id: agentId || config.policyAgentId,
+    // The backend rejects an intent token presented for any agent other than the one it was minted for.
+    agent_id: config.agentId,
     user_email: config.userEmail || undefined,
   });
   const verdict = isPlainObject(res.data) ? res.data : {};
@@ -301,7 +317,7 @@ export async function resolveV2Hold(
   return {
     action: "hold",
     reason:
-      `ArmorIQ policy holds ${toolName} for approval (${verdict.reason}). ` +
+      `ArmorIQ policy${policy} holds ${toolName} for approval (${verdict.reason}). ` +
       (filed.delegationId
         ? `Approval request ${filed.delegationId} is waiting for another member; retry after it is approved.`
         : `The approval request could not be filed: ${filed.error}.`),

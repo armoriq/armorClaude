@@ -59,7 +59,7 @@ import { sha256Hex } from "./common.mjs";
 import { invokesPolicyAdmin, writesProtectedPath } from "./shell-guard.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
-import { decideV2, resolveV2Hold } from "./v2-decision.mjs";
+import { activeV2PolicyNames, decideV2, resolveV2Hold } from "./v2-decision.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
 import { autoUpdateNotice, withNotice } from "./update-notice.mjs";
@@ -131,6 +131,20 @@ function isFrictionlessAllowPolicy(policy) {
 function intentMode(config, policy) {
   if (!config.intentRequired) return "optional";
   return isFrictionlessAllowPolicy(policy) ? "capture" : "required";
+}
+
+/** The local policy allows everything in capture mode, but org v2 policies still decide each call. */
+async function captureNotice(config) {
+  const recorded = "Tool calls are recorded against the registered plan.";
+  const names = await activeV2PolicyNames(config);
+  if (names?.length === 0) return `${recorded} The current policy blocks none of them.`;
+  const which = names?.length
+    ? `ArmorIQ ${names.length > 1 ? "policies" : "policy"} ${names.map((n) => `"${n}"`).join(", ")}`
+    : "Your organization's ArmorIQ policies";
+  return (
+    `${recorded} ${which} still decide each call: a call may be blocked, or held until ` +
+    "another member approves it. A held call must be retried after approval, under the same plan."
+  );
 }
 
 function legacyArmorPolicyMessage() {
@@ -683,7 +697,7 @@ export async function handleUserPromptSubmit(input, config) {
         "user to verify it with `claude mcp list` (expect armorclaude-policy " +
         "Connected) before relying on enforcement.\n" +
         (mode === "capture"
-          ? "Tool calls are recorded against the registered plan. The current policy blocks none of them."
+          ? await captureNotice(config)
           : "Tool calls without a registered plan will be blocked.")
     );
   }
@@ -1459,7 +1473,7 @@ async function decidePreToolUse(input, config, ctx = {}) {
       toolName,
       toolArgs: input.tool_input,
       session: v2Session,
-      agentId: v2.agentId,
+      policyName: v2.matchedPolicy,
     });
     if (v2Session.v2Delegations) {
       upsertSession(runtimeState, sessionId, { v2Delegations: v2Session.v2Delegations });
@@ -1468,7 +1482,8 @@ async function decidePreToolUse(input, config, ctx = {}) {
     if (held.action === "block" && shouldDeny(config)) {
       return denyPreTool("policy_v2_block", held.reason);
     }
-    if (held.action === "hold") return askPreTool("policy_v2_hold", held.reason);
+    // A held call must wait for another member; asking here would let the requester approve it.
+    if (held.action === "hold") return denyPreTool("policy_v2_hold", held.reason);
   }
   if (mcpApprovalReason) {
     return askPreTool("mcp_server_unapproved", mcpApprovalReason);

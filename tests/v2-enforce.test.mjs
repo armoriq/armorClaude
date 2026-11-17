@@ -100,7 +100,7 @@ test("read-only tools and MCP tools get the v2 verdict too", async (t) => {
   assert.match(reasonOf(mcp), /block:create_issue#0/);
 });
 
-test("a v2 hold asks, files one delegation request without an amount, and the approved retry runs", async (t) => {
+test("a v2 hold stops the call, files one delegation request without an amount, and the approved retry runs", async (t) => {
   const planId = randomUUID();
   let approved = false;
   const backend = await v2Backend(planId, {
@@ -123,7 +123,8 @@ test("a v2 hold asks, files one delegation request without an amount, and the ap
   };
 
   const held = await hook(write);
-  assert.equal(decisionOf(held), "ask", JSON.stringify(held));
+  assert.equal(decisionOf(held), "deny", JSON.stringify(held));
+  assert.match(reasonOf(held), /ArmorIQ policy "args-and-holds" holds Write for approval/);
   assert.match(reasonOf(held), /hold:Write#0/);
   assert.match(reasonOf(held), /deleg-1/);
   const [enforce] = routed(backend, "POST /iap/sdk/enforce");
@@ -138,7 +139,7 @@ test("a v2 hold asks, files one delegation request without an amount, and the ap
   assert.deepEqual(request.body.arguments, write.tool_input);
   assert.equal(Object.hasOwn(request.body, "amount"), false);
 
-  assert.equal(decisionOf(await hook(write)), "ask");
+  assert.equal(decisionOf(await hook(write)), "deny");
   assert.equal(routed(backend, "POST /delegation/request").length, 1);
 
   approved = true;
@@ -337,4 +338,60 @@ test("on a backend without slug resolution, an inactive legacy agent still block
   const output = await bash(hook, "ls");
   assert.equal(decisionOf(output), "deny", JSON.stringify(output));
   assert.match(reasonOf(output), /agent_inactive/);
+});
+
+const heldWrite = {
+  hook_event_name: "PreToolUse",
+  tool_name: "Write",
+  tool_input: { file_path: "/workspace/secrets/a.txt", content: "hi" },
+};
+const holdOnce = () => ({
+  allowed: false,
+  enforcementAction: "hold",
+  reason: "hold:Write#0",
+  requiresApproval: true,
+});
+
+test("a hold read from the product-slug bundle is enforced as the agent the intent token was minted for", async (t) => {
+  const bundle = slugBundle([entry("agent-1", "args-and-holds", POLICY_DOCUMENT, "agent")]);
+  const backend = await v2Backend(randomUUID(), { bundle: () => [200, bundle], enforce: holdOnce });
+  const { hook } = await startHookSession(t, backend);
+  await bash(hook, "ls");
+
+  const held = await hook(heldWrite);
+  assert.equal(decisionOf(held), "deny", JSON.stringify(held));
+  assert.match(reasonOf(held), /Approval request deleg-1 is waiting for another member/);
+  const [mint] = routed(backend, "POST /iap/sdk/token");
+  const [enforce] = routed(backend, "POST /iap/sdk/enforce");
+  assert.equal(mint.body.agent_id, "claude-code");
+  assert.equal(enforce.body.agent_id, mint.body.agent_id);
+  assert.equal(routed(backend, "POST /delegation/request").length, 1);
+});
+
+const capturePrompt = async (t, bundle) => {
+  const backend = await v2Backend(randomUUID(), { bundle: () => [200, bundle] });
+  const { hook } = await startHookSession(t, backend);
+  const prompt = await hook({ hook_event_name: "UserPromptSubmit", prompt: "write hello.txt" });
+  return prompt?.hookSpecificOutput?.additionalContext ?? "";
+};
+
+test("in capture mode the prompt directive names the v2 policies that still block or hold calls", async (t) => {
+  const directive = await capturePrompt(
+    t,
+    slugBundle([
+      entry("org-1", "no-curl-anywhere", ORG_DOCUMENT, "org"),
+      entry("agent-1", "args-and-holds", POLICY_DOCUMENT, "agent"),
+    ])
+  );
+  assert.match(directive, /ArmorClaude intent capture is active/);
+  assert.match(
+    directive,
+    /ArmorIQ policies "no-curl-anywhere", "args-and-holds" still decide each call/
+  );
+  assert.doesNotMatch(directive, /blocks none/);
+});
+
+test("in capture mode with no active v2 policy the directive says nothing is blocked", async (t) => {
+  const directive = await capturePrompt(t, { orgId: "org-test", agents: [] });
+  assert.match(directive, /The current policy blocks none of them/);
 });
