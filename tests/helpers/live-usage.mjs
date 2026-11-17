@@ -14,6 +14,13 @@ export const KEY = "ak_test_live_usage_0001";
 export const USER = `user-of-${KEY}`;
 export const isoAgo = (ms) => new Date(Date.now() - ms).toISOString();
 
+// Timestamps that must share one usage hour, pinned to the previous UTC hour so a
+// test that starts just after the hour turns cannot split them across two hours.
+export function lastHour() {
+  const start = (Math.floor(Date.now() / 3_600_000) - 1) * 3_600_000;
+  return (minute) => new Date(start + minute * 60_000).toISOString();
+}
+
 export function backend() {
   const batches = [];
   const uploads = [];
