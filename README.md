@@ -31,8 +31,18 @@ This adds the `armoriq` Claude Code marketplace and installs the `armorclaude` p
 
 ### Manual install (Claude Code marketplace)
 
+First install:
+
 ```bash
 claude plugin marketplace add armoriq/armorClaude
+claude plugin install armorclaude@armoriq
+```
+
+If the `armoriq` marketplace is already added, refresh it instead. Running `marketplace add` again
+rewrites its settings entry and drops the auto-update setting:
+
+```bash
+claude plugin marketplace update armoriq
 claude plugin install armorclaude@armoriq
 ```
 
@@ -72,8 +82,11 @@ node scripts/bootstrap.mjs mcp
 
 ### Update / disable / uninstall
 
-The installer turns on auto-update for the `armoriq` marketplace, so Claude Code installs each new
-release by itself during your next session (`Plugin updated ... Run /reload-plugins to apply`).
+The installer turns on auto-update for the `armoriq` marketplace and keeps it off if you turned it
+off. Claude Code then installs each new release by itself during an interactive session: after your
+first message it waits a random delay of up to 10 minutes, then updates and shows
+`Plugin updated ... Run /reload-plugins to apply`. The new version loads on `/reload-plugins` or the
+next launch.
 The stable plugin moves when its version in `marketplace.json` changes; `armorclaude-dev` moves with
 every commit on `dev`. If you installed another way,
 ArmorClaude tells you once at session start; turn it on in `/plugin`, Marketplaces, `armoriq`,
