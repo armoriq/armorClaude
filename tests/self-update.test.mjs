@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +23,10 @@ printf '%s CHILD=%s CLAUDECODE=%s\\n' "$*" "$ARMORCLAUDE_SELF_UPDATE_CHILD" "$CL
 case "$*" in
   "plugin update "*)
     [ "\${STUB_EXIT:-0}" = 0 ] || exit "$STUB_EXIT"
-    printf '{"plugins":{"%s":[{"version":"%s"}]}}' "$3" "$STUB_NEW_VERSION" > "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json" ;;
+    dir="$CLAUDE_CONFIG_DIR/plugins/cache/new"
+    mkdir -p "$dir/scripts"
+    printf 'import { writeFileSync } from "node:fs"; writeFileSync(process.env.STUB_LOG + ".warm", process.argv[2]);' > "$dir/scripts/bootstrap.mjs"
+    printf '{"plugins":{"%s":[{"version":"%s","installPath":"%s"}]}}' "$3" "$STUB_NEW_VERSION" "$dir" > "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json" ;;
 esac
 exit 0
 `;
@@ -111,6 +121,11 @@ for (const [name, setup, result, updates] of [
     assert.equal(outcome.result, result);
     assert.match(m.calls(), /^plugin marketplace update armoriq CHILD=1 CLAUDECODE=$/m);
     assert.equal(/^plugin update armorclaude@armoriq /m.test(m.calls()), updates, m.calls());
+    assert.equal(
+      existsSync(`${m.env.STUB_LOG}.warm`),
+      result === "updated",
+      "only a new install is warmed"
+    );
   });
 }
 

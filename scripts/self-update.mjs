@@ -98,10 +98,22 @@ export async function runSelfUpdate({ pluginRoot, cwd }, env = process.env, log 
 
   if (!claude(["plugin", "update", pluginRef(install)])) return { result: "failed", latest };
   const installed = await readJsonOrNull(path.join(configDir, "plugins", "installed_plugins.json"));
-  const now = installed?.plugins?.[pluginRef(install)]?.[0]?.version;
-  return now && now !== install.version
-    ? { result: "updated", latest, version: now }
-    : { result: "failed", latest };
+  const record = installed?.plugins?.[pluginRef(install)]?.[0];
+  if (!record?.version || record.version === install.version) return { result: "failed", latest };
+  if (record.installPath) {
+    // Otherwise the new version's first hook runs npm install and holds up that session.
+    const warm = spawnSync(
+      process.execPath,
+      [path.join(record.installPath, "scripts", "bootstrap.mjs"), "warm"],
+      {
+        env: childEnv,
+        encoding: "utf8",
+        timeout: COMMAND_TIMEOUT_MS,
+      }
+    );
+    log(`warm ${record.installPath} -> ${warm.status ?? warm.error?.code}`);
+  }
+  return { result: "updated", latest, version: record.version };
 }
 
 function takeLock(file) {
