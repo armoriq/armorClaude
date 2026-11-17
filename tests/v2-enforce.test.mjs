@@ -310,3 +310,31 @@ test("a change in the active v2 policy since the session's last call shows the p
   const second = await bash(session.hook, "ls");
   assert.equal(second?.systemMessage, undefined);
 });
+
+const byAgent = (replies) => (_body, req) =>
+  replies[new URL(req.url, "http://x").searchParams.get("agent")] ?? [404, {}];
+const noAgents = [200, { orgId: "org-test", agents: [] }];
+
+test("on a backend without slug resolution, an unreadable legacy bundle still blocks instead of falling back to v1", async (t) => {
+  const backend = await v2Backend(randomUUID(), {
+    bundle: byAgent({ armorclaude: noAgents, "claude-code": [403, { message: "forbidden" }] }),
+  });
+  const { hook } = await startHookSession(t, backend);
+  const output = await bash(hook, "ls");
+  assert.equal(decisionOf(output), "deny", JSON.stringify(output));
+  assert.match(reasonOf(output), /policy-bundle-unavailable/);
+});
+
+test("on a backend without slug resolution, an inactive legacy agent still blocks", async (t) => {
+  const inactive = { ...BUNDLE.agents[0], inactive: true, policy: null };
+  const backend = await v2Backend(randomUUID(), {
+    bundle: byAgent({
+      armorclaude: noAgents,
+      "claude-code": [200, { orgId: "org-test", agents: [inactive] }],
+    }),
+  });
+  const { hook } = await startHookSession(t, backend);
+  const output = await bash(hook, "ls");
+  assert.equal(decisionOf(output), "deny", JSON.stringify(output));
+  assert.match(reasonOf(output), /agent_inactive/);
+});

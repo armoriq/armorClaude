@@ -102,13 +102,13 @@ async function bundleState(config, read) {
   await revalidate(primary, config, read);
   const state = { ...primary.state(), agentId: config.policyAgentId };
   const legacyId = config.legacyPolicyAgentId;
-  if (state.status !== "current" || bundlePolicies(state.agent).length || !legacyId) return state;
+  const decisive = bundlePolicies(state.agent).length || state.agent?.inactive;
+  if (!legacyId || (state.status === "current" && decisive)) return state;
   const legacy = bundleCache(config, legacyId);
   await revalidate(legacy, config, read);
-  const legacyState = legacy.state();
-  return legacyState.status === "current" && bundlePolicies(legacyState.agent).length
-    ? { ...legacyState, agentId: legacyId }
-    : state;
+  const legacyState = { ...legacy.state(), agentId: legacyId };
+  // A legacy bundle that cannot be read must block as it did before, not fall back to v1.
+  return legacyState.status === "current" || state.status === "current" ? legacyState : state;
 }
 
 let policyIr;
