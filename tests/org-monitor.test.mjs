@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
-import { startBackend, startHookSession, waitFor } from "./helpers/hook-session.mjs";
+import { markReloginRequired } from "../scripts/lib/relogin.mjs";
+import { API_KEY, startBackend, startHookSession, waitFor } from "./helpers/hook-session.mjs";
 
 const statement = (id, effect, tool) => ({
   id,
@@ -74,4 +75,21 @@ test("an org that says Enforce blocks the call", async (t) => {
     tool_input: { pattern: "*" },
   });
   assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
+});
+
+test("an org in Monitor shows nothing in the session, not even the sign-in line it shows once the org says Enforce", async (t) => {
+  const mode = { enforcementMode: "shadow" };
+  const backend = await startBackend({
+    "GET /policies/profiles/active": () => [200, { version: 1, policy: null, ...mode }],
+  });
+  const { hook, dataDir } = await startHookSession(t, backend, { ARMORIQ_ORG_MODE: "" });
+  markReloginRequired({ dataDir, observabilityEndpoint: backend.url, apiKey: API_KEY });
+
+  assert.equal(await hook({ hook_event_name: "SessionStart" }), null);
+  assert.equal(await hook({ hook_event_name: "UserPromptSubmit", prompt: "hi" }), null);
+
+  mode.enforcementMode = "enforce";
+  await hook({ hook_event_name: "SessionStart" });
+  const prompt = await hook({ hook_event_name: "UserPromptSubmit", prompt: "hi" });
+  assert.match(prompt?.systemMessage ?? "", /sign in again/);
 });

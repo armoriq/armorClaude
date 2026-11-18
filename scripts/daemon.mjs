@@ -30,7 +30,7 @@ import {
 } from "./lib/observability.mjs";
 import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
 import { launchLiveUsage } from "./lib/usage-sync-launch.mjs";
-import { withReloginNotice } from "./lib/relogin.mjs";
+import { sessionOutput } from "./lib/relogin.mjs";
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
@@ -359,7 +359,7 @@ async function handleLine(rawLine, socket) {
       const effectiveConfig = effectiveConfigFor(msg.configEnv);
       trackLogin(effectiveConfig);
       const output = await withSessionLock(sessionId, async () =>
-        withReloginNotice(
+        sessionOutput(
           event,
           input,
           effectiveConfig,

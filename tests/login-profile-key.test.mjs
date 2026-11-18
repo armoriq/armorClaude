@@ -177,6 +177,7 @@ function hookEnv(home, dataDir, backendUrl) {
     ARMORCLAUDE_RUNTIME_FILE: path.join(dataDir, "runtime.json"),
     ARMORCLAUDE_POLICY_FILE: path.join(dataDir, "policy.json"),
     ARMORIQ_ENV: "local",
+    ARMORIQ_ORG_MODE: "enforce",
     ARMORIQ_BACKEND_URL: backendUrl,
     ARMORIQ_CSRG_URL: backendUrl,
   };
