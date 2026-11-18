@@ -17,9 +17,18 @@ function cachedOrgMode(dataDir) {
   }
 }
 
+export const orgModeForced = (env = process.env) => env.ARMORIQ_ORG_MODE?.trim() === "enforce";
+
 export function orgMonitorFor(dataDir, env = process.env) {
-  if (env.ARMORIQ_ORG_MODE?.trim() === "enforce") return false;
+  if (orgModeForced(env)) return false;
   return cachedOrgMode(dataDir) !== "enforce";
+}
+
+/** A session start fetches the org's mode after its config was read, and applies it at once. */
+export function monitorAfterFetch(config) {
+  const fetched = cachedOrgMode(config.dataDir);
+  if (config.unconfigured || config.orgModeForced || !fetched) return Boolean(config.orgMonitor);
+  return fetched !== "enforce";
 }
 
 export async function saveOrgMode(dataDir, mode) {

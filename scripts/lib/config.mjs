@@ -5,7 +5,7 @@ import path from "node:path";
 import { claudeConfigDir } from "./claude-paths.mjs";
 import { parseBoolean } from "./common.mjs";
 import { signedOut } from "./backend-posture.mjs";
-import { orgMonitorFor } from "./org-mode.mjs";
+import { orgModeForced, orgMonitorFor } from "./org-mode.mjs";
 import { sdkModule } from "./sdk.mjs";
 
 const PRODUCT = "armorclaude";
@@ -78,6 +78,7 @@ export const REQUEST_CONFIG_KEYS = [
   "cryptoPolicyEnabled",
   "signedOut",
   "orgMonitor",
+  "orgModeForced",
 ];
 
 const USABLE_KEY = /^ak_(test|live|claw)_/;
@@ -202,6 +203,7 @@ export function loadConfig(env = process.env) {
     defaultTemplate,
 
     ...loginEnforcement(effectiveApiKey, localMock, orgMonitorFor(dataDir, env)),
+    orgModeForced: orgModeForced(env),
     hadUnusableKey,
     auditWal: true,
     autoReanchor: true,

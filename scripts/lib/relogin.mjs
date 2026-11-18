@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { loginCommand } from "./config.mjs";
+import { monitorAfterFetch } from "./org-mode.mjs";
 import { writePrivateFileSync } from "./fs-store.mjs";
 import { getSession, loadRuntimeState, saveRuntimeState, upsertSession } from "./runtime-state.mjs";
 
@@ -44,7 +45,7 @@ async function claimNotice(config, sessionId) {
  * notice, no update line. Otherwise the hook's answer, plus the sign-in line once.
  */
 export async function sessionOutput(event, input, config, output) {
-  if (config.orgMonitor) return null;
+  if (event === "SessionStart" ? monitorAfterFetch(config) : config.orgMonitor) return null;
   const sessionId = typeof input?.session_id === "string" ? input.session_id : "";
   if (!sessionId || event === "SessionEnd" || !config.apiKey) return output;
   if (!(await reloginRequired(config)) || !(await claimNotice(config, sessionId))) return output;

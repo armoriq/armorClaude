@@ -77,7 +77,7 @@ test("an org that says Enforce blocks the call", async (t) => {
   assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
 });
 
-test("an org in Monitor shows nothing in the session, not even the sign-in line it shows once the org says Enforce", async (t) => {
+test("an org in Monitor shows nothing in the session from the session start that learns it, and an Enforce org shows its sign-in line from the same point", async (t) => {
   const mode = { enforcementMode: "shadow" };
   const backend = await startBackend({
     "GET /policies/profiles/active": () => [200, { version: 1, policy: null, ...mode }],
@@ -89,7 +89,9 @@ test("an org in Monitor shows nothing in the session, not even the sign-in line 
   assert.equal(await hook({ hook_event_name: "UserPromptSubmit", prompt: "hi" }), null);
 
   mode.enforcementMode = "enforce";
-  await hook({ hook_event_name: "SessionStart" });
-  const prompt = await hook({ hook_event_name: "UserPromptSubmit", prompt: "hi" });
-  assert.match(prompt?.systemMessage ?? "", /sign in again/);
+  const start = await hook({ hook_event_name: "SessionStart" });
+  assert.match(start?.systemMessage ?? "", /sign in again/);
+
+  mode.enforcementMode = "shadow";
+  assert.equal(await hook({ hook_event_name: "SessionStart" }), null);
 });

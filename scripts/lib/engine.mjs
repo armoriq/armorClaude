@@ -60,7 +60,7 @@ import { invokesPolicyAdmin, writesProtectedPath } from "./shell-guard.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { decideV2, resolveV2Hold } from "./v2-decision.mjs";
-import { dropWouldBe, rememberWouldBe, takeWouldBe } from "./org-mode.mjs";
+import { dropWouldBe, monitorAfterFetch, rememberWouldBe, takeWouldBe } from "./org-mode.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
 import { selfUpdateOnHook, withNotice } from "./self-update.mjs";
@@ -553,7 +553,7 @@ async function startSession(input, config) {
   // interactive installer/onboarding. ---
   if (config.unconfigured) return notConnectedStart(config, loginNoticeDue);
 
-  if (config.orgMonitor) return null;
+  if (monitorAfterFetch(config)) return null;
 
   // --- First-run onboarding: if no policy.json, show template picker ---
   const onboardingFlag = path.join(config.dataDir, "onboarding-shown");
