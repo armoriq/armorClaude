@@ -62,7 +62,7 @@ import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { decideV2, resolveV2Hold } from "./v2-decision.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
-import { autoUpdateNotice, withNotice } from "./update-notice.mjs";
+import { selfUpdateOnHook, withNotice } from "./self-update.mjs";
 
 // In-memory store for tool-call start timestamps. Keyed by tool_use_id
 // (or sessionId:toolName fallback). Entries are deleted after PostToolUse /
@@ -471,9 +471,10 @@ function usageSyncOffNotice(config) {
 export async function handleSessionStart(input, config) {
   const result = await startSession(input, config);
   if (!input?.session_id) return result;
-  const notice = await autoUpdateNotice({
+  const notice = await selfUpdateOnHook({
     cwd: typeof input.cwd === "string" ? input.cwd : undefined,
     dataDir: config.dataDir,
+    check: true,
   });
   return withNotice(result, notice);
 }
@@ -621,6 +622,13 @@ export async function handleUserPromptExpansion(input, config) {
 }
 
 export async function handleUserPromptSubmit(input, config) {
+  const result = await promptSubmit(input, config);
+  if (!input?.session_id) return result;
+  const notice = await selfUpdateOnHook({ dataDir: config.dataDir, check: false });
+  return withNotice(result, notice);
+}
+
+async function promptSubmit(input, config) {
   const prompt = typeof input.prompt === "string" ? input.prompt : "";
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!prompt || !sessionId) {

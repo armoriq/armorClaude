@@ -63,7 +63,28 @@ check_node_version() {
 }
 
 # A third-party marketplace defaults to no auto-update and the CLI has no flag
-# for it, so without this entry a release reaches nobody.
+# for it. `claude plugin marketplace add` rewrites the entry without autoUpdate,
+# so install_plugin reads the user's choice before the add and passes it here:
+# an explicit false stays false and anything else becomes true.
+auto_update_choice() {
+  ARMORIQ_CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}" node -e '
+    const fs = require("fs");
+    const path = require("path");
+    const read = (file) => {
+      try {
+        return JSON.parse(fs.readFileSync(file, "utf8"));
+      } catch {
+        return {};
+      }
+    };
+    const dir = process.env.ARMORIQ_CLAUDE_DIR;
+    const inSettings = read(path.join(dir, "settings.json"))?.extraKnownMarketplaces?.armoriq?.autoUpdate;
+    const fromToggle = read(path.join(dir, "plugins", "known_marketplaces.json"))?.armoriq?.autoUpdate;
+    const value = typeof inSettings === "boolean" ? inSettings : fromToggle;
+    if (typeof value === "boolean") process.stdout.write(String(value));
+  ' 2>/dev/null || true
+}
+
 enable_auto_update() {
   if [[ "${ARMORCLAUDE_NO_AUTO_UPDATE:-}" == "1" ]]; then
     info "leaving updates manual (ARMORCLAUDE_NO_AUTO_UPDATE=1)"
@@ -71,7 +92,7 @@ enable_auto_update() {
   fi
 
   local status=0
-  ARMORIQ_CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}" ARMORIQ_MARKETPLACE_REPO="${MARKETPLACE_REPO}" node -e '
+  ARMORIQ_CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}" ARMORIQ_MARKETPLACE_REPO="${MARKETPLACE_REPO}" ARMORIQ_PRIOR="${1:-}" node -e '
     const fs = require("fs");
     const path = require("path");
     const dir = process.env.ARMORIQ_CLAUDE_DIR;
@@ -84,19 +105,22 @@ enable_auto_update() {
     const armoriq = (places.armoriq ??= {
       source: known?.source ?? { source: "github", repo: process.env.ARMORIQ_MARKETPLACE_REPO },
     });
-    if (armoriq.autoUpdate === true) process.exit(2);
-    if (armoriq.autoUpdate === false || known?.autoUpdate === false) process.exit(3);
-    armoriq.autoUpdate = true;
+    const prior = process.env.ARMORIQ_PRIOR;
+    const choice = prior === "true" || prior === "false" ? prior === "true" : armoriq.autoUpdate;
+    const wanted = choice !== false && known?.autoUpdate !== false;
+    if (armoriq.autoUpdate === wanted) process.exit(wanted ? 2 : 3);
+    armoriq.autoUpdate = wanted;
     const mode = fs.existsSync(file) ? fs.statSync(file).mode & 0o7777 : 0o644;
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const temporary = `${file}.armoriq-${process.pid}.tmp`;
     fs.writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode });
     fs.chmodSync(temporary, mode);
     fs.renameSync(temporary, file);
+    process.exit(wanted ? 0 : 3);
   ' 2>/dev/null || status=$?
 
   case "${status}" in
-    0) ok "updates are automatic (new versions install during your next session)" ;;
+    0) ok "updates are automatic (Claude Code installs a new version during a session, within about 10 minutes of your first message)" ;;
     2) ok "updates are already automatic" ;;
     3) info "leaving updates manual: auto-update for armoriq is turned off on this machine" ;;
     *) warn "couldn't turn on automatic updates; run ${B}claude plugin update ${PLUGIN_REF}${N} to update" ;;
@@ -106,13 +130,16 @@ enable_auto_update() {
 install_plugin() {
   section "Installing plugin"
 
+  local auto_update_before
+  auto_update_before="$(auto_update_choice)"
+
   info "adding marketplace ${B}${MARKETPLACE_REPO}${N}"
-  if ! claude plugin marketplace add "${MARKETPLACE_REPO}" >/dev/null 2>&1; then
-    claude plugin marketplace update armoriq >/dev/null 2>&1 || true
-  fi
+  claude plugin marketplace add "${MARKETPLACE_REPO}" >/dev/null 2>&1 || true
+  # add succeeds without fetching when armoriq is already on disk.
+  claude plugin marketplace update armoriq >/dev/null 2>&1 || true
   ok "marketplace ready"
 
-  enable_auto_update
+  enable_auto_update "${auto_update_before}"
 
   info "installing plugin ${B}${PLUGIN_REF}${N}"
   claude plugin install "${PLUGIN_REF}" >/dev/null

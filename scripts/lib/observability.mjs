@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { sanitizeParams, redactSecrets } from "./common.mjs";
+import { signedOut } from "./backend-posture.mjs";
 import { appendDaemonLog } from "./daemon-log.mjs";
 import { DECISION_CODE } from "./hook-output.mjs";
 import { loginCutoff } from "./live-usage.mjs";
@@ -608,7 +609,8 @@ export function obsReleaseIdle(maxIdleMs) {
 const UNOBSERVED = { journaled: Promise.resolve(), recorded: Promise.resolve() };
 
 function observe(event, input, output, config) {
-  if (!isObsEnabled(config) || releasingAll) return UNOBSERVED;
+  // The hook's config predates its own 401, so recheck before any lease fetch goes out.
+  if (!isObsEnabled(config) || releasingAll || signedOut(config)) return UNOBSERVED;
   const sessionId = typeof input?.session_id === "string" ? input.session_id : "";
   if (!sessionId) return UNOBSERVED;
   const record = { event, input, output, at: Date.now(), id: randomUUID() };
@@ -754,7 +756,7 @@ const leaseRetryDue = (shipper, replayedAt) =>
     : Date.now() - shipper.leaseTriedAt > LEASE_MISS_TTL_MS;
 
 async function keyHoldsLease(shipper, replayedAt) {
-  if (!holdsLease(shipper) && leaseRetryDue(shipper, replayedAt)) {
+  if (!holdsLease(shipper) && !signedOut(shipper.config) && leaseRetryDue(shipper, replayedAt)) {
     shipper.leaseTriedAt = Date.now();
     shipper.leaseAttempt = safeObsAsync(() => shipper.runtime.refreshPolicy());
   }
