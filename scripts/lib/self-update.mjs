@@ -97,7 +97,10 @@ export async function selfUpdateOnHook({
     let message = null;
 
     if (state.updated && !state.updated.announced) {
-      message = `ArmorClaude updated to ${state.updated.version}. Run /reload-plugins to use it.`;
+      message =
+        install.version === state.updated.version
+          ? `ArmorClaude updated to ${state.updated.version}.`
+          : `ArmorClaude updated to ${state.updated.version}. Run /reload-plugins to use it.`;
       state.updated.announced = true;
     } else if (
       state.available &&

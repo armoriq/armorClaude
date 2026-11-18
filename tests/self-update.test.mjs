@@ -182,6 +182,20 @@ test("the worker records an update and the next hook tells the person once", asy
   assert.equal(await hook(), null);
 });
 
+test("a new session already running the update is not told to reload", async () => {
+  const m = machine();
+  mkdirSync(m.dataDir, { recursive: true });
+  writeFileSync(
+    path.join(m.dataDir, STATE_FILE),
+    JSON.stringify({ updated: { version: "0.2.21", announced: false } })
+  );
+  const upgraded = path.join(m.configDir, "plugins", "cache", "armoriq", "armorclaude", "0.2.21");
+  const hook = () =>
+    selfUpdateOnHook({ dataDir: m.dataDir, pluginRoot: upgraded, env: {}, check: false });
+  assert.equal(await hook(), "ArmorClaude updated to 0.2.21.");
+  assert.equal(await hook(), null);
+});
+
 test("an opted-out user is told once per new version, and not once it is installed", async () => {
   const m = machine();
   const state = path.join(m.dataDir, STATE_FILE);
