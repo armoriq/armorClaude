@@ -4,7 +4,7 @@ import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
 import { appendDaemonLog } from "./lib/daemon-log.mjs";
 import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
 import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
-import { withReloginNotice } from "./lib/relogin.mjs";
+import { sessionOutput } from "./lib/relogin.mjs";
 
 async function readStdin() {
   const chunks = [];
@@ -71,7 +71,7 @@ async function main() {
   try {
     input = JSON.parse(rawInput);
   } catch {
-    if (config.mode === "enforce") {
+    if (config.mode === "enforce" && !config.orgMonitor) {
       emitJson(denyPreTool("invalid_payload", "ArmorClaude hook payload invalid JSON"));
     }
     return;
@@ -89,7 +89,7 @@ async function main() {
   const engine = await import("./lib/engine.mjs");
   const { observeHook, obsFlush } = await import("./lib/observability.mjs");
   const handler = engine[HANDLERS[event]];
-  const output = await withReloginNotice(event, input, config, await handler(input, config));
+  const output = await sessionOutput(event, input, config, await handler(input, config));
 
   if (output) {
     emitJson(output);
@@ -107,7 +107,7 @@ main().catch((error) => {
   let debug = false;
   try {
     const config = loadConfig();
-    mode = config.mode;
+    mode = config.orgMonitor ? "monitor" : config.mode;
     debug = config.debug;
   } catch {
     // loadConfig itself threw (e.g. malformed credentials file). Stay

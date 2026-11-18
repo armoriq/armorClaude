@@ -212,6 +212,8 @@ export function buildAuthHeaders(config) {
   const headers = {
     "Content-Type": "application/json",
     ...sdkModule("client_identity").clientHeaders(config.client),
+    // conmap-auto serves older clients an allow-all stand-in while the org is in Monitor; this one runs Monitor itself.
+    "X-ArmorIQ-Monitor-Aware": "1",
   };
   if (config.apiKey) {
     headers.Authorization = `Bearer ${config.apiKey}`;

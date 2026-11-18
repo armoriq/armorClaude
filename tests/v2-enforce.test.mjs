@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import { startBackend, startHookSession } from "./helpers/hook-session.mjs";
 
 const POLICY_DOCUMENT = JSON.parse(
@@ -136,6 +138,29 @@ test("a v2 hold asks, files one delegation request without an amount, and the ap
 
   approved = true;
   assert.equal(decisionOf(await hook(write)), "allow");
+});
+
+test("in Monitor a v2 hold runs the call and files no approval request, even with a plan on the session", async (t) => {
+  const planId = randomUUID();
+  const backend = await v2Backend(planId, {
+    enforce: () => ({ allowed: false, enforcementAction: "hold", reason: "hold:Write#0" }),
+  });
+  const { hook, dataDir, sessionId } = await startHookSession(t, backend, { ARMORIQ_ORG_MODE: "" });
+  const token = { planId, jwtToken: "jwt-test", rawToken: { plan_id: planId } };
+  await writeFile(
+    path.join(dataDir, "runtime.json"),
+    JSON.stringify({ sessions: { [sessionId]: { intentTokenRaw: JSON.stringify(token) } } })
+  );
+  const held = await hook({
+    hook_event_name: "PreToolUse",
+    tool_name: "Write",
+    tool_input: { file_path: "/workspace/secrets/a.txt", content: "hi" },
+  });
+  assert.equal(held, null);
+  assert.deepEqual(
+    [...routed(backend, "POST /iap/sdk/enforce"), ...routed(backend, "POST /delegation/request")],
+    []
+  );
 });
 
 test("in enforce mode a call is denied when the v2 bundle cannot be fetched", async (t) => {

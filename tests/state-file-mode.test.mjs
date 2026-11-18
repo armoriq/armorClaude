@@ -196,6 +196,7 @@ test("the hook router makes an existing data dir 0700", async () => {
       NODE_OPTIONS: process.env.NODE_OPTIONS ?? "",
       ARMORCLAUDE_DATA_DIR: dataDir,
       ARMORIQ_ENV: "local",
+      ARMORIQ_ORG_MODE: "enforce",
     },
   });
   try {
@@ -263,6 +264,7 @@ test("the daemon makes its data dir 0700 and its PID file 0600", async () => {
       ARMORCLAUDE_DEBUG: "false",
       ARMORCLAUDE_USE_SDK_INTENT: "false",
       ARMORIQ_ENV: "local",
+      ARMORIQ_ORG_MODE: "enforce",
     },
   });
   try {
