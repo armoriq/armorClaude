@@ -85,17 +85,12 @@ async function revalidate(cache, config, read) {
   }
 }
 
-/** The bundle entry's v2 documents; a backend without `policies` sends only the agent's own active one. */
 export function bundlePolicies(agent) {
   if (!agent) return [];
   if (Array.isArray(agent.policies)) return agent.policies;
   return agent.policy ? [{ ...agent.policy, targetType: "agent", status: "active" }] : [];
 }
 
-/**
- * The bundle for the product slug, or the legacy "claude-code" agent's while a
- * backend that predates slug resolution answers the slug with no policy.
- */
 async function bundleState(config, read) {
   const primary = bundleCache(config, config.policyAgentId);
   if (!primary) return null;
@@ -107,7 +102,6 @@ async function bundleState(config, read) {
   const legacy = bundleCache(config, legacyId);
   await revalidate(legacy, config, read);
   const legacyState = legacy.state();
-  // A legacy bundle that cannot be read must block as it did before, not fall back to v1.
   return legacyState.status === "current" || state.status === "current" ? legacyState : state;
 }
 
@@ -117,7 +111,6 @@ async function loadPolicyIr() {
   return policyIr;
 }
 
-/** Names of the v2 policies that decide calls, or null when the bundle cannot be read. */
 export async function activeV2PolicyNames(config) {
   if (!config.apiKey || signedOut(config)) return [];
   try {
@@ -169,11 +162,6 @@ export async function decideV2(config, toolName, toolArgs) {
   return decision;
 }
 
-/**
- * Org-wide documents bind as the floor and the agent's own above it, so policy-ir
- * applies block > hold > allow and an agent rule can only tighten. No active
- * document means v2 has no say and the caller falls back to the v1 policy.
- */
 export function decideFromBundle(ir, agent, call) {
   const policies = bundlePolicies(agent);
   const floor = policies.find((p) => p.targetType === "org" && p.status === "active");
@@ -291,7 +279,6 @@ export async function resolveV2Hold(
     mcp: mcpServer ?? config.mcpName,
     arguments: args,
     intent_token: intentToken,
-    // The backend rejects an intent token presented for any agent other than the one it was minted for.
     agent_id: config.agentId,
     user_email: config.userEmail || undefined,
   });

@@ -68,7 +68,6 @@ import { autoUpdateNotice, withNotice } from "./update-notice.mjs";
 // (or sessionId:toolName fallback). Entries are deleted after PostToolUse /
 // PostToolUseFailure so the map doesn't grow unboundedly.
 const _toolStartTimes = new Map();
-// Which policy decided each allowed call, keyed like _toolStartTimes, for its PostToolUse row.
 const _toolPolicySources = new Map();
 
 /** Derive a stable key for the tool-start-time map. */
@@ -133,7 +132,6 @@ function intentMode(config, policy) {
   return isFrictionlessAllowPolicy(policy) ? "capture" : "required";
 }
 
-/** The local policy allows everything in capture mode, but org v2 policies still decide each call. */
 async function captureNotice(config) {
   const recorded = "Tool calls are recorded against the registered plan.";
   const names = await activeV2PolicyNames(config);
@@ -143,7 +141,7 @@ async function captureNotice(config) {
     : "Your organization's ArmorIQ policies";
   return (
     `${recorded} ${which} still decide each call: a call may be blocked, or held until ` +
-    "another member approves it. A held call must be retried after approval, under the same plan."
+    "another member approves it. Retry a held call with the same arguments after it is approved."
   );
 }
 
@@ -725,11 +723,6 @@ export async function handlePreToolUse(input, config) {
   };
 }
 
-/**
- * v2 and the v1 policy both run and the strictest verdict wins, so a deny or
- * ask names whichever produced it; an allow names the active v2 policy, else
- * the v1 rule.
- */
 function policySource(code, { v1, v2 }) {
   const local = v1 && {
     source: v1.matchedRule?.id ? "local" : "default",
@@ -744,7 +737,6 @@ function policySource(code, { v1, v2 }) {
   return v2?.shadow?.length ? { ...source, shadow: v2.shadow } : source;
 }
 
-/** One line for the person when the active v2 policies differ from the last call this session made. */
 async function policyChangeNotice(config, sessionId, active) {
   if (!sessionId) return "";
   const key = active.map((p) => `${p.policyId}@${p.policyHash ?? ""}`).join(",");
@@ -788,7 +780,6 @@ async function auditBlocked(input, config, code, source, v2) {
       action: toolName,
       tool: toolName,
       input: withPolicySource(redactSecrets(inputs), source),
-      // The console names a row's policy from output.matchedPolicy.
       output:
         source?.source === "v2"
           ? {
@@ -1482,7 +1473,6 @@ async function decidePreToolUse(input, config, ctx = {}) {
     if (held.action === "block" && shouldDeny(config)) {
       return denyPreTool("policy_v2_block", held.reason);
     }
-    // A held call must wait for another member; asking here would let the requester approve it.
     if (held.action === "hold") return denyPreTool("policy_v2_hold", held.reason);
   }
   if (mcpApprovalReason) {
