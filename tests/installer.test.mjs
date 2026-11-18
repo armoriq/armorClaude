@@ -49,6 +49,16 @@ case "$*" in
   "plugin install armorclaude@armoriq"|"plugin install armorclaude-dev@armoriq")
     dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/armoriq/\${3%@armoriq}/0.0.0"
     mkdir -p "$dir/scripts" && : > "$dir/scripts/bootstrap.mjs" ;;
+  "plugin marketplace add "*)
+    dir="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    node -e 'const fs = require("fs");
+      for (const [file, entry] of [[process.argv[1], (j) => j.extraKnownMarketplaces?.armoriq], [process.argv[2], (j) => j.armoriq]]) {
+        try {
+          const json = JSON.parse(fs.readFileSync(file, "utf8"));
+          if (entry(json)) delete entry(json).autoUpdate;
+          fs.writeFileSync(file, JSON.stringify(json));
+        } catch {}
+      }' "$dir/settings.json" "$dir/plugins/known_marketplaces.json" ;;
   "plugin list") printf 'armorclaude@armoriq\\n  Status: enabled\\n' ;;
   "mcp list") echo "plugin:armorclaude:armorclaude-policy: node - Connected" ;;
 esac
@@ -169,21 +179,34 @@ test("the installer turns on auto-update without disturbing the user's settings"
   });
 });
 
-test("the installer keeps auto-update off when the user turned it off", async () => {
-  const { home, env } = sandbox();
-  const settings = path.join(home, ".claude", "settings.json");
-  mkdirSync(path.dirname(settings), { recursive: true });
-  const before = JSON.stringify({
-    extraKnownMarketplaces: {
-      armoriq: { source: { source: "github", repo: "armoriq/armorClaude" }, autoUpdate: false },
-    },
-  });
-  writeFileSync(settings, before);
-  const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
-  assert.equal(code, 0, out);
-  assert.match(out, /leaving updates manual/);
-  assert.equal(readFileSync(settings, "utf8"), before);
+const armoriqEntry = (autoUpdate) => ({
+  source: { source: "github", repo: "armoriq/armorClaude" },
+  ...(autoUpdate !== undefined && { autoUpdate }),
 });
+
+for (const [name, settings, toggle, expected, message] of [
+  ["turned it off in settings", armoriqEntry(false), undefined, false, /leaving updates manual/],
+  ["turned it off with /plugin", armoriqEntry(), false, false, /leaving updates manual/],
+  ["already had it on", armoriqEntry(true), undefined, true, /updates are (already )?automatic/],
+]) {
+  test(`marketplace add drops autoUpdate, and the installer keeps it for a user who ${name}`, async () => {
+    const { home, env } = sandbox();
+    const file = path.join(home, ".claude", "settings.json");
+    mkdirSync(path.join(home, ".claude", "plugins"), { recursive: true });
+    writeFileSync(file, JSON.stringify({ extraKnownMarketplaces: { armoriq: settings } }));
+    if (toggle !== undefined) {
+      writeFileSync(
+        path.join(home, ".claude", "plugins", "known_marketplaces.json"),
+        JSON.stringify({ armoriq: { autoUpdate: toggle } })
+      );
+    }
+    const { code, out } = await run("/bin/bash", guarded(home), { env, detached: true });
+    assert.equal(code, 0, out);
+    assert.match(out, message);
+    const after = JSON.parse(readFileSync(file, "utf8")).extraKnownMarketplaces.armoriq;
+    assert.equal(after.autoUpdate, expected);
+  });
+}
 
 test("the installer leaves updates manual when asked to", async () => {
   const { home, env } = sandbox();

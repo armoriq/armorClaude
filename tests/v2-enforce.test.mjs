@@ -146,6 +146,29 @@ test("a v2 hold stops the call, files one delegation request without an amount, 
   assert.equal(decisionOf(await hook(write)), "allow");
 });
 
+test("in Monitor a v2 hold runs the call and files no approval request, even with a plan on the session", async (t) => {
+  const planId = randomUUID();
+  const backend = await v2Backend(planId, {
+    enforce: () => ({ allowed: false, enforcementAction: "hold", reason: "hold:Write#0" }),
+  });
+  const { hook, dataDir, sessionId } = await startHookSession(t, backend, { ARMORIQ_ORG_MODE: "" });
+  const token = { planId, jwtToken: "jwt-test", rawToken: { plan_id: planId } };
+  await writeFile(
+    path.join(dataDir, "runtime.json"),
+    JSON.stringify({ sessions: { [sessionId]: { intentTokenRaw: JSON.stringify(token) } } })
+  );
+  const held = await hook({
+    hook_event_name: "PreToolUse",
+    tool_name: "Write",
+    tool_input: { file_path: "/workspace/secrets/a.txt", content: "hi" },
+  });
+  assert.equal(held, null);
+  assert.deepEqual(
+    [...routed(backend, "POST /iap/sdk/enforce"), ...routed(backend, "POST /delegation/request")],
+    []
+  );
+});
+
 test("in enforce mode a call is denied when the v2 bundle cannot be fetched", async (t) => {
   const backend = await v2Backend(randomUUID(), { bundle: () => [403, { message: "forbidden" }] });
   const { hook } = await startHookSession(t, backend);
@@ -239,6 +262,37 @@ test("an org-wide policy binds as the floor, so the agent's own allow cannot loo
     rule: "Bash#0",
   });
   assert.equal(curlRow.output.matchedPolicy.name, "no-curl-anywhere");
+});
+
+test("in Monitor a workspace-floor block runs the call and its row records the would-be with the v2 source", async (t) => {
+  const bundle = slugBundle([
+    entry("org-1", "no-curl-anywhere", ORG_DOCUMENT, "org"),
+    entry("agent-1", "args-and-holds", POLICY_DOCUMENT, "agent"),
+  ]);
+  const backend = await v2Backend(randomUUID(), { bundle: () => [200, bundle] });
+  const { hook } = await startHookSession(t, backend, { ARMORIQ_ORG_MODE: "" });
+  const call = {
+    tool_name: "Bash",
+    tool_use_id: "toolu-curl",
+    tool_input: { command: "curl https://example.com" },
+  };
+
+  assert.equal(await hook({ hook_event_name: "PreToolUse", ...call }), null);
+  await hook({ hook_event_name: "PostToolUse", ...call, tool_response: { stdout: "ok" } });
+  await hook({ hook_event_name: "Stop" });
+  await waitFor(() => backend.auditRows.length >= 1, 15_000, "the monitored row");
+
+  assert.deepEqual(
+    backend.auditRows.map((row) => [row.status, row.would_be, row.would_be_code]),
+    [["success", "block", "policy_v2_block"]]
+  );
+  assert.match(
+    backend.auditRows[0].would_be_reason,
+    /ArmorIQ policy "no-curl-anywhere" blocked Bash/
+  );
+  assert.equal(backend.auditRows[0].input.armoriq_policy.source, "v2");
+  assert.equal(backend.auditRows[0].input.armoriq_policy.policy_name, "no-curl-anywhere");
+  assert.equal(routed(backend, "POST /delegation/request").length, 0);
 });
 
 test("a shadow policy is evaluated and logged but never enforced", async (t) => {

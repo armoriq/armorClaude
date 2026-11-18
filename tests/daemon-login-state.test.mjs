@@ -23,6 +23,7 @@ function pluginEnv(home, dataDir) {
     ARMORCLAUDE_POLICY_FILE: path.join(dataDir, "policy.json"),
     ARMORCLAUDE_DEBUG: "true",
     ARMORIQ_ENV: "staging",
+    ARMORIQ_ORG_MODE: "enforce",
   };
 }
 

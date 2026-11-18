@@ -19,6 +19,18 @@ Tool Result ──► PostToolUse hook ──► Audit log sent to IAP
 3. **After tool execution**: Sends audit logs to ArmorIQ IAP for compliance tracking.
 4. **Fail-closed**: If planning fails, identity is missing, or the token is invalid — all tool calls are blocked by default.
 
+### Monitor and Enforce
+
+A signed-in ArmorClaude follows its workspace's setting, read at the start of each session.
+
+- **Monitor** (the default): every tool call runs and nothing from ArmorClaude shows in the session. Each call your policy would have blocked or held is recorded, and you see them on the **Monitor** page at tools.armoriq.ai.
+- **Monitor and show in chat**: every tool call still runs, and the chat shows one line on each call your policy would have blocked or held.
+- **Enforce**: blocked calls stop in the chat and held calls ask first, as described above.
+
+A workspace admin picks the mode on the Monitor page. A change applies from the next session.
+
+`ARMORIQ_ORG_MODE=enforce` makes this machine enforce whatever the workspace says.
+
 ## Install
 
 ### One-line install (recommended)
@@ -31,8 +43,18 @@ This adds the `armoriq` Claude Code marketplace and installs the `armorclaude` p
 
 ### Manual install (Claude Code marketplace)
 
+First install:
+
 ```bash
 claude plugin marketplace add armoriq/armorClaude
+claude plugin install armorclaude@armoriq
+```
+
+If the `armoriq` marketplace is already added, refresh it instead. Running `marketplace add` again
+rewrites its settings entry and drops the auto-update setting:
+
+```bash
+claude plugin marketplace update armoriq
 claude plugin install armorclaude@armoriq
 ```
 
@@ -72,12 +94,16 @@ node scripts/bootstrap.mjs mcp
 
 ### Update / disable / uninstall
 
-The installer turns on auto-update for the `armoriq` marketplace, so Claude Code installs each new
-release by itself during your next session (`Plugin updated ... Run /reload-plugins to apply`).
-The stable plugin moves when its version in `marketplace.json` changes; `armorclaude-dev` moves with
-every commit on `dev`. If you installed another way,
-ArmorClaude tells you once at session start; turn it on in `/plugin`, Marketplaces, `armoriq`,
-Enable auto-update. Set `ARMORCLAUDE_NO_AUTO_UPDATE=1` before installing to keep updates manual.
+ArmorClaude updates itself. At session start, at most once a day, it checks in the background for a
+newer version and runs `claude plugin update` for you; the session never waits for it. When it has
+updated, it says so once: `ArmorClaude updated to X. Run /reload-plugins to use it.` The new version
+loads on `/reload-plugins` or the next launch. The stable plugin moves when its version in
+`marketplace.json` changes; `armorclaude-dev` moves with every commit on `dev`.
+
+To keep updates manual, turn auto-update off for the `armoriq` marketplace (`/plugin`, Marketplaces,
+`armoriq`) or set `ARMORCLAUDE_NO_AUTO_UPDATE=1`. ArmorClaude then only tells you once per version that
+an update exists. The installer also turns on Claude Code's own marketplace auto-update as a backup;
+Claude Code runs that only in an interactive session, up to 10 minutes after your first message.
 
 ```bash
 claude plugin update armorclaude
@@ -149,6 +175,7 @@ When installed as a Claude Code plugin, these values are prompted on enable:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ARMORCLAUDE_MODE` | `enforce` | `enforce` blocks on failure, `monitor` logs only |
+| `ARMORIQ_ORG_MODE` | unset | `enforce` overrides a workspace in Monitor for this machine |
 | `ARMORCLAUDE_INTENT_REQUIRED` | `true` | Block tool calls with no intent token |
 | `ARMORCLAUDE_DATA_DIR` | `$CLAUDE_PLUGIN_DATA` or `~/.claude/armorclaude` | Data storage directory |
 | `ARMORCLAUDE_DEBUG` | `false` | Enable stderr debug logging |

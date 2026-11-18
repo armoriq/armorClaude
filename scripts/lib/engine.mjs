@@ -60,9 +60,10 @@ import { invokesPolicyAdmin, writesProtectedPath } from "./shell-guard.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { activeV2PolicyNames, decideV2, resolveV2Hold } from "./v2-decision.mjs";
+import { dropWouldBe, monitorAfterFetch, rememberWouldBe, takeWouldBe } from "./org-mode.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
-import { autoUpdateNotice, withNotice } from "./update-notice.mjs";
+import { selfUpdateOnHook, withNotice } from "./self-update.mjs";
 
 // In-memory store for tool-call start timestamps. Keyed by tool_use_id
 // (or sessionId:toolName fallback). Entries are deleted after PostToolUse /
@@ -408,6 +409,17 @@ async function emitAudit({ dto: row, config, iapService }) {
   return "sent (http)";
 }
 
+/** Wire fields conmap-auto reads at audit ingest. */
+function withWouldBe(dto, wouldBe) {
+  if (!wouldBe) return dto;
+  return {
+    ...dto,
+    would_be: wouldBe.action,
+    would_be_code: wouldBe.code ?? null,
+    would_be_reason: redactSecrets(String(wouldBe.reason ?? "")).slice(0, 1000),
+  };
+}
+
 function auditLink(config, sessionId, intentTokenRaw) {
   let planId;
   try {
@@ -492,9 +504,10 @@ function usageSyncOffNotice(config) {
 export async function handleSessionStart(input, config) {
   const result = await startSession(input, config);
   if (!input?.session_id) return result;
-  const notice = await autoUpdateNotice({
+  const notice = await selfUpdateOnHook({
     cwd: typeof input.cwd === "string" ? input.cwd : undefined,
     dataDir: config.dataDir,
+    check: true,
   });
   return withNotice(result, notice);
 }
@@ -560,6 +573,8 @@ async function startSession(input, config) {
   // This is the fresh `claude plugin install` path, which never ran the
   // interactive installer/onboarding. ---
   if (config.unconfigured) return notConnectedStart(config, loginNoticeDue);
+
+  if (monitorAfterFetch(config)) return null;
 
   // --- First-run onboarding: if no policy.json, show template picker ---
   const onboardingFlag = path.join(config.dataDir, "onboarding-shown");
@@ -642,6 +657,13 @@ export async function handleUserPromptExpansion(input, config) {
 }
 
 export async function handleUserPromptSubmit(input, config) {
+  const result = await promptSubmit(input, config);
+  if (!input?.session_id) return result;
+  const notice = await selfUpdateOnHook({ dataDir: config.dataDir, check: false });
+  return withNotice(result, notice);
+}
+
+async function promptSubmit(input, config) {
   const prompt = typeof input.prompt === "string" ? input.prompt : "";
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!prompt || !sessionId) {
@@ -710,7 +732,9 @@ export async function handlePreToolUse(input, config) {
   const output = await decidePreToolUse(input, config, ctx);
   const code = output?.[DECISION_CODE];
   const source = policySource(code, ctx);
-  if (output?.hookSpecificOutput?.permissionDecision === "deny") {
+  const decision = output?.hookSpecificOutput?.permissionDecision;
+  if (config.orgMonitor) return monitorPreToolUse(input, config, output, source, ctx.notice);
+  if (decision === "deny") {
     await auditBlocked(input, withBackendPosture(config), code, source, ctx.v2);
   } else if (source) {
     _toolPolicySources.set(_toolTimingKey(input), source);
@@ -765,6 +789,33 @@ async function logShadowVerdicts(config, toolName, shadow) {
 
 function withPolicySource(inputs, source) {
   return source ? { ...(isPlainObject(inputs) ? inputs : {}), armoriq_policy: source } : inputs;
+}
+
+const MONITOR_NOTE = {
+  deny: "ArmorIQ would block this call in Enforce",
+  ask: "ArmorIQ would ask for approval here in Enforce",
+};
+
+function monitorNote(decision, reason) {
+  const why = String(reason ?? "")
+    .split("\n")[0]
+    .slice(0, 200);
+  return `${MONITOR_NOTE[decision]}${why ? ` (${why})` : ""}. Monitor let it run.`;
+}
+
+async function monitorPreToolUse(input, config, output, source, notice) {
+  const decision = output?.hookSpecificOutput?.permissionDecision;
+  if (source) _toolPolicySources.set(_toolTimingKey(input), source);
+  if (decision !== "deny" && decision !== "ask") return notice ? allowWithNotice(notice) : null;
+  const reason = output.hookSpecificOutput.permissionDecisionReason;
+  await rememberWouldBe(config.dataDir, input, {
+    action: decision === "deny" ? "block" : "hold",
+    code: output[DECISION_CODE],
+    reason,
+    ...(source && { source }),
+  }).catch((err) => debugLog(config, `would-be record failed: ${err?.message ?? err}`));
+  const notes = [notice, config.orgMonitorNotices && monitorNote(decision, reason)].filter(Boolean);
+  return notes.length ? allowWithNotice(notes.join("\n\n")) : null;
 }
 
 async function auditBlocked(input, config, code, source, v2) {
@@ -1457,6 +1508,7 @@ async function decidePreToolUse(input, config, ctx = {}) {
   // --- Record tool for discovery ---
   upsertDiscoveredTool(runtimeState, toolName);
   await saveRuntimeState(config.runtimeFile, runtimeState);
+  if (v2?.action === "hold" && config.orgMonitor) return askPreTool("policy_v2_hold", v2.reason);
   if (v2?.action === "hold") {
     const v2Session = getSession(runtimeState, sessionId) || {};
     const held = await resolveV2Hold(config, {
@@ -1584,6 +1636,7 @@ export async function handlePostToolUse(input, config) {
 
     const intentTokenRaw = session.intentTokenRaw || "";
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
+    const wouldBe = config.orgMonitor ? await takeWouldBe(config.dataDir, input) : null;
 
     let dto;
     if (intentTokenRaw) {
@@ -1603,7 +1656,7 @@ export async function handlePostToolUse(input, config) {
       // Frictionless policies mint no token but must still audit, as an orphan
       // session-scoped row. In enforce mode never fabricate a token context.
       const policyState = await loadPolicyState(config.policyFile);
-      if (!isFrictionlessAllowPolicy(policyState.policy)) return null;
+      if (!config.orgMonitor && !isFrictionlessAllowPolicy(policyState.policy)) return null;
       dto = {
         session_id: sessionId,
         user_id: config.userId,
@@ -1620,7 +1673,7 @@ export async function handlePostToolUse(input, config) {
       };
     }
 
-    const target = await emitAudit({ dto, config, iapService });
+    const target = await emitAudit({ dto: withWouldBe(dto, wouldBe), config, iapService });
     debugLog(config, `audit log ${target} for ${toolName}`);
   } catch (error) {
     // Audit is best-effort — don't block
@@ -1648,11 +1701,12 @@ export async function handlePostToolUseFailure(input, config) {
     const iapService = createIapService(config);
 
     const intentTokenRaw = session.intentTokenRaw || "";
-    if (!intentTokenRaw) return null;
+    const wouldBe = config.orgMonitor ? await takeWouldBe(config.dataDir, input) : null;
+    if (!intentTokenRaw && !config.orgMonitor) return null;
 
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
     const used = auditedSteps(session, intentTokenRaw);
-    const stepIdx = pickStepIndex(session.plan, toolName, inputs, 0, used);
+    const stepIdx = intentTokenRaw ? pickStepIndex(session.plan, toolName, inputs, 0, used) : -1;
     const dto = {
       ...auditLink(config, sessionId, intentTokenRaw),
       step_index: stepIdx,
@@ -1666,7 +1720,7 @@ export async function handlePostToolUseFailure(input, config) {
       duration_ms: _computeToolDuration(input),
     };
 
-    const target = await emitAudit({ dto, config, iapService });
+    const target = await emitAudit({ dto: withWouldBe(dto, wouldBe), config, iapService });
     debugLog(config, `audit log (failure) ${target} for ${toolName}`);
   } catch (error) {
     debugLog(config, `audit log (failure) failed: ${error}`);
@@ -1741,6 +1795,7 @@ export async function handleStop(input, config) {
 export async function handleSessionEnd(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
+  await dropWouldBe(config.dataDir, sessionId).catch(() => {});
 
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   const session = runtimeState.sessions ? runtimeState.sessions[sessionId] : undefined;
