@@ -71,6 +71,42 @@ for (const [label, active] of [
   });
 }
 
+test("an org in Monitor with notes runs every call and tells the user what Enforce would have done", async (t) => {
+  const { hook, backend, start } = await orgSession(t, {
+    enforcementMode: "shadow",
+    monitorNotices: true,
+  });
+  assert.equal(start, null);
+  assert.equal(await hook({ hook_event_name: "UserPromptSubmit", prompt: "tidy the repo" }), null);
+
+  const shown = {};
+  for (const [tool_name, tool_input] of [
+    ["Glob", { pattern: "*" }],
+    ["WebFetch", { url: "https://example.com" }],
+    ["Read", { file_path: "/tmp/x" }],
+  ]) {
+    const call = { tool_name, tool_input, tool_use_id: `use-${tool_name}` };
+    shown[tool_name] = await hook({ hook_event_name: "PreToolUse", ...call });
+    await hook({ hook_event_name: "PostToolUse", ...call, tool_response: { ok: true } });
+  }
+  assert.equal(shown.Read, null);
+  assert.equal(shown.Glob.hookSpecificOutput.permissionDecision, undefined);
+  assert.match(shown.Glob.systemMessage, /would block this call.*no-glob.*Monitor let it run/);
+  assert.equal(shown.WebFetch.hookSpecificOutput.permissionDecision, undefined);
+  assert.match(shown.WebFetch.systemMessage, /would ask for approval.*Monitor let it run/);
+
+  await hook({ hook_event_name: "Stop" });
+  await waitFor(() => backend.auditRows.length === 3, 15_000, "one row per call");
+  assert.deepEqual(
+    backend.auditRows.map((r) => [r.tool, r.status, r.would_be]),
+    [
+      ["Glob", "success", "block"],
+      ["WebFetch", "success", "hold"],
+      ["Read", "success", undefined],
+    ]
+  );
+});
+
 test("an org that says Enforce blocks the call", async (t) => {
   const { hook } = await orgSession(t, { enforcementMode: "enforce" });
   const out = await hook({

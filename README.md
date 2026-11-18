@@ -24,7 +24,10 @@ Tool Result ──► PostToolUse hook ──► Audit log sent to IAP
 A signed-in ArmorClaude follows its workspace's setting, read at the start of each session.
 
 - **Monitor** (the default): every tool call runs and nothing from ArmorClaude shows in the session. Each call your policy would have blocked or held is recorded, and you see them on the **Monitor** page at tools.armoriq.ai.
-- **Enforce**: blocked calls stop in the chat and held calls ask first, as described above. A workspace admin turns it on with **Block tool calls in the chat** on the Monitor page. It applies from the next session.
+- **Monitor and show in chat**: every tool call still runs, and the chat shows one line on each call your policy would have blocked or held.
+- **Enforce**: blocked calls stop in the chat and held calls ask first, as described above.
+
+A workspace admin picks the mode on the Monitor page. A change applies from the next session.
 
 `ARMORIQ_ORG_MODE=enforce` makes this machine enforce whatever the workspace says.
 

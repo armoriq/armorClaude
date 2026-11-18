@@ -8,14 +8,16 @@ const ORG_MODES = new Set(["shadow", "enforce"]);
 
 const modeFile = (dataDir) => path.join(dataDir, "org-mode.json");
 
-function cachedOrgMode(dataDir) {
+function cachedOrg(dataDir) {
   try {
-    const { mode } = JSON.parse(readFileSync(modeFile(dataDir), "utf8"));
-    return ORG_MODES.has(mode) ? mode : null;
+    const { mode, notices } = JSON.parse(readFileSync(modeFile(dataDir), "utf8"));
+    return { mode: ORG_MODES.has(mode) ? mode : null, notices: notices === true };
   } catch {
-    return null;
+    return { mode: null, notices: false };
   }
 }
+
+const cachedOrgMode = (dataDir) => cachedOrg(dataDir).mode;
 
 export const orgModeForced = (env = process.env) => env.ARMORIQ_ORG_MODE?.trim() === "enforce";
 
@@ -24,6 +26,10 @@ export function orgMonitorFor(dataDir, env = process.env) {
   return cachedOrgMode(dataDir) !== "enforce";
 }
 
+/** Monitor that also tells the user in the chat what Enforce would have done. */
+export const orgMonitorNoticesFor = (dataDir, env = process.env) =>
+  orgMonitorFor(dataDir, env) && cachedOrg(dataDir).notices;
+
 /** A session start fetches the org's mode after its config was read, and applies it at once. */
 export function monitorAfterFetch(config) {
   const fetched = cachedOrgMode(config.dataDir);
@@ -31,9 +37,13 @@ export function monitorAfterFetch(config) {
   return fetched !== "enforce";
 }
 
-export async function saveOrgMode(dataDir, mode) {
+export async function saveOrgMode(dataDir, mode, notices = false) {
   if (!ORG_MODES.has(mode)) return;
-  await writePrivateFile(modeFile(dataDir), JSON.stringify({ mode, at: new Date().toISOString() }));
+  const at = new Date().toISOString();
+  await writePrivateFile(
+    modeFile(dataDir),
+    JSON.stringify({ mode, notices: notices === true, at })
+  );
 }
 
 const hash = (value) => createHash("sha256").update(String(value)).digest("hex").slice(0, 32);

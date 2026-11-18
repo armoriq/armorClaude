@@ -710,19 +710,31 @@ export async function handlePreToolUse(input, config) {
   const output = await decidePreToolUse(input, config);
   const decision = output?.hookSpecificOutput?.permissionDecision;
   if (config.orgMonitor) {
-    if (decision === "deny" || decision === "ask") {
-      await rememberWouldBe(config.dataDir, input, {
-        action: decision === "deny" ? "block" : "hold",
-        code: output[DECISION_CODE],
-        reason: output.hookSpecificOutput.permissionDecisionReason,
-      }).catch((err) => debugLog(config, `would-be record failed: ${err?.message ?? err}`));
-    }
-    return null;
+    if (decision !== "deny" && decision !== "ask") return null;
+    const reason = output.hookSpecificOutput.permissionDecisionReason;
+    await rememberWouldBe(config.dataDir, input, {
+      action: decision === "deny" ? "block" : "hold",
+      code: output[DECISION_CODE],
+      reason,
+    }).catch((err) => debugLog(config, `would-be record failed: ${err?.message ?? err}`));
+    return config.orgMonitorNotices ? allowWithNotice(monitorNote(decision, reason)) : null;
   }
   if (decision === "deny") {
     await auditBlocked(input, withBackendPosture(config), output[DECISION_CODE]);
   }
   return output;
+}
+
+const MONITOR_NOTE = {
+  deny: "ArmorIQ would block this call in Enforce",
+  ask: "ArmorIQ would ask for approval here in Enforce",
+};
+
+function monitorNote(decision, reason) {
+  const why = String(reason ?? "")
+    .split("\n")[0]
+    .slice(0, 200);
+  return `${MONITOR_NOTE[decision]}${why ? ` (${why})` : ""}. Monitor let it run.`;
 }
 
 async function auditBlocked(input, config, code) {

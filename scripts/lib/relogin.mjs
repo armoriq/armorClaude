@@ -42,10 +42,12 @@ async function claimNotice(config, sessionId) {
 
 /**
  * What the session sees. An org in Monitor sees nothing at all: no verdict, no
- * notice, no update line. Otherwise the hook's answer, plus the sign-in line once.
+ * notice, no update line. Monitor with notes shows only what Enforce would have
+ * done to each call. Otherwise the hook's answer, plus the sign-in line once.
  */
 export async function sessionOutput(event, input, config, output) {
-  if (event === "SessionStart" ? monitorAfterFetch(config) : config.orgMonitor) return null;
+  if (event === "SessionStart" ? monitorAfterFetch(config) : config.orgMonitor)
+    return event === "PreToolUse" && config.orgMonitorNotices ? output : null;
   const sessionId = typeof input?.session_id === "string" ? input.session_id : "";
   if (!sessionId || event === "SessionEnd" || !config.apiKey) return output;
   if (!(await reloginRequired(config)) || !(await claimNotice(config, sessionId))) return output;
