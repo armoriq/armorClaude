@@ -82,15 +82,16 @@ node scripts/bootstrap.mjs mcp
 
 ### Update / disable / uninstall
 
-The installer turns on auto-update for the `armoriq` marketplace and keeps it off if you turned it
-off. Claude Code then installs each new release by itself during an interactive session: after your
-first message it waits a random delay of up to 10 minutes, then updates and shows
-`Plugin updated ... Run /reload-plugins to apply`. The new version loads on `/reload-plugins` or the
-next launch.
-The stable plugin moves when its version in `marketplace.json` changes; `armorclaude-dev` moves with
-every commit on `dev`. If you installed another way,
-ArmorClaude tells you once at session start; turn it on in `/plugin`, Marketplaces, `armoriq`,
-Enable auto-update. Set `ARMORCLAUDE_NO_AUTO_UPDATE=1` before installing to keep updates manual.
+ArmorClaude updates itself. At session start, at most once a day, it checks in the background for a
+newer version and runs `claude plugin update` for you; the session never waits for it. When it has
+updated, it says so once: `ArmorClaude updated to X. Run /reload-plugins to use it.` The new version
+loads on `/reload-plugins` or the next launch. The stable plugin moves when its version in
+`marketplace.json` changes; `armorclaude-dev` moves with every commit on `dev`.
+
+To keep updates manual, turn auto-update off for the `armoriq` marketplace (`/plugin`, Marketplaces,
+`armoriq`) or set `ARMORCLAUDE_NO_AUTO_UPDATE=1`. ArmorClaude then only tells you once per version that
+an update exists. The installer also turns on Claude Code's own marketplace auto-update as a backup;
+Claude Code runs that only in an interactive session, up to 10 minutes after your first message.
 
 ```bash
 claude plugin update armorclaude

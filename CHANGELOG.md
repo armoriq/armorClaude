@@ -4,6 +4,7 @@ Changes to the ArmorClaude plugin, newest first. A stable install picks up code 
 
 ## [Unreleased]
 
+- feat(update): ArmorClaude updates itself: once a day at session start a background check runs `claude plugin update` when a newer version exists, and the next hook says so once; with auto-update turned off it only tells you once per version
 ## [0.2.20] - 2026-11-16
 
 - fix(update): the stable installer writes auto-update into the Claude config dir in use, keeps a user's choice, a symlinked settings file and its mode; the daemon is replaced after an update (#487)
