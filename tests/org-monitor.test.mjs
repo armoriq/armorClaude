@@ -64,6 +64,10 @@ for (const [label, active] of [
     );
     const asked = backend.requests.map((r) => r.route);
     assert.equal(asked.filter((r) => /\/iap\/sdk\/enforce|\/delegation/.test(r)).length, 0);
+    const told = (route) =>
+      backend.requests.filter((r) => r.route === route).map((r) => r.monitorAware);
+    assert.deepEqual([...new Set(told("GET /policies/profiles/active"))], ["1"]);
+    assert.deepEqual([...new Set(told("POST /iap/audit/batch"))], ["1"]);
   });
 }
 
@@ -94,4 +98,35 @@ test("an org in Monitor shows nothing in the session from the session start that
 
   mode.enforcementMode = "shadow";
   assert.equal(await hook({ hook_event_name: "SessionStart" }), null);
+});
+
+test("an updated copy puts back the policy an older copy swapped for the Monitor stand-in", async (t) => {
+  const standIn = {
+    ...POLICY,
+    metadata: { name: "armoriq-monitor-stand-in", description: "" },
+    statements: [],
+  };
+  const backend = await startBackend({
+    "GET /policies/profiles/active": () => [
+      200,
+      { version: 1, policy: null, enforcementMode: "shadow" },
+    ],
+    "POST /intent": () => [200, { token: "csrg-policy-token" }],
+  });
+  const { hook, dataDir } = await startHookSession(t, backend, { ARMORIQ_ORG_MODE: "" });
+  await savePolicyState(path.join(dataDir, "policy.json"), {
+    version: 2,
+    policy: standIn,
+    history: [
+      { version: 1, policy: POLICY },
+      { version: 2, policy: standIn },
+    ],
+  });
+  await hook({ hook_event_name: "SessionStart" });
+  const call = { tool_name: "Glob", tool_input: { pattern: "*" }, tool_use_id: "use-glob" };
+  assert.equal(await hook({ hook_event_name: "PreToolUse", ...call }), null);
+  await hook({ hook_event_name: "PostToolUse", ...call, tool_response: { ok: true } });
+  await hook({ hook_event_name: "Stop" });
+  await waitFor(() => backend.auditRows.length === 1, 15_000, "the Glob row");
+  assert.equal(backend.auditRows[0].would_be, "block");
 });

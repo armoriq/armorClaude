@@ -32,7 +32,12 @@ export async function startBackend(routes = {}) {
       const text = Buffer.concat(chunks).toString("utf8");
       const body = text ? JSON.parse(text) : null;
       const route = `${req.method} ${req.url}`;
-      requests.push({ route, body, client: req.headers["x-armoriq-client"] });
+      requests.push({
+        route,
+        body,
+        client: req.headers["x-armoriq-client"],
+        monitorAware: req.headers["x-armoriq-monitor-aware"],
+      });
       if (route === "POST /iap/audit/batch") {
         auditRows.push(...body.rows);
         res.writeHead(200, { "content-type": "application/json" });

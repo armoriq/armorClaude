@@ -5,6 +5,7 @@ Changes to the ArmorClaude plugin, newest first. A stable install picks up code 
 ## [Unreleased]
 
 - feat(monitor): an org in Monitor, the default until an admin turns Enforce on, runs in the background: nothing is blocked or held and nothing shows in the session; each call writes one audit row with `would_be`, `would_be_code` and `would_be_reason` when Enforce would have stopped it, and a hold files no approval request. The mode comes from `enforcementMode` on the org policy pull; `ARMORIQ_ORG_MODE=enforce` forces Enforce on one machine (#492)
+- feat(monitor): every request says the client runs Monitor itself (`X-ArmorIQ-Monitor-Aware: 1`), so conmap serves it the real policy; an older copy gets an allow-all stand-in instead, and an updated copy puts back the policy that stand-in replaced
 
 ## [0.2.21] - 2026-11-18
 
