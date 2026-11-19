@@ -19,17 +19,17 @@ Tool Result ──► PostToolUse hook ──► Audit log sent to IAP
 3. **After tool execution**: Sends audit logs to ArmorIQ IAP for compliance tracking.
 4. **Fail-closed**: If planning fails, identity is missing, or the token is invalid — all tool calls are blocked by default.
 
-### Monitor and Enforce
+### Workspace mode: Quiet, Show in chat, Block
 
-A signed-in ArmorClaude follows its workspace's setting, read at the start of each session.
+A signed-in ArmorClaude follows the mode its workspace picks under **Tool calls in the chat** on the [Monitor page](https://tools.armoriq.ai/monitor), read at the start of each session.
 
-- **Monitor** (the default): every tool call runs and nothing from ArmorClaude shows in the session. Each call your policy would have blocked or held is recorded, and you see them on the **Monitor** page at tools.armoriq.ai.
-- **Monitor and show in chat**: every tool call still runs, and the chat shows one line on each call your policy would have blocked or held.
-- **Enforce**: blocked calls stop in the chat and held calls ask first, as described above.
+- **Quiet** (the default): every tool call runs and nothing from ArmorClaude shows in the session. Each call your policy would have blocked or held is listed on the Monitor page.
+- **Show in chat**: every tool call still runs, and the chat shows one line on each call your policy would have blocked or held, for example `ArmorIQ would block this call in Enforce (<reason>). Monitor let it run.`
+- **Block**: blocked calls stop in the chat and held calls ask first, as described above.
 
-A workspace admin picks the mode on the Monitor page. A change applies from the next session.
+A workspace admin picks the mode on the Monitor page, and can give one teammate their own mode in its **Teammates** card. A change applies from the next session.
 
-`ARMORIQ_ORG_MODE=enforce` makes this machine enforce whatever the workspace says.
+`ARMORIQ_ORG_MODE=enforce` makes this machine block whatever the workspace says.
 
 ## Install
 
@@ -132,7 +132,7 @@ armorClaude/
 ├── hooks/hooks.json              # Hook registration (7 lifecycle events)
 ├── .mcp.json                     # MCP server for policy + intent tools
 ├── install_armorclaude.sh        # Curl-able installer (armorclaude, production)
-├── install_armorclaude_dev.sh    # Same for armorclaude-dev (staging)
+├── install_armorclaude_dev.sh    # Same for armorclaude-dev
 ├── scripts/
 │   ├── bootstrap.mjs             # Auto-installs npm deps on first run
 │   ├── hook-router.mjs           # Hook entrypoint (dispatches events)
@@ -164,19 +164,18 @@ When installed as a Claude Code plugin, these values are prompted on enable:
 
 | Key | Sensitive | Description |
 |-----|-----------|-------------|
-| `mode` | No | `enforce` (default) or `monitor` |
-| `intent_required` | No | Require intent for all tools (default: `true`) |
-| `crypto_policy_enabled` | No | Enable Merkle tree policy binding |
-| `use_production` | No | Use production ArmorIQ endpoints |
+| `default_template` | No | Policy template proposed on first run for you to confirm |
+| `disable_observability` | No | Turn off execution traces to your ArmorIQ dashboard |
+| `disable_usage_sync` | No | Turn off token usage sync |
+
+Whether calls are blocked comes from your login and the workspace mode above, not from a setting here.
 
 ### Environment Variables
 
 **Core:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARMORCLAUDE_MODE` | `enforce` | `enforce` blocks on failure, `monitor` logs only |
-| `ARMORIQ_ORG_MODE` | unset | `enforce` overrides a workspace in Monitor for this machine |
-| `ARMORCLAUDE_INTENT_REQUIRED` | `true` | Block tool calls with no intent token |
+| `ARMORIQ_ORG_MODE` | unset | `enforce` makes this machine block whatever the workspace mode says |
 | `ARMORCLAUDE_DATA_DIR` | `$CLAUDE_PLUGIN_DATA` or `~/.claude/armorclaude` | Data storage directory |
 | `ARMORCLAUDE_DEBUG` | `false` | Enable stderr debug logging |
 
