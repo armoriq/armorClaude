@@ -1,4 +1,6 @@
 import armoriqSdk from "@armoriq/sdk";
+import { AsyncLocalStorage } from "node:async_hooks";
+import path from "node:path";
 import {
   isPlainObject,
   isSubsetValue,
@@ -8,9 +10,23 @@ import {
   sha256Hex,
 } from "./common.mjs";
 import { compilePolicyForSdkIntent } from "./policy-compiler.mjs";
+import { writeJson } from "./fs-store.mjs";
+import { idempotencyKey, planHash } from "./plan-request.mjs";
+import { isBillingError } from "./hook-output.mjs";
+import {
+  authFingerprint,
+  resolveProcessSession,
+  promptIsOpen,
+  loadRuntimeState,
+  sameGenerations,
+  retirePlan,
+  syncSessionAuth,
+  updateRuntimeState,
+} from "./runtime-state.mjs";
 
 const { ArmorIQClient } = armoriqSdk;
 const sdkClientCache = new Map();
+const sdkAttempt = new AsyncLocalStorage();
 
 function buildSdkClientKey(config) {
   return [
@@ -20,6 +36,7 @@ function buildSdkClientKey(config) {
     config.contextId,
     config.backendEndpoint,
     config.csrgEndpoint,
+    config.runtimeFile,
   ].join("|");
 }
 
@@ -41,6 +58,19 @@ export function getSdkClient(config) {
     verifySsl: config.verifySsl,
     client: config.client,
   });
+  // The SDK wraps issuance errors without status or headers, which retry classification needs.
+  client.httpClient.interceptors.response.use(
+    (response) => {
+      const attempt = sdkAttempt.getStore();
+      if (attempt) attempt.response = response;
+      return response;
+    },
+    (error) => {
+      const attempt = sdkAttempt.getStore();
+      if (attempt) attempt.error = error;
+      throw error;
+    }
+  );
   sdkClientCache.set(key, client);
   return client;
 }
@@ -58,11 +88,18 @@ function buildFallbackPlan(payload) {
   return plan;
 }
 
-function resolvePlan(payload) {
+function legacyResolvePlan(payload) {
   if (isPlainObject(payload.plan)) {
     return payload.plan;
   }
   return buildFallbackPlan(payload);
+}
+
+function resolvePlan(payload) {
+  if (isPlainObject(payload.plan)) {
+    return payload.plan;
+  }
+  throw new Error("An explicit intent plan is required");
 }
 
 export function extractPlanFromIntentToken(raw) {
@@ -218,7 +255,7 @@ export function checkIntentTokenPlan({ intentTokenRaw, toolName, toolParams }) {
   if (!parsed) {
     return { matched: false };
   }
-  if (parsed.expiresAt && Date.now() / 1000 > parsed.expiresAt) {
+  if (parsed.expiresAt && Date.now() / 1000 >= parsed.expiresAt) {
     return {
       matched: true,
       blockReason:
@@ -520,12 +557,562 @@ export function validateCsrgProofHeaders(proofs, required) {
   return null;
 }
 
+export async function submitPlanRequest(config, payload) {
+  if (!config.apiKey || config.signedOut || config.mode === "monitor") {
+    return { skipped: true };
+  }
+  if (config.runtimeFile && payload.session_id) {
+    const state = await loadRuntimeState(config.runtimeFile);
+    if (
+      state.sessions[payload.session_id]?.pendingRequest?.headers?.["X-ArmorIQ-Plan-Kind"] ===
+      "refresh"
+    ) {
+      await refreshIntent(config, payload.session_id, { reloadConfig: payload.reloadConfig });
+      const current = await loadRuntimeState(config.runtimeFile);
+      if (
+        current.sessions[payload.session_id]?.pendingRequest?.headers?.["X-ArmorIQ-Plan-Kind"] ===
+        "refresh"
+      )
+        throw registrationError(
+          "a token refresh is still pending; retry registration after it completes",
+          true
+        );
+    }
+    const descriptor = await preparePlanRequest(config, payload);
+    if (descriptor) return sendPlanRequest(config, descriptor, payload.reloadConfig);
+  }
+  throw registrationError("root prompt identity unavailable");
+}
+
+const REGISTRATION_DEADLINE_MS = 40_000;
+const INTENT_POLICY_COMPILER_VERSION = "sdk-csrg-policy-v1";
+let warnedLegacyBackend = false;
+
+function registrationError(reason, unconfirmed = false) {
+  return Object.assign(new Error(reason), { unconfirmed });
+}
+
+function planRequestBody(config, payload, plan) {
+  return {
+    user_id: config.userId || "__sdk_multiuser__",
+    agent_id: config.agentId || "__sdk_multiuser__",
+    context_id: payload.session_id,
+    plan,
+    ...(payload.policy
+      ? { policy: compilePolicyForSdkIntent(payload.policy, payload.policy_hash) }
+      : {}),
+    expires_in: payload.validitySeconds ?? config.validitySeconds,
+  };
+}
+
+async function preparePlanRequest(config, payload) {
+  return updateRuntimeState(config.runtimeFile, (state) => {
+    syncSessionAuth(state, config, payload.session_id);
+    const session = state.sessions[payload.session_id];
+    if (!session?.promptId) return null;
+    if (payload.generations && !sameGenerations(session, payload.generations))
+      throw registrationError("plan retired before registration completed");
+    const plan = resolvePlan({ ...payload, mcpName: config.mcpName });
+    const hash = planHash(plan);
+    if (session.pendingRequest) {
+      if (session.pendingRequest.planHash !== hash)
+        throw registrationError(
+          "a different plan registration is still pending; resend the identical pending plan to retry it",
+          true
+        );
+      if (session.pendingRequest.unconfirmed) {
+        session.pendingRequest.deadlineAt = Date.now() + REGISTRATION_DEADLINE_MS;
+        delete session.pendingRequest.unconfirmed;
+      }
+      return session.pendingRequest;
+    }
+    const kind = session.countedPlanId ? "revision" : "new";
+    const key = idempotencyKey({
+      kind,
+      promptId: session.promptId,
+      parentPlanId: session.countedPlanId,
+      planHash: hash,
+      epoch: session.retirementEpoch,
+    });
+    const headers = {
+      "Idempotency-Key": key,
+      "X-ArmorIQ-Plan-Kind": kind,
+      "X-ArmorIQ-Prompt-Id": session.promptId,
+      ...(session.countedPlanId ? { "X-ArmorIQ-Parent-Plan-Id": session.countedPlanId } : {}),
+    };
+    const body = planRequestBody(config, payload, plan);
+    session.pendingRequest = {
+      key,
+      headers,
+      body,
+      planHash: hash,
+      policyHash: payload.policy_hash || "",
+      promptId: session.promptId,
+      promptGeneration: session.promptGeneration,
+      authGeneration: session.authGeneration,
+      deadlineAt: Date.now() + REGISTRATION_DEADLINE_MS,
+    };
+    return session.pendingRequest;
+  });
+}
+
+function requestIsCurrent(session, descriptor) {
+  return (
+    sameGenerations(session, descriptor) &&
+    session?.promptId === descriptor.promptId &&
+    session?.pendingRequest?.key === descriptor.key &&
+    (descriptor.headers["X-ArmorIQ-Plan-Kind"] !== "refresh" ||
+      (promptIsOpen(session) &&
+        session.countedPlanId === descriptor.headers["X-ArmorIQ-Parent-Plan-Id"]))
+  );
+}
+
+function requestReason(config, response, error) {
+  const reason =
+    response?.data?.message ||
+    response?.data?.error ||
+    error?.message ||
+    "invalid backend response";
+  const masked = config.apiKey
+    ? String(reason).split(config.apiKey).join("[redacted]")
+    : String(reason);
+  return masked.replace(/\s+/g, " ").trim().replace(/\.+$/, "");
+}
+
+function retryDelay(response, attempt) {
+  const header = response?.headers?.["retry-after"];
+  if (header !== undefined && String(header).trim() !== "") {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const date = Date.parse(header);
+    if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  }
+  return Math.min(1000 * 2 ** attempt, 4000);
+}
+
+async function sendPlanRequest(config, descriptor, reloadConfig = () => config) {
+  const { body, headers } = descriptor;
+  const client = Object.assign(Object.create(getSdkClient(config)), {
+    userId: body.user_id,
+    agentId: body.agent_id,
+    contextId: body.context_id,
+    maxRetries: 0,
+  });
+  const capture = client.capturePlan(config.llmId, "", body.plan);
+  let reason = descriptor.lastReason || "request deadline exceeded";
+  for (let attempt = 0; ; attempt += 1) {
+    const current = await updateRuntimeState(config.runtimeFile, (state) => {
+      syncSessionAuth(state, reloadConfig(), body.context_id);
+      return requestIsCurrent(state.sessions[body.context_id], descriptor);
+    });
+    if (!current) throw registrationError("plan retired before registration completed");
+    const remaining = descriptor.deadlineAt - Date.now();
+    if (remaining <= 0) break;
+    if (descriptor.retryAt > Date.now()) {
+      if (descriptor.retryAt >= descriptor.deadlineAt) break;
+      await new Promise((resolve) => setTimeout(resolve, descriptor.retryAt - Date.now()));
+      continue;
+    }
+    const httpResult = {};
+    try {
+      const token = await sdkAttempt.run(httpResult, () =>
+        client.getIntentToken(capture, body.policy, body.expires_in, {
+          contextId: body.context_id,
+          idempotencyKey: descriptor.key,
+          planKind: headers["X-ArmorIQ-Plan-Kind"],
+          parentPlanId: headers["X-ArmorIQ-Parent-Plan-Id"],
+          promptId: headers["X-ArmorIQ-Prompt-Id"],
+          timeoutMs: Math.min(config.timeoutMs || 8000, remaining),
+        })
+      );
+      if (!token.planId || !Number.isFinite(token.expiresAt)) {
+        reason = "invalid backend response";
+        break;
+      }
+      if (!token.kind && !warnedLegacyBackend) {
+        warnedLegacyBackend = true;
+        process.stderr.write(
+          "[armorclaude] backend response has no kind; using the requested plan kind.\n"
+        );
+      }
+      const result = {
+        skipped: false,
+        source: "armoriq-sdk",
+        tokenRaw: JSON.stringify(token),
+        plan: body.plan,
+        expiresAt: token.expiresAt,
+        countedPlanId:
+          headers["X-ArmorIQ-Plan-Kind"] === "refresh"
+            ? headers["X-ArmorIQ-Parent-Plan-Id"]
+            : token.planId,
+        kind: token.kind || headers["X-ArmorIQ-Plan-Kind"],
+      };
+      const installed = await updateRuntimeState(config.runtimeFile, (state) => {
+        syncSessionAuth(state, reloadConfig(), body.context_id);
+        const session = state.sessions[body.context_id];
+        if (!requestIsCurrent(session, descriptor))
+          return (
+            sameGenerations(session, descriptor) &&
+            session?.promptId === descriptor.promptId &&
+            session?.tokenPlanId === token.planId &&
+            (headers["X-ArmorIQ-Plan-Kind"] !== "refresh" || promptIsOpen(session))
+          );
+        Object.assign(session, {
+          plan: body.plan,
+          planHash: descriptor.planHash,
+          countedPlanId: result.countedPlanId,
+          tokenPlanId: token.planId,
+          kind: headers["X-ArmorIQ-Plan-Kind"] === "refresh" ? session.kind : result.kind,
+          tokenExpiresAt: new Date(token.expiresAt * 1000).toISOString(),
+          expiresAt: token.expiresAt,
+          intentTokenRaw: result.tokenRaw,
+          allowedActions: Array.from(extractAllowedActions(body.plan)),
+          policyHash: descriptor.policyHash,
+          intentPolicyCompilerVersion: INTENT_POLICY_COMPILER_VERSION,
+          pendingRequest: null,
+          unregisteredLocalPlan: null,
+          intentRequestFailed: false,
+          apiKeyPrefix: config.apiKey.slice(0, 16),
+          planRequestBody: body,
+          tokenValiditySeconds: body.expires_in,
+          refreshFailures: 0,
+          refreshRetryAt: 0,
+        });
+        return true;
+      });
+      if (!installed) throw registrationError("plan retired before registration completed");
+      return result;
+    } catch (error) {
+      if (error?.message === "plan retired before registration completed") throw error;
+      const { response, error: networkError } = httpResult;
+      reason = requestReason(config, response, networkError || error);
+      const status = response?.status;
+      if (status === 402 && isBillingError(`402 ${reason}`)) {
+        const installed = await updateRuntimeState(config.runtimeFile, (state) => {
+          syncSessionAuth(state, reloadConfig(), body.context_id);
+          const session = state.sessions[body.context_id];
+          if (!requestIsCurrent(session, descriptor)) return false;
+          retirePlan(session);
+          Object.assign(session, {
+            plan: body.plan,
+            planHash: descriptor.planHash,
+            policyHash: descriptor.policyHash,
+            intentPolicyCompilerVersion: INTENT_POLICY_COMPILER_VERSION,
+            unregisteredLocalPlan: {
+              plan: body.plan,
+              reason: "billing",
+              message: reason,
+              recordedAt: Date.now(),
+            },
+          });
+          return true;
+        });
+        if (!installed) throw registrationError("plan retired before registration completed");
+        return { skipped: true, billing: true, plan: body.plan };
+      }
+      if (status < 400 && response?.data?.success)
+        throw registrationError(requestReason(config, undefined, error), true);
+      const retryable =
+        status === 429 ||
+        (status >= 500 && status <= 599) ||
+        (status === 409 && response?.data?.error === "request_in_progress") ||
+        (!response &&
+          [
+            "ECONNREFUSED",
+            "ECONNRESET",
+            "ETIMEDOUT",
+            "ECONNABORTED",
+            "EPIPE",
+            "ENOTFOUND",
+            "EAI_AGAIN",
+            "ERR_NETWORK",
+          ].includes(networkError?.code));
+      if (!retryable) {
+        await updateRuntimeState(config.runtimeFile, (state) => {
+          const session = state.sessions[body.context_id];
+          if (requestIsCurrent(session, descriptor)) session.pendingRequest = null;
+        });
+        throw registrationError(reason);
+      }
+      const delay = retryDelay(response, attempt);
+      descriptor.retryAt = Date.now() + delay;
+      descriptor.lastReason = reason;
+      await updateRuntimeState(config.runtimeFile, (state) => {
+        const session = state.sessions[body.context_id];
+        if (requestIsCurrent(session, descriptor)) {
+          session.pendingRequest.retryAt = descriptor.retryAt;
+          session.pendingRequest.lastReason = reason;
+        }
+      });
+      if (descriptor.retryAt >= descriptor.deadlineAt) break;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  await updateRuntimeState(config.runtimeFile, (state) => {
+    const session = state.sessions[body.context_id];
+    if (requestIsCurrent(session, descriptor)) session.pendingRequest.unconfirmed = true;
+  });
+  throw registrationError(reason, true);
+}
+
+const refreshFlights = new Map();
+
+export function refreshIntent(
+  config,
+  sessionId,
+  { expiredOnly = false, reloadConfig = () => config } = {}
+) {
+  const flightKey = `${config.runtimeFile}:${sessionId}`;
+  if (refreshFlights.has(flightKey)) return refreshFlights.get(flightKey);
+  const flight = refreshCurrentIntent(config, sessionId, expiredOnly, reloadConfig).finally(() => {
+    if (refreshFlights.get(flightKey) === flight) refreshFlights.delete(flightKey);
+  });
+  refreshFlights.set(flightKey, flight);
+  return flight;
+}
+
+async function refreshCurrentIntent(config, sessionId, expiredOnly, reloadConfig) {
+  const descriptor = await updateRuntimeState(config.runtimeFile, async (state) => {
+    const session = state.sessions[sessionId];
+    if (session?.authFingerprint !== authFingerprint(reloadConfig())) return null;
+    if (
+      !config.apiKey ||
+      config.signedOut ||
+      config.mode === "monitor" ||
+      !promptIsOpen(session) ||
+      !session.countedPlanId ||
+      !session.intentTokenRaw ||
+      !isPlainObject(session.plan)
+    )
+      return null;
+    const expiresAt = Date.parse(session.tokenExpiresAt);
+    if (!Number.isFinite(expiresAt)) return null;
+    const validity = session.tokenValiditySeconds ?? config.validitySeconds;
+    const threshold = expiredOnly ? 0 : Math.min(120, validity / 3) * 1000;
+    if (expiresAt - Date.now() > threshold || session.refreshRetryAt > Date.now()) return null;
+    if (session.pendingRequest) {
+      if (
+        session.pendingRequest.headers?.["X-ArmorIQ-Plan-Kind"] !== "refresh" ||
+        session.pendingRequest.retryAt > Date.now()
+      )
+        return null;
+      if (session.pendingRequest.unconfirmed) {
+        session.pendingRequest.deadlineAt = Date.now() + REGISTRATION_DEADLINE_MS;
+        delete session.pendingRequest.unconfirmed;
+      }
+      return session.pendingRequest;
+    }
+    const key = idempotencyKey({
+      kind: "refresh",
+      countedPlanId: session.countedPlanId,
+      tokenExpiresAt: session.tokenExpiresAt,
+    });
+    let body = session.planRequestBody;
+    if (!body) {
+      const { loadPolicyState } = await import("./policy.mjs");
+      const { policy } = await loadPolicyState(config.policyFile);
+      body = planRequestBody(
+        config,
+        {
+          session_id: sessionId,
+          policy,
+          policy_hash: session.policyHash,
+          validitySeconds: validity,
+        },
+        session.plan
+      );
+    }
+    session.pendingRequest = {
+      key,
+      headers: {
+        "Idempotency-Key": key,
+        "X-ArmorIQ-Plan-Kind": "refresh",
+        "X-ArmorIQ-Parent-Plan-Id": session.countedPlanId,
+        "X-ArmorIQ-Prompt-Id": session.promptId,
+      },
+      body,
+      planHash: session.planHash,
+      policyHash: session.policyHash,
+      promptId: session.promptId,
+      promptGeneration: session.promptGeneration,
+      authGeneration: session.authGeneration,
+      deadlineAt: Date.now() + REGISTRATION_DEADLINE_MS,
+    };
+    return session.pendingRequest;
+  });
+  if (!descriptor) return { skipped: true };
+  try {
+    return await sendPlanRequest(config, descriptor, reloadConfig);
+  } catch (error) {
+    await updateRuntimeState(config.runtimeFile, (state) => {
+      const session = state.sessions[sessionId];
+      if (
+        !sameGenerations(session, descriptor) ||
+        session?.countedPlanId !== descriptor.headers["X-ArmorIQ-Parent-Plan-Id"]
+      )
+        return;
+      if (!promptIsOpen(session)) {
+        if (session.pendingRequest?.key === descriptor.key) session.pendingRequest = null;
+        return;
+      }
+      session.refreshFailures = (session.refreshFailures || 0) + 1;
+      session.refreshRetryAt = Math.max(
+        descriptor.retryAt || 0,
+        Date.now() + Math.min(15_000 * 2 ** (session.refreshFailures - 1), 120_000)
+      );
+    });
+    if (config.debug)
+      process.stderr.write(
+        `[armorclaude] refresh failed: ${requestReason(config, undefined, error)}\n`
+      );
+    return { skipped: true };
+  }
+}
+
+export function startIntentRefreshLoop(reloadConfig) {
+  const timer = setInterval(async () => {
+    try {
+      const config = reloadConfig();
+      const state = await loadRuntimeState(config.runtimeFile);
+      await Promise.all(
+        Object.keys(state.sessions)
+          .filter((id) => state.sessions[id].authFingerprint === authFingerprint(config))
+          .map((sessionId) => refreshIntent(config, sessionId, { reloadConfig }))
+      );
+    } catch (error) {
+      process.stderr.write(`[armorclaude] refresh loop failed: ${error?.message || error}\n`);
+    }
+  }, 15_000);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+function registrationReply(message, isError = false) {
+  return {
+    content: [{ type: "text", text: message }],
+    structuredContent: { message },
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+function registeredReply(session, plan) {
+  return registrationReply(
+    `Intent registered: plan ${session.countedPlanId} (${session.kind}), ${plan.steps.length} steps. Token valid until ${session.tokenExpiresAt}.`
+  );
+}
+
+export async function registerIntentPlan(
+  config,
+  plan,
+  { reloadConfig = () => config, forceRevision = false } = {}
+) {
+  let confirmed = false;
+  try {
+    const prepared = await updateRuntimeState(config.runtimeFile, async (state) => {
+      const sessionId = resolveProcessSession(state);
+      if (!sessionId) throw registrationError("session identity unavailable");
+      syncSessionAuth(state, config, sessionId);
+      const session = state.sessions[sessionId];
+      const reason =
+        !config.apiKey || config.signedOut
+          ? "logged_out"
+          : config.mode === "monitor"
+            ? "monitor_mode"
+            : null;
+      if (reason) {
+        session.unregisteredLocalPlan = { plan, reason, recordedAt: Date.now() };
+        await writePendingPlan(config, sessionId, session, { plan });
+        return { reply: registrationReply(`Plan recorded locally, not registered (${reason}).`) };
+      }
+      if (forceRevision && !session.countedPlanId)
+        throw registrationError("no current plan in this prompt to reanchor");
+      if (
+        !forceRevision &&
+        session.countedPlanId &&
+        session.planHash === planHash(plan) &&
+        session.intentTokenRaw &&
+        Date.parse(session.tokenExpiresAt) > Date.now()
+      )
+        return { reply: registeredReply(session, plan) };
+      return {
+        sessionId,
+        generations: {
+          promptGeneration: session.promptGeneration,
+          authGeneration: session.authGeneration,
+        },
+      };
+    });
+    if (prepared.reply) return prepared.reply;
+    const { loadPolicyState, computePolicyHash } = await import("./policy.mjs");
+    const policyState = await loadPolicyState(config.policyFile);
+    const result = await submitPlanRequest(config, {
+      plan,
+      session_id: prepared.sessionId,
+      generations: prepared.generations,
+      policy: policyState.policy,
+      policy_hash: computePolicyHash(policyState.policy),
+      validitySeconds: config.validitySeconds,
+      reloadConfig,
+    });
+    if (result.billing)
+      return registrationReply(
+        `Plan recorded locally, not registered (billing). Your policy is still enforced locally. Upgrade: ${billingUpgradeUrl(config)}`
+      );
+    confirmed = true;
+    return await updateRuntimeState(config.runtimeFile, async (state) => {
+      syncSessionAuth(state, reloadConfig(), prepared.sessionId);
+      const session = state.sessions[prepared.sessionId];
+      if (
+        !sameGenerations(session, prepared.generations) ||
+        session?.countedPlanId !== result.countedPlanId ||
+        session?.tokenPlanId !== JSON.parse(result.tokenRaw).planId
+      )
+        throw registrationError("plan retired before registration completed");
+      await writePendingPlan(config, prepared.sessionId, session, result);
+      return registeredReply(session, plan);
+    });
+  } catch (error) {
+    const reason = requestReason(config, undefined, error);
+    return registrationReply(
+      error.unconfirmed ||
+        (confirmed && error.message !== "plan retired before registration completed")
+        ? `Plan registration not confirmed: ${reason}. It will be retried with the same request id.`
+        : `Plan not registered: ${reason}.`,
+      true
+    );
+  }
+}
+
+export function billingUpgradeUrl(config) {
+  return (
+    config.upgradeUrl ||
+    process.env.ARMORCLAUDE_UPGRADE_URL ||
+    "https://tools.armoriq.ai/tools/billing"
+  );
+}
+
+async function writePendingPlan(config, sessionId, session, result) {
+  await writeJson(path.join(config.dataDir, `pending-plan.${sessionId}.json`), {
+    sessionId,
+    promptId: session.promptId,
+    promptGeneration: session.promptGeneration,
+    authGeneration: session.authGeneration,
+    plan: result.plan,
+    tokenRaw: result.tokenRaw || "",
+    allowedActions: Array.from(extractAllowedActions(result.plan)),
+    expiresAt: result.expiresAt,
+    policyHash: session.policyHash || "",
+    intentPolicyCompilerVersion: INTENT_POLICY_COMPILER_VERSION,
+    registeredAt: Date.now(),
+  });
+}
+
 export async function requestIntent(config, payload) {
   if (!config.apiKey) {
     return { skipped: true };
   }
   const client = getSdkClient(config);
-  const plan = resolvePlan({ ...payload, mcpName: config.mcpName });
+  const plan = legacyResolvePlan({ ...payload, mcpName: config.mcpName });
   const metadata = {
     source: "claude-code",
     session_id: payload.session_id,
