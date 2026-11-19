@@ -1,3 +1,4 @@
 node_modules
 dist
 *.md
+tests/fixtures/block-capture-v1.json
