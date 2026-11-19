@@ -12,6 +12,7 @@ import {
   GENERATION,
   home,
   isoAgo,
+  lastHour,
   liveFiles,
   projectFile,
   quiet,
@@ -186,6 +187,7 @@ test("the live upload keeps its state and log owner-only", async () => {
 for (const loss of ["the upload is killed", "the response is lost"]) {
   test(`a batch the backend committed is sent again once with the same id and bytes when ${loss}`, async () => {
     await withSession(async (b, h, id) => {
+      const at = lastHour();
       let held;
       b.onBatch = (res) => {
         b.onBatch = null;
@@ -193,7 +195,7 @@ for (const loss of ["the upload is killed", "the response is lost"]) {
         else held = res;
         return true;
       };
-      writeSession(h, id, [assistant(id, "a", isoAgo(60_000), { input_tokens: 7 })]);
+      writeSession(h, id, [assistant(id, "a", at(10), { input_tokens: 7 })]);
       await stop(h, b.url, false, id);
       await until(() => b.batches.length === 1, "the first batch");
       if (held) {
@@ -212,7 +214,7 @@ for (const loss of ["the upload is killed", "the response is lost"]) {
           .filter((n) => n.includes(committed)).length,
         1
       );
-      appendFileSync(projectFile(h, id), usageLine(id, "b", isoAgo(30_000), { input_tokens: 3 }));
+      appendFileSync(projectFile(h, id), usageLine(id, "b", at(20), { input_tokens: 3 }));
       await stop(h, b.url, false, id);
       await until(() => b.batches.length === 3, "the replay and the next capture");
       const files = await settled(h, id);
@@ -246,15 +248,16 @@ test("a correction that moves tokens between categories posts although the total
 test("after the usage stream is reset every hour of the session is sent again under the new generation", async () => {
   await withSession(async (b, h, id) => {
     const earlier = isoAgo(2 * 3_600_000);
+    const at = lastHour();
     writeSession(h, id, [
       assistant(id, "a", earlier, { input_tokens: 4 }),
-      assistant(id, "b", isoAgo(60_000), { input_tokens: 6 }),
+      assistant(id, "b", at(10), { input_tokens: 6 }),
     ]);
     await stop(h, b.url, false, id);
     await until(() => b.batches.length === 1, "the first batch");
     await settled(h, id);
     b.generation = randomUUID();
-    appendFileSync(projectFile(h, id), usageLine(id, "c", isoAgo(30_000), { input_tokens: 5 }));
+    appendFileSync(projectFile(h, id), usageLine(id, "c", at(20), { input_tokens: 5 }));
     await stop(h, b.url, false, id);
     await until(() => b.batches.length === 2, "the batch under the new generation");
     const files = await settled(h, id);
@@ -267,6 +270,7 @@ test("after the usage stream is reset every hour of the session is sent again un
 
 test("a batch the backend refuses for good is set aside with its reason and the next capture is sent", async () => {
   await withSession(async (b, h, id) => {
+    const at = lastHour();
     let refusedId;
     b.onBatch = (res, body) => {
       refusedId ??= body.batchId;
@@ -275,11 +279,11 @@ test("a batch the backend refuses for good is set aside with its reason and the 
       res.end(JSON.stringify({ message: "usageHour must be a UTC hour" }));
       return true;
     };
-    writeSession(h, id, [assistant(id, "a", isoAgo(60_000), { input_tokens: 7 })]);
+    writeSession(h, id, [assistant(id, "a", at(10), { input_tokens: 7 })]);
     await stop(h, b.url, false, id);
     await until(() => b.batches.length === 1, "the refused batch");
     await settled(h, id);
-    appendFileSync(projectFile(h, id), usageLine(id, "b", isoAgo(30_000), { input_tokens: 3 }));
+    appendFileSync(projectFile(h, id), usageLine(id, "b", at(20), { input_tokens: 3 }));
     await stop(h, b.url, false, id);
     await until(() => b.batches.some((x) => x.batchId !== refusedId), "the next capture");
     const files = await settled(h, id);
@@ -295,6 +299,7 @@ test("a batch the backend refuses for good is set aside with its reason and the 
 test("a batch refused for good is retried hour by hour, only the refused hour is set aside, and it is sent again only once it changes", async () => {
   await withSession(async (b, h, id) => {
     const bad = isoAgo(2 * 3_600_000);
+    const at = lastHour();
     const isBad = (s) =>
       s.usageDate === bad.slice(0, 10) && s.usageHour === Number(bad.slice(11, 13));
     b.onBatch = (res, body) => {
@@ -305,7 +310,7 @@ test("a batch refused for good is retried hour by hour, only the refused hour is
     };
     writeSession(h, id, [
       assistant(id, "a", bad, { input_tokens: 4 }),
-      assistant(id, "b", isoAgo(60_000), { input_tokens: 6 }),
+      assistant(id, "b", at(10), { input_tokens: 6 }),
     ]);
     await stop(h, b.url, false, id);
     const alone = (x) => x.snapshots.length === 1 && !isBad(x.snapshots[0]);
@@ -316,7 +321,7 @@ test("a batch refused for good is retried hour by hour, only the refused hour is
       [[4]]
     );
     const sentBefore = b.batches.length;
-    appendFileSync(projectFile(h, id), usageLine(id, "c", isoAgo(30_000), { input_tokens: 5 }));
+    appendFileSync(projectFile(h, id), usageLine(id, "c", at(20), { input_tokens: 5 }));
     await stop(h, b.url, false, id);
     await until(() => b.batches.length > sentBefore, "the next capture");
     await settled(h, id);

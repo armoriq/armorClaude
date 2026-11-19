@@ -240,6 +240,8 @@ export function loadConfig(env = process.env) {
     loggedInAt: profile?.loggedInAt ?? "",
     loginHistory: login?.loginHistory ?? null,
     agentId: "claude-code",
+    policyAgentId: "armorclaude",
+    legacyPolicyAgentId: "claude-code",
     contextId: "default",
 
     // Tuning — sane defaults nobody tunes.

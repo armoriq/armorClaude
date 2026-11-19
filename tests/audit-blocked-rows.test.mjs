@@ -95,7 +95,10 @@ test("a call denied for having no plan writes one blocked audit row", async (t) 
   assert.equal(row.session_id, session.sessionId);
   assert.equal(row.plan_id, undefined);
   assert.equal(row.step_index, -1);
-  assert.deepEqual(row.input, { command: "ls" });
+  assert.deepEqual(row.input, {
+    command: "ls",
+    armoriq_policy: { source: "builtin", rule_id: "intent_plan_missing" },
+  });
 });
 
 test("a call that drifts from the registered plan writes a blocked row linked to it, with no step", async (t) => {
