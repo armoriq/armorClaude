@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isPlainObject } from "./common.mjs";
 import { loginCommand } from "./config.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
+import { saveOrgMode } from "./org-mode.mjs";
 import { loadPolicyState, savePolicyState } from "./policy.mjs";
 import { canonicalPolicyHash, normalizePolicyIr, validatePolicyIr } from "./policy-ir.mjs";
 import { getTemplate, getTemplateNames } from "./policy-templates.mjs";
@@ -2588,15 +2589,65 @@ export async function handleArmorPolicyCommand(prompt, config) {
 }
 
 /** On any failure leave the local policy untouched, so a failed pull can never wipe or loosen enforcement. */
+/** The allow-all policy conmap-auto serves older clients while the org is in Monitor (`src/policies/armor/monitor-stand-in.ts`). */
+const MONITOR_STAND_IN = "armoriq-monitor-stand-in";
+
+const isStandIn = (policy) => policy?.metadata?.name === MONITOR_STAND_IN;
+
+async function replaceLocalPolicy(config, state, policy, updatedBy, reason) {
+  const now = new Date().toISOString();
+  const version = state.version + 1;
+  const nextState = {
+    version,
+    updatedAt: now,
+    updatedBy,
+    policy,
+    history: [...state.history, { version, updatedAt: now, updatedBy, reason, policy }],
+  };
+  const cryptoResult = await issueCryptoPolicyTokenForState(config, nextState);
+  if (!cryptoResult.ok) {
+    return {
+      ok: false,
+      changed: false,
+      reason: `crypto token issuance failed: ${cryptoResult.error}`,
+    };
+  }
+  await savePolicyState(config.policyFile, nextState);
+  return { ok: true, changed: true, version };
+}
+
+/** An older copy took the stand-in in place of the user's own policy; this one puts that policy back. */
+async function restoreAfterStandIn(config) {
+  const state = await loadPolicyState(config.policyFile);
+  if (!isStandIn(state.policy)) return null;
+  const before = state.history.findLast((entry) => entry.policy && !isStandIn(entry.policy));
+  if (!before) return null;
+  return replaceLocalPolicy(
+    config,
+    state,
+    before.policy,
+    "monitor-restore",
+    "restored the policy in use before the Monitor stand-in"
+  );
+}
+
 export async function syncActivePolicyFromBackend(config) {
   if (!config.apiKey) return { ok: false, changed: false, reason: "no api key" };
 
   const result = await pullProfilesFromBackend(config);
   if (!result.ok)
     return { ok: false, changed: false, reason: result.reason || `HTTP ${result.status}` };
+  await saveOrgMode(config.dataDir, result.mode, result.notices);
 
   const active = result.profiles.find((p) => p?.policy);
-  if (!active?.policy) return { ok: false, changed: false, reason: "no active org policy" };
+  if (!active?.policy)
+    return (
+      (await restoreAfterStandIn(config)) ?? {
+        ok: false,
+        changed: false,
+        reason: "no active org policy",
+      }
+    );
 
   const validated = validatePolicyIr(normalizePolicyIr(active.policy));
   if (!validated.ok)
@@ -2611,36 +2662,13 @@ export async function syncActivePolicyFromBackend(config) {
   if (canonicalPolicyHash(state.policy) === canonicalPolicyHash(remotePolicy)) {
     return { ok: true, changed: false };
   }
-
-  const now = new Date().toISOString();
-  const nextState = {
-    version: state.version + 1,
-    updatedAt: now,
-    updatedBy: "dashboard-sync",
-    policy: remotePolicy,
-    history: [
-      ...state.history,
-      {
-        version: state.version + 1,
-        updatedAt: now,
-        updatedBy: "dashboard-sync",
-        reason: "pulled confirmed org policy from dashboard",
-        policy: remotePolicy,
-      },
-    ],
-  };
-
-  const cryptoResult = await issueCryptoPolicyTokenForState(config, nextState);
-  if (!cryptoResult.ok) {
-    return {
-      ok: false,
-      changed: false,
-      reason: `crypto token issuance failed: ${cryptoResult.error}`,
-    };
-  }
-
-  await savePolicyState(config.policyFile, nextState);
-  return { ok: true, changed: true, version: nextState.version };
+  return replaceLocalPolicy(
+    config,
+    state,
+    remotePolicy,
+    "dashboard-sync",
+    "pulled confirmed org policy from dashboard"
+  );
 }
 
 async function stagePending(

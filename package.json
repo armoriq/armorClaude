@@ -1,6 +1,6 @@
 {
   "name": "armorclaude",
-  "version": "0.2.21",
+  "version": "0.2.22",
   "private": true,
   "type": "module",
   "description": "ArmorIQ intent-based security enforcement for Claude Code",
@@ -20,6 +20,7 @@
     "node": ">=20.19.0"
   },
   "dependencies": {
+    "@armoriq/policy-ir": "^0.1.9",
     "@armoriq/sdk": "^0.8.24",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.6.5"

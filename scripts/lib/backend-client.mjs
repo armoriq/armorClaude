@@ -93,7 +93,13 @@ export async function pullProfiles(config) {
     const profiles = policy
       ? [{ profile: { name: "active", description: "Active org policy" }, policy }]
       : [];
-    return { ok: res.ok, status: res.status, profiles };
+    return {
+      ok: res.ok,
+      status: res.status,
+      profiles,
+      mode: res.data?.enforcementMode,
+      notices: res.data?.monitorNotices,
+    };
   } catch (err) {
     return { ok: false, reason: String(err?.message || err), profiles: [] };
   }

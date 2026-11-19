@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -11,15 +11,27 @@ import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
 const PROD = "https://api.armoriq.ai";
 const LOGIN_LINE = `No ArmorClaude login for ${PROD}. Run: armoriq login --product armorclaude --backend ${PROD}`;
 
-test("loadConfig: a usable ak_ key connects → enforce + intent required", () => {
-  const config = loadConfigWithLogins([{ backend: PROD, apiKey: "ak_live_abc1234567890" }], {
-    ARMORIQ_ENV: "production",
+for (const [org, forced, orgMonitor] of [
+  [null, "", true],
+  ["shadow", "", true],
+  ["enforce", "", false],
+  ["shadow", "enforce", false],
+]) {
+  test(`loadConfig: a usable key with org mode ${org} and ARMORIQ_ORG_MODE=${forced} gives orgMonitor=${orgMonitor}`, async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "connect-gating-"));
+    if (org) await writeFile(path.join(dataDir, "org-mode.json"), JSON.stringify({ mode: org }));
+    const config = loadConfigWithLogins([{ backend: PROD, apiKey: "ak_live_abc1234567890" }], {
+      ARMORIQ_ENV: "production",
+      CLAUDE_PLUGIN_DATA: dataDir,
+      ARMORIQ_ORG_MODE: forced,
+    });
+    assert.equal(config.apiKey, "ak_live_abc1234567890");
+    assert.equal(config.mode, "enforce");
+    assert.equal(config.orgMonitor, orgMonitor);
+    assert.equal(config.intentRequired, !orgMonitor);
+    assert.equal(config.unconfigured, false);
   });
-  assert.equal(config.apiKey, "ak_live_abc1234567890");
-  assert.equal(config.mode, "enforce");
-  assert.equal(config.intentRequired, true);
-  assert.equal(config.unconfigured, false);
-});
+}
 
 test("loadConfig: a bad-format key is dropped → monitor, never handed to the SDK", () => {
   const config = loadConfigWithLogins([{ backend: PROD, apiKey: "old-style-key-not-ak-format" }], {

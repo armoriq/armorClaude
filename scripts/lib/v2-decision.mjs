@@ -16,8 +16,8 @@ import {
 
 const caches = new Map();
 
-function bundleCache(config) {
-  const key = `${config.backendEndpoint} ${config.agentId} ${sha256Hex(config.apiKey).slice(0, 16)}`;
+function bundleCache(config, agentId) {
+  const key = `${config.backendEndpoint} ${agentId} ${sha256Hex(config.apiKey).slice(0, 16)}`;
   if (!caches.has(key)) {
     const { PolicyBundleCache } = sdkModule("policy-bundle");
     if (typeof PolicyBundleCache !== "function") return null;
@@ -27,7 +27,7 @@ function bundleCache(config) {
         httpClient: bundleHttpClient(config),
         backendEndpoint: config.backendEndpoint,
         apiKey: config.apiKey,
-        agentId: config.agentId,
+        agentId,
       }))
     );
   }
@@ -75,25 +75,67 @@ export function unreachableReason(config, toolName) {
   );
 }
 
+async function revalidate(cache, config, read) {
+  if (backendUnreachable(config)) return;
+  const { BUNDLE_REVALIDATE_MS } = sdkModule("policy-bundle");
+  if (read && cache.state().status === "current") {
+    cache.refresh(BUNDLE_REVALIDATE_MS).catch(() => {});
+  } else {
+    await cache.refresh(read ? 0 : UNREACHABLE_FOR_MS);
+  }
+}
+
+export function bundlePolicies(agent) {
+  if (!agent) return [];
+  if (Array.isArray(agent.policies)) return agent.policies;
+  return agent.policy ? [{ ...agent.policy, targetType: "agent", status: "active" }] : [];
+}
+
+async function bundleState(config, read) {
+  const primary = bundleCache(config, config.policyAgentId);
+  if (!primary) return null;
+  await revalidate(primary, config, read);
+  const state = primary.state();
+  const legacyId = config.legacyPolicyAgentId;
+  const decisive = bundlePolicies(state.agent).length || state.agent?.inactive;
+  if (!legacyId || (state.status === "current" && decisive)) return state;
+  const legacy = bundleCache(config, legacyId);
+  await revalidate(legacy, config, read);
+  const legacyState = legacy.state();
+  return legacyState.status === "current" || state.status === "current" ? legacyState : state;
+}
+
+let policyIr;
+async function loadPolicyIr() {
+  policyIr ??= await import("@armoriq/policy-ir").catch(() => null);
+  return policyIr;
+}
+
+export async function activeV2PolicyNames(config) {
+  if (!config.apiKey || signedOut(config)) return [];
+  try {
+    const state = await bundleState(config, true);
+    if (state?.status !== "current") return null;
+    return bundlePolicies(state.agent)
+      .filter((p) => p.status === "active")
+      .map((p) => p.name);
+  } catch {
+    return null;
+  }
+}
+
 export async function decideV2(config, toolName, toolArgs) {
-  const cache = bundleCache(config);
-  const { decideLocally } = sdkModule("local-decision");
-  if (!cache || typeof decideLocally !== "function") {
+  const ir = await loadPolicyIr();
+  const { PolicyBundleCache } = sdkModule("policy-bundle");
+  if (typeof PolicyBundleCache !== "function" || typeof ir?.evaluate !== "function") {
     return {
       allowed: false,
       action: "block",
-      reason: "policy-bundle-unavailable: the installed @armoriq/sdk has no v2 evaluator",
+      reason: "policy-bundle-unavailable: the installed plugin has no v2 evaluator",
     };
   }
   const read = capabilityOf(toolName) === "read";
-  if (!backendUnreachable(config)) {
-    const { BUNDLE_REVALIDATE_MS } = sdkModule("policy-bundle");
-    if (read && cache.state().status === "current") {
-      cache.refresh(BUNDLE_REVALIDATE_MS).catch(() => {});
-    } else {
-      await cache.refresh(read ? 0 : UNREACHABLE_FOR_MS);
-    }
-  }
+  const state = await bundleState(config, read);
   if (signedOut(config)) return { allowed: true, action: "allow", reason: "signed_out" };
   if (backendUnreachable(config)) {
     if (!read) {
@@ -104,22 +146,109 @@ export async function decideV2(config, toolName, toolArgs) {
         reason: unreachableReason(config, toolName),
       };
     }
-    if (cache.state().status !== "current") {
+    if (state.status !== "current") {
       return { allowed: true, action: "allow", reason: "backend_unreachable" };
     }
   }
-  const state = cache.state();
-  if (state.status === "current" && !state.agent) {
-    return { allowed: true, action: "allow", reason: "no_v2_policy" };
-  }
+  if (state.status === "unavailable") return block("policy-bundle-unavailable");
+  if (state.status === "stale") return block("policy-bundle-stale");
   const { tool, mcpServer } = v2Call(toolName);
-  return decideLocally(state, {
-    agentId: config.agentId,
+  const decision = decideFromBundle(ir, state.agent, {
     tool,
     arguments: isPlainObject(toolArgs) ? toolArgs : {},
     mcpServer,
     userEmail: config.userEmail || undefined,
   });
+  return decision;
+}
+
+export function decideFromBundle(ir, agent, call) {
+  const policies = bundlePolicies(agent);
+  const floor = policies.find((p) => p.targetType === "org" && p.status === "active");
+  const own = policies.find((p) => p.targetType !== "org" && p.status === "active");
+  const shadow = policies
+    .filter((p) => p.status === "shadow")
+    .map((p) => {
+      const layer = p.targetType === "org" ? "floor" : "agent";
+      const { verdict } = evaluateCall(ir, agent, call, {
+        ...bound(floor, own),
+        [layer]: p.document,
+      });
+      return { policy_id: p.policyId, policy_name: p.name, verdict };
+    });
+  const active = [floor, own].filter(Boolean);
+  if (!active.length) {
+    if (agent?.inactive) return { ...block("agent_inactive"), shadow, active };
+    return {
+      allowed: true,
+      action: "allow",
+      reason: "no_v2_policy",
+      fallback: true,
+      shadow,
+      active,
+    };
+  }
+  const evaluation = evaluateCall(ir, agent, call, bound(floor, own));
+  const { verdict, provenance } = evaluation;
+  const decider =
+    active.find((p) => p.document?.policyId && p.document.policyId === provenance.policyId) ??
+    (provenance.layer === "floor" ? floor : (own ?? floor));
+  const rule = provenance.statementId
+    ? `${provenance.ruleKey}#${provenance.variant}`
+    : "tools.default";
+  return {
+    allowed: verdict === "allow",
+    action: verdict,
+    reason: `${verdict}:${rule}`,
+    matchedPolicy: decider.name,
+    source: {
+      source: "v2",
+      policy_id: decider.policyId,
+      policy_name: decider.name,
+      policy_hash: decider.policyHash ?? null,
+      rule,
+    },
+    shadow,
+    active,
+  };
+}
+
+function bound(floor, own) {
+  return { ...(floor && { floor: floor.document }), ...(own && { agent: own.document }) };
+}
+
+function evaluateCall(ir, agent, call, documents) {
+  return callInputs(agent, call)
+    .map((input) => ir.evaluate(input, documents))
+    .reduce((best, next) =>
+      ir.VERDICT_RANK[next.verdict] > ir.VERDICT_RANK[best.verdict] ? next : best
+    );
+}
+
+function callInputs(agent, call) {
+  const base = {
+    tool: call.tool,
+    arguments: call.arguments,
+    schemaHash: null,
+    capabilities: [],
+    timestamp: new Date().toISOString(),
+  };
+  if (call.userEmail) {
+    const known = (agent?.members ?? []).find(
+      (m) => m.email === call.userEmail.trim().toLowerCase()
+    );
+    base.member = { email: call.userEmail, ...(known && { membershipId: known.membershipId }) };
+  }
+  const tools = agent?.tools ?? [];
+  const named = tools.filter((t) => t.name === call.tool || t.qualifiedName === call.tool);
+  const owned = call.mcpServer ? named.filter((t) => t.server === call.mcpServer) : [];
+  const known = owned.length ? owned : named;
+  if (!known.length) return [base];
+  return known.map((t) => ({ ...base, schemaHash: t.schemaHash, capabilities: t.capabilities }));
+}
+
+function block(reason) {
+  return { allowed: false, action: "block", reason };
 }
 
 function signedToken(intentTokenRaw) {
@@ -131,12 +260,16 @@ function signedToken(intentTokenRaw) {
   }
 }
 
-export async function resolveV2Hold(config, { intentTokenRaw, toolName, toolArgs, session }) {
+export async function resolveV2Hold(
+  config,
+  { intentTokenRaw, toolName, toolArgs, session, policyName }
+) {
+  const policy = policyName ? ` "${policyName}"` : "";
   const intentToken = intentTokenRaw ? signedToken(intentTokenRaw) : null;
   if (!intentToken?.plan_id) {
     return {
       action: "hold",
-      reason: `ArmorIQ policy holds ${toolName} for approval, but this session has no intent plan to attach the request to. Call register_intent_plan, then retry.`,
+      reason: `ArmorIQ policy${policy} holds ${toolName} for approval, but this session has no intent plan to attach the request to. Call register_intent_plan, then retry.`,
     };
   }
   const { tool, mcpServer } = v2Call(toolName);
@@ -171,7 +304,7 @@ export async function resolveV2Hold(config, { intentTokenRaw, toolName, toolArgs
   return {
     action: "hold",
     reason:
-      `ArmorIQ policy holds ${toolName} for approval (${verdict.reason}). ` +
+      `ArmorIQ policy${policy} holds ${toolName} for approval (${verdict.reason}). ` +
       (filed.delegationId
         ? `Approval request ${filed.delegationId} is waiting for another member; retry after it is approved.`
         : `The approval request could not be filed: ${filed.error}.`),
