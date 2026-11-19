@@ -43,7 +43,6 @@ import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT } from "./intent-schema.mjs";
 import { recordsPreToolActivity } from "./hook-activity.mjs";
 import { localOnly, notSignedIn, withBackendPosture } from "./config.mjs";
-import { capabilityOf } from "./backend-posture.mjs";
 import { readJson, writePrivateFile } from "./fs-store.mjs";
 import { stat, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -71,6 +70,9 @@ import { dropWouldBe, monitorAfterFetch, rememberWouldBe, takeWouldBe } from "./
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
 import { selfUpdateOnHook, withNotice } from "./self-update.mjs";
+import { createAuditEnvelope, snapshotAuditContext, emitAudit } from "./audit-capture.mjs";
+import { decisionCode } from "./decision-codes.mjs";
+import { recordCaptureFailure } from "./audit-wal.mjs";
 
 // In-memory store for tool-call start timestamps. Keyed by tool_use_id
 // (or sessionId:toolName fallback). Entries are deleted after PostToolUse /
@@ -376,43 +378,6 @@ function isPluginPlumbingTool(toolName) {
   const norm = toolName.toLowerCase();
   if (norm.startsWith("mcp__plugin_armorclaude_")) return true;
   return PLUGIN_PLUMBING_TOOLS.has(norm);
-}
-
-// Routes daemon, then WAL, then synchronous HTTP; returns which one was used.
-async function emitAudit({ dto: row, config, iapService }) {
-  const { createAuditWal, fitAuditRow, loginTag } = await import("./audit-wal.mjs");
-  let dto;
-  try {
-    dto = fitAuditRow({ ...row, capability: capabilityOf(row.tool) });
-  } catch (err) {
-    const { appendDaemonLog } = await import("./daemon-log.mjs");
-    appendDaemonLog(
-      config.dataDir,
-      `[armorclaude] audit row rejected: ${err.message} pid=${process.pid} at=${new Date().toISOString()}`
-    );
-    return "rejected (too large)";
-  }
-  if (config.daemonEnabled) {
-    try {
-      const { enqueueAuditViaDaemon } = await import("./daemon-client.mjs");
-      const ok = await enqueueAuditViaDaemon({ dto, config });
-      if (ok) return "enqueued (daemon)";
-    } catch (err) {
-      debugLog(config, `audit daemon enqueue failed: ${err?.message ?? err}`);
-    }
-  }
-  if (config.auditWal) {
-    try {
-      const login = loginTag(config.backendEndpoint, config.apiKey);
-      const wal = createAuditWal({ dataDir: config.dataDir, login });
-      await wal.appendLine(dto);
-      return "written (wal)";
-    } catch (err) {
-      debugLog(config, `audit WAL append failed: ${err?.message ?? err}`);
-    }
-  }
-  await iapService.createAuditLog(dto);
-  return "sent (http)";
 }
 
 /** Wire fields conmap-auto reads at audit ingest. */
@@ -745,21 +710,29 @@ async function policyFileProblem(config, error) {
   return error;
 }
 
-export async function handlePreToolUse(input, config) {
-  const ctx = {};
-  ctx.generations = recordsPreToolActivity(input) ? await recordHookActivity(input, config) : null;
-  const output = await decidePreToolUse(input, config, ctx).catch(async (error) => {
+export async function handlePreToolUse(input, config, runtimeState) {
+  input.armorAudit ??= createAuditEnvelope(input);
+  const session =
+    getSession(runtimeState ?? (await loadRuntimeState(config.runtimeFile)), input.session_id) ||
+    {};
+  const ctx = {
+    audit: input.armorAudit.contextCaptured
+      ? input.armorAudit
+      : snapshotAuditContext(input.armorAudit, session),
+    plan: structuredClone(session.plan),
+    generations: recordsPreToolActivity(input) ? await recordHookActivity(input, config) : null,
+  };
+  let output = await decidePreToolUse(input, config, ctx).catch(async (error) => {
     const problem = await policyFileProblem(config, error);
     return denyOrAllow(config, "policy_file_invalid", problem.message);
   });
-
   const generations = ctx.generations;
   if (generations) {
     const current = getSession(await loadRuntimeState(config.runtimeFile), input.session_id);
     if (!current || !sameGenerations(generations, current)) {
       const { policy } = await loadPolicyState(config.policyFile);
       if (!isFrictionlessAllowPolicy(policy))
-        return denyOrAllow(
+        output = denyOrAllow(
           config,
           "intent_plan_missing",
           "ArmorClaude intent plan retired during tool check"
@@ -770,9 +743,10 @@ export async function handlePreToolUse(input, config) {
   const source = policySource(code, ctx);
   const decision = output?.hookSpecificOutput?.permissionDecision;
   if (config.orgMonitor) return monitorPreToolUse(input, config, output, source, ctx.notice);
-  if (decision === "deny") {
-    await auditBlocked(input, withBackendPosture(config), code, source, ctx.v2);
-  } else if (source) {
+  if (["deny", "ask"].includes(decision) && !ctx.backendAuditId) {
+    await auditBlocked(input, withBackendPosture(config), code, ctx, source);
+  }
+  if (source && decision !== "deny") {
     _toolPolicySources.set(_toolTimingKey(input), source);
   }
   if (!ctx.notice) return output;
@@ -854,16 +828,22 @@ async function monitorPreToolUse(input, config, output, source, notice) {
   return notes.length ? allowWithNotice(notes.join("\n\n")) : null;
 }
 
-async function auditBlocked(input, config, code, source, v2) {
+async function auditBlocked(input, config, code, activity, source) {
   if (!config.auditEnabled || !config.apiKey) return;
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
+  const toolName =
+    typeof input.tool_name === "string" && input.tool_name ? input.tool_name : "unknown";
   try {
-    const session = getSession(await loadRuntimeState(config.runtimeFile), sessionId) || {};
+    const snapshot = activity.audit;
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
+    const decision = decisionCode(code);
     const dto = {
-      ...auditLink(config, sessionId, session.intentTokenRaw || ""),
-      step_index: pickStepIndex(session.plan, toolName, inputs, -1),
+      ...auditLink(config, sessionId, ""),
+      client_row_id: snapshot.decisionId,
+      plan_id: snapshot.plan_id,
+      context_plan_id: snapshot.context_plan_id,
+      prompt_id: snapshot.prompt_id,
+      step_index: pickStepIndex(activity.plan, toolName, inputs, -1),
       action: toolName,
       tool: toolName,
       input: withPolicySource(redactSecrets(inputs), source),
@@ -875,18 +855,20 @@ async function auditBlocked(input, config, code, source, v2) {
                 name: source.policy_name,
                 policyVersion: source.policy_hash,
               },
-              reason: v2?.reason,
+              reason: activity.v2?.reason,
             }
           : null,
-      status: "blocked",
+      status: decision === "approval_required" ? "held" : "blocked",
+      decision_code: decision,
       error_message: code,
-      executed_at: new Date().toISOString(),
+      executed_at: snapshot.executed_at,
       duration_ms: 0,
     };
-    const target = await emitAudit({ dto, config, iapService: createIapService(config) });
+    const target = await emitAudit({ dto, config });
     debugLog(config, `audit log (blocked) ${target} for ${toolName}`);
   } catch (error) {
     debugLog(config, `audit log (blocked) failed: ${error}`);
+    throw error;
   }
 }
 
@@ -1236,6 +1218,10 @@ async function decidePreToolUse(input, config, ctx = {}) {
   // --- Intent token verification ---
   // Reuse the runtimeState loaded above instead of re-reading from disk.
   let session = getSession(runtimeState, sessionId) || {};
+  if (!ctx.audit.prompt_id) {
+    ctx.audit = snapshotAuditContext(input.armorAudit, session);
+    ctx.plan = structuredClone(session.plan);
+  }
   if (invalidateTokenOnKeyChange(session, config)) {
     debugLog(config, "API key changed (prefix differs); discarded cached intent token");
     upsertSession(runtimeState, sessionId, session);
@@ -1278,6 +1264,8 @@ async function decidePreToolUse(input, config, ctx = {}) {
         intentTokenRaw && localPlan
           ? getSessionTokenUsedStepIndices(session, intentTokenRaw)
           : undefined;
+      ctx.audit = snapshotAuditContext(input.armorAudit, session);
+      ctx.plan = structuredClone(session.plan);
     }
   }
 
@@ -1481,15 +1469,20 @@ async function decidePreToolUse(input, config, ctx = {}) {
       toolArgs: input.tool_input,
       session: v2Session,
       policyName: v2.matchedPolicy,
+      audit: ctx.audit,
     });
     if (v2Session.v2Delegations) {
       upsertSession(runtimeState, sessionId, { v2Delegations: v2Session.v2Delegations });
       await saveRuntimeState(config.runtimeFile, runtimeState);
     }
     if (held.action === "block" && shouldDeny(config)) {
+      ctx.backendAuditId = held.auditId;
       return denyPreTool("policy_v2_block", held.reason);
     }
-    if (held.action === "hold") return denyPreTool("policy_v2_hold", held.reason);
+    if (held.action === "hold") {
+      ctx.backendAuditId = held.auditId;
+      return denyPreTool("policy_v2_hold", held.reason);
+    }
   }
   if (mcpApprovalReason) {
     return askPreTool("mcp_server_unapproved", mcpApprovalReason);
@@ -1512,6 +1505,7 @@ async function decidePreToolUse(input, config, ctx = {}) {
 
 export async function handlePostToolUse(input, config) {
   const policySourceOfCall = takePolicySource(input);
+  input.armorAudit ??= createAuditEnvelope(input);
   await recordHookActivity(input, config);
   if (!config.auditEnabled || !config.apiKey) {
     return null;
@@ -1526,8 +1520,9 @@ export async function handlePostToolUse(input, config) {
   try {
     const runtimeState = await loadRuntimeState(config.runtimeFile);
     const session = getSession(runtimeState, sessionId) || {};
-    const iapService = createIapService(config);
-
+    const snapshot = input.armorAudit.contextCaptured
+      ? input.armorAudit
+      : snapshotAuditContext(input.armorAudit, session);
     const intentTokenRaw = session.intentTokenRaw || "";
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
     const wouldBe = config.orgMonitor ? await takeWouldBe(config.dataDir, input) : null;
@@ -1568,11 +1563,21 @@ export async function handlePostToolUse(input, config) {
       };
     }
 
-    const target = await emitAudit({ dto: withWouldBe(dto, wouldBe), config, iapService });
+    Object.assign(dto, {
+      client_row_id: snapshot.resultId,
+      plan_id: snapshot.plan_id,
+      context_plan_id: snapshot.context_plan_id,
+      prompt_id: snapshot.prompt_id,
+      executed_at: snapshot.executed_at,
+    });
+
+    // Returning before the durable receipt can lose the only result row when the hook exits.
+    const target = await emitAudit({ dto: withWouldBe(dto, wouldBe), config });
     debugLog(config, `audit log ${target} for ${toolName}`);
   } catch (error) {
-    // Audit is best-effort — don't block
+    // A result capture failure cannot deny a call that already ran.
     debugLog(config, `audit log failed: ${error}`);
+    if (!error.captureFailureRecorded) await recordCaptureFailure(config.dataDir, "internal_error");
   }
 
   return null;
@@ -1580,6 +1585,7 @@ export async function handlePostToolUse(input, config) {
 
 export async function handlePostToolUseFailure(input, config) {
   const policySourceOfCall = takePolicySource(input);
+  input.armorAudit ??= createAuditEnvelope(input);
   await recordHookActivity(input, config);
   if (!config.auditEnabled || !config.apiKey) {
     return null;
@@ -1594,8 +1600,6 @@ export async function handlePostToolUseFailure(input, config) {
   try {
     const runtimeState = await loadRuntimeState(config.runtimeFile);
     const session = getSession(runtimeState, sessionId) || {};
-    const iapService = createIapService(config);
-
     const intentTokenRaw = session.intentTokenRaw || "";
     const wouldBe = config.orgMonitor ? await takeWouldBe(config.dataDir, input) : null;
     if (!intentTokenRaw && !config.orgMonitor) return null;
@@ -1603,8 +1607,15 @@ export async function handlePostToolUseFailure(input, config) {
     const inputs = sanitizeParams(input.tool_input, config.sanitize);
     const used = auditedSteps(session, intentTokenRaw);
     const stepIdx = intentTokenRaw ? pickStepIndex(session.plan, toolName, inputs, 0, used) : -1;
+    const snapshot = input.armorAudit.contextCaptured
+      ? input.armorAudit
+      : snapshotAuditContext(input.armorAudit, session);
     const dto = {
       ...auditLink(config, sessionId, intentTokenRaw),
+      client_row_id: snapshot.resultId,
+      plan_id: snapshot.plan_id,
+      context_plan_id: snapshot.context_plan_id,
+      prompt_id: snapshot.prompt_id,
       step_index: stepIdx,
       action: toolName,
       tool: toolName,
@@ -1612,14 +1623,15 @@ export async function handlePostToolUseFailure(input, config) {
       output: null,
       status: "failed",
       error_message: typeof input.error === "string" ? redactSecrets(input.error) : "Unknown error",
-      executed_at: new Date().toISOString(),
+      executed_at: snapshot.executed_at,
       duration_ms: _computeToolDuration(input),
     };
 
-    const target = await emitAudit({ dto: withWouldBe(dto, wouldBe), config, iapService });
+    const target = await emitAudit({ dto: withWouldBe(dto, wouldBe), config });
     debugLog(config, `audit log (failure) ${target} for ${toolName}`);
   } catch (error) {
     debugLog(config, `audit log (failure) failed: ${error}`);
+    if (!error.captureFailureRecorded) await recordCaptureFailure(config.dataDir, "internal_error");
   }
 
   return null;

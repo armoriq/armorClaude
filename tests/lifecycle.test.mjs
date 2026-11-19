@@ -19,6 +19,16 @@ import {
   getTrustOps,
 } from "../scripts/lib/runtime-state.mjs";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
+import { createOutbox, loginTag } from "../scripts/lib/audit-wal.mjs";
+
+async function capturedRows(config) {
+  return (
+    await createOutbox({
+      dataDir: config.dataDir,
+      login: loginTag(config.backendEndpoint, config.apiKey),
+    }).readPending()
+  ).map(({ row }) => row);
+}
 
 function buildConfig(tmpDir, overrides = {}) {
   return {
@@ -116,11 +126,11 @@ test("handlePostToolUse returns null when audit disabled", async () => {
   assert.equal(output, null);
 });
 
-test("handlePostToolUse sends audit when enabled", async () => {
+test("handlePostToolUse durably captures audit when enabled", async (t) => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
   await handleSessionStart({ hook_event_name: "SessionStart", session_id: "sess-5" }, config);
-  // Seed an intent token so the audit DTO carries a non-empty `token`. The
+  // Seed an intent token so the audit DTO has a captured plan context. The
   // PostToolUse handler skips audit when no token is captured (armorclaude#41
   // — empty token previously crashed conmap-auto's Prisma upsert).
   {
@@ -132,36 +142,24 @@ test("handlePostToolUse sends audit when enabled", async () => {
     await saveRuntimeState(config.runtimeFile, rs);
   }
 
-  const originalFetch = globalThis.fetch;
-  let capturedPayload;
-  globalThis.fetch = async (_url, options) => {
-    capturedPayload = JSON.parse(options.body);
-    return new Response(JSON.stringify({ audit_id: "a1", iap_sync_status: "ok" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  };
-
-  try {
-    const output = await handlePostToolUse(
-      {
-        hook_event_name: "PostToolUse",
-        session_id: "sess-5",
-        tool_name: "Read",
-        tool_input: { file_path: "test.txt" },
-        tool_response: { content: "hello" },
-      },
-      config
-    );
-    assert.equal(output, null);
-    assert.equal(capturedPayload.action, "Read");
-    assert.equal(capturedPayload.status, "success");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  t.mock.method(globalThis, "fetch", () => assert.fail("capture must not depend on HTTP"));
+  const output = await handlePostToolUse(
+    {
+      hook_event_name: "PostToolUse",
+      session_id: "sess-5",
+      tool_name: "Read",
+      tool_input: { file_path: "test.txt" },
+      tool_response: { content: "hello" },
+    },
+    config
+  );
+  assert.equal(output, null);
+  const [capturedPayload] = await capturedRows(config);
+  assert.equal(capturedPayload.action, "Read");
+  assert.equal(capturedPayload.status, "success");
 });
 
-test("handlePostToolUse records a session-scoped audit in all-allow mode (no token)", async () => {
+test("handlePostToolUse records a session-scoped audit in all-allow mode (no token)", async (t) => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   // No policy file written → loadPolicyState defaults to all-allow, and no
   // intent token is seeded on the session. Pre-#116 this returned null (silent
@@ -174,41 +172,26 @@ test("handlePostToolUse records a session-scoped audit in all-allow mode (no tok
     mcpName: "claude-code",
   });
 
-  const originalFetch = globalThis.fetch;
-  let capturedPayload;
-  let capturedUrl;
-  globalThis.fetch = async (url, options) => {
-    capturedUrl = String(url);
-    capturedPayload = JSON.parse(options.body);
-    return new Response(JSON.stringify({ audit_id: "a2", iap_sync_status: "ok" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  };
-
-  try {
-    const output = await handlePostToolUse(
-      {
-        hook_event_name: "PostToolUse",
-        session_id: "sess-aa",
-        tool_name: "Read",
-        tool_input: { file_path: "x.txt" },
-        tool_response: { content: "hi" },
-      },
-      config
-    );
-    assert.equal(output, null);
-    assert.ok(capturedUrl.endsWith("/iap/audit"), `posted to ${capturedUrl}`);
-    assert.equal(capturedPayload.action, "Read");
-    assert.equal(capturedPayload.status, "success");
-    assert.equal(capturedPayload.token, undefined, "all-allow row carries no token");
-    assert.equal(capturedPayload.session_id, "sess-aa");
-    assert.equal(capturedPayload.user_id, "u1");
-    assert.equal(capturedPayload.agent_id, "a1");
-    assert.equal(capturedPayload.step_index, -1);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  t.mock.method(globalThis, "fetch", () => assert.fail("capture must not depend on HTTP"));
+  const output = await handlePostToolUse(
+    {
+      hook_event_name: "PostToolUse",
+      session_id: "sess-aa",
+      tool_name: "Read",
+      tool_input: { file_path: "x.txt" },
+      tool_response: { content: "hi" },
+    },
+    config
+  );
+  assert.equal(output, null);
+  const [capturedPayload] = await capturedRows(config);
+  assert.equal(capturedPayload.action, "Read");
+  assert.equal(capturedPayload.status, "success");
+  assert.equal(capturedPayload.token, undefined, "all-allow row carries no token");
+  assert.equal(capturedPayload.session_id, "sess-aa");
+  assert.equal(capturedPayload.user_id, "u1");
+  assert.equal(capturedPayload.agent_id, "a1");
+  assert.equal(capturedPayload.step_index, -1);
 });
 
 test("handlePostToolUse still skips audit with no token when NOT all-allow (enforce)", async () => {
@@ -248,7 +231,7 @@ test("handlePostToolUse still skips audit with no token when NOT all-allow (enfo
   }
 });
 
-test("handlePostToolUseFailure logs failed status", async () => {
+test("handlePostToolUseFailure logs failed status", async (t) => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-test-"));
   const config = buildConfig(tmp, { auditEnabled: true, apiKey: "test-key" });
   await handleSessionStart({ hook_event_name: "SessionStart", session_id: "sess-6" }, config);
@@ -261,32 +244,20 @@ test("handlePostToolUseFailure logs failed status", async () => {
     await saveRuntimeState(config.runtimeFile, rs);
   }
 
-  const originalFetch = globalThis.fetch;
-  let capturedPayload;
-  globalThis.fetch = async (_url, options) => {
-    capturedPayload = JSON.parse(options.body);
-    return new Response(JSON.stringify({ audit_id: "a2", iap_sync_status: "ok" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  };
-
-  try {
-    await handlePostToolUseFailure(
-      {
-        hook_event_name: "PostToolUseFailure",
-        session_id: "sess-6",
-        tool_name: "Bash",
-        tool_input: { command: "exit 1" },
-        error: "Command failed with exit code 1",
-      },
-      config
-    );
-    assert.equal(capturedPayload.status, "failed");
-    assert.equal(capturedPayload.error_message, "Command failed with exit code 1");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  t.mock.method(globalThis, "fetch", () => assert.fail("capture must not depend on HTTP"));
+  await handlePostToolUseFailure(
+    {
+      hook_event_name: "PostToolUseFailure",
+      session_id: "sess-6",
+      tool_name: "Bash",
+      tool_input: { command: "exit 1" },
+      error: "Command failed with exit code 1",
+    },
+    config
+  );
+  const [capturedPayload] = await capturedRows(config);
+  assert.equal(capturedPayload.status, "failed");
+  assert.equal(capturedPayload.error_message, "Command failed with exit code 1");
 });
 
 test("PreToolUse appends ReAnchor trust op when pending plan differs from cached", async () => {

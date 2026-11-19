@@ -4,6 +4,7 @@ import { getSdkClient } from "./intent.mjs";
 import { sdkModule } from "./sdk.mjs";
 import { parseToolIdentity } from "./tool-registry.mjs";
 import { statusCommand } from "./config.mjs";
+import { recordAuthenticationSuccess } from "./audit-wal.mjs";
 import {
   BACKEND_TIMEOUT_MS,
   UNREACHABLE_FOR_MS,
@@ -50,6 +51,7 @@ function bundleHttpClient(config) {
           throw err;
         });
         noteBackendStatus(config, res.status);
+        if (res.ok || res.status === 304) await recordAuthenticationSuccess(config);
         const data = res.status === 200 ? await res.json() : undefined;
         return { status: res.status, data, headers: { etag: res.headers.get("etag") ?? "" } };
       } finally {
@@ -282,7 +284,7 @@ function signedToken(intentTokenRaw) {
 
 export async function resolveV2Hold(
   config,
-  { intentTokenRaw, toolName, toolArgs, session, policyName }
+  { intentTokenRaw, toolName, toolArgs, session, policyName, audit }
 ) {
   const policy = policyName ? ` "${policyName}"` : "";
   const intentToken = intentTokenRaw ? signedToken(intentTokenRaw) : null;
@@ -295,18 +297,28 @@ export async function resolveV2Hold(
   const { tool, mcpServer } = v2Call(toolName);
   const args = isPlainObject(toolArgs) ? toolArgs : {};
   const domain = mcpServer ?? config.mcpName;
-  const res = await enforceCall(config, {
-    tool,
-    mcp: domain,
-    arguments: args,
-    intent_token: intentToken,
-    agent_id: config.agentId,
-    user_email: config.userEmail || undefined,
-  });
+  const res = await enforceCall(
+    config,
+    {
+      tool,
+      mcp: domain,
+      arguments: args,
+      intent_token: intentToken,
+      agent_id: config.agentId,
+      user_email: config.userEmail || undefined,
+    },
+    {
+      "X-ArmorIQ-Action-Id": audit.decisionId,
+      ...(audit.prompt_id ? { "X-ArmorIQ-Prompt-Id": audit.prompt_id } : {}),
+    }
+  );
   const verdict = isPlainObject(res.data) ? res.data : {};
+  const auditId =
+    typeof verdict.audit_id === "string" && verdict.audit_id ? verdict.audit_id : undefined;
   if (!res.ok) {
     return {
       action: "block",
+      auditId,
       reason: `ArmorIQ enforce failed for ${toolName} (HTTP ${res.status})`,
     };
   }
@@ -316,7 +328,7 @@ export async function resolveV2Hold(
     return { action: "allow", reason: verdict.reason || "allowed" };
   }
   if (verdict.enforcementAction !== "hold") {
-    return { action: "block", reason: verdict.message || verdict.reason || "blocked" };
+    return { action: "block", reason: verdict.message || verdict.reason || "blocked", auditId };
   }
   const filed = await fileDelegation(config, {
     session,
@@ -328,6 +340,7 @@ export async function resolveV2Hold(
   });
   return {
     action: "hold",
+    auditId,
     reason:
       `ArmorIQ policy${policy} holds ${toolName} for approval (${verdict.reason}). ` +
       (filed.delegationId
