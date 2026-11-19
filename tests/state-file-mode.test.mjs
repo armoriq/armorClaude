@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tempHome } from "./helpers/login-profile.mjs";
-import { createOutbox } from "../scripts/lib/audit-wal.mjs";
+import { createAuditWal } from "../scripts/lib/audit-wal.mjs";
 import { handleSessionStart } from "../scripts/lib/engine.mjs";
 import {
   appendPrivateFileSync,
@@ -113,7 +113,7 @@ const deliver = (wal) =>
 
 test("the audit WAL holding tool inputs and outputs is owner-only", async () => {
   const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
-  const wal = createOutbox({ dataDir, login: LOGIN, binding: BINDING });
+  const wal = createAuditWal({ dataDir, login: LOGIN, binding: BINDING });
   await wal.appendLine({ tool: "Bash", input: { command: "ls" }, output: { stdout: "a\nb\n" } });
   const audit = path.join(dataDir, "audit", LOGIN);
   const current = wal._paths.currentPath;
@@ -139,7 +139,7 @@ test("the audit WAL tightens its own files while preserving released files and t
   await openFile(offset, "0");
   await openFile(segment, `${JSON.stringify({ tool: "Read" })}\n`);
 
-  const wal = createOutbox({ dataDir, login: LOGIN, binding: BINDING });
+  const wal = createAuditWal({ dataDir, login: LOGIN, binding: BINDING });
   await wal.appendLine({ tool: "Write" });
   for (const file of [wal._paths.currentPath, wal._paths.offsetPath]) await chmod(file, 0o644);
   await wal.appendLine({ tool: "Read" });
@@ -157,7 +157,7 @@ test("the audit WAL tightens its own files while preserving released files and t
 
 test("a rotated audit segment stays owner-only", async () => {
   const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
-  const wal = createOutbox({ dataDir, login: LOGIN, binding: BINDING, rotateBytes: 1 });
+  const wal = createAuditWal({ dataDir, login: LOGIN, binding: BINDING, rotateBytes: 1 });
   await wal.appendLine({ tool: "Bash" });
   await deliver(wal);
   const archive = wal._paths.archiveDir;

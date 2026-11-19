@@ -13,7 +13,7 @@ import { tempHome, withHome, writeLoginProfiles } from "./helpers/login-profile.
 import {
   auditLoginConfig,
   auditStatus,
-  createOutbox,
+  createAuditWal,
   loginTag,
 } from "../scripts/lib/audit-wal.mjs";
 import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.mjs";
@@ -137,7 +137,7 @@ test("delivery resolves the exact saved credential and never a cached replacemen
   const backend = "https://a.invalid";
   const tag = loginTag(backend, A.apiKey);
   const binding = { backend, keyId: tag };
-  const wal = createOutbox({ dataDir, login: tag, binding });
+  const wal = createAuditWal({ dataDir, login: tag, binding });
   const client_row_id = randomUUID();
   await wal.appendLine({ client_row_id, tool: "Read" });
   const resolve = (value) => (withHome(home, () => auditLoginConfig(value)) ? value : null);
@@ -200,7 +200,7 @@ test("a login whose uploads fail neither blocks another login nor loses its own 
   backend.refuse.clear();
   await stop(backend, "session-b");
   assert.equal(backend.shipped.length, 1);
-  const wal = createOutbox({ dataDir, login: loginTag(backend.url, A.apiKey) });
+  const wal = createAuditWal({ dataDir, login: loginTag(backend.url, A.apiKey) });
   assert.equal((await wal.readPending())[0].attempts, 0);
   login(backend, { ...A, loggedInAt: "2026-11-15T12:00:00.000Z" });
   await stop(backend, "session-a");

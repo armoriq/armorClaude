@@ -19,11 +19,11 @@ import {
   getTrustOps,
 } from "../scripts/lib/runtime-state.mjs";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
-import { createOutbox, loginTag } from "../scripts/lib/audit-wal.mjs";
+import { createAuditWal, loginTag } from "../scripts/lib/audit-wal.mjs";
 
 async function capturedRows(config) {
   return (
-    await createOutbox({
+    await createAuditWal({
       dataDir: config.dataDir,
       login: loginTag(config.backendEndpoint, config.apiKey),
     }).readPending()

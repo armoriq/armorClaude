@@ -10,10 +10,9 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
 import {
-  OUTBOX_SIZE_LIMITS,
+  AUDIT_SIZE_LIMITS,
   auditStatus,
   createAuditWal,
-  createOutbox,
   recordCaptureFailure,
 } from "../scripts/lib/audit-wal.mjs";
 import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.mjs";
@@ -31,183 +30,16 @@ async function fixture() {
   dirs.push(dir);
   return {
     dir,
-    wal: createOutbox({ dataDir: dir, login: "0123456789abcdef", binding: defaultBinding }),
+    wal: createAuditWal({ dataDir: dir, login: "0123456789abcdef", binding: defaultBinding }),
   };
 }
-
-async function legacyFixture() {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-wal-"));
-  return { dir, wal: createAuditWal({ dataDir: dir, login: "0123456789abcdef" }) };
-}
-
-test("appendLine + readBatch round-trip", async () => {
-  const { wal } = await legacyFixture();
-  await wal.appendLine({ id: 1, action: "a" });
-  await wal.appendLine({ id: 2, action: "b" });
-  await wal.appendLine({ id: 3, action: "c" });
-
-  const { rows, endOffset } = await wal.readBatch(100);
-  assert.equal(rows.length, 3);
-  assert.equal(rows[0].id, 1);
-  assert.equal(rows[2].action, "c");
-  assert.ok(endOffset > 0);
-});
-
-test("advanceOffset persists across new wal instance (restart)", async () => {
-  const { dir, wal } = await legacyFixture();
-  await wal.appendLine({ id: 1 });
-  await wal.appendLine({ id: 2 });
-  const { rows, endOffset } = await wal.readBatch();
-  assert.equal(rows.length, 2);
-  await wal.advanceOffset(endOffset);
-
-  const wal2 = createAuditWal({ dataDir: dir, login: "0123456789abcdef" });
-  const second = await wal2.readBatch();
-  assert.equal(second.rows.length, 0, "shipped rows should not be re-read");
-
-  await wal2.appendLine({ id: 3 });
-  const third = await wal2.readBatch();
-  assert.equal(third.rows.length, 1);
-  assert.equal(third.rows[0].id, 3);
-});
-
-test("crash-replay: missing advance leaves rows for next read", async () => {
-  const { dir, wal } = await legacyFixture();
-  await wal.appendLine({ id: 1 });
-  await wal.appendLine({ id: 2 });
-  await wal.readBatch();
-
-  const wal2 = createAuditWal({ dataDir: dir, login: "0123456789abcdef" });
-  const { rows } = await wal2.readBatch();
-  assert.equal(rows.length, 2, "uncommitted rows are replayed");
-  assert.deepEqual(
-    rows.map((r) => r.id),
-    [1, 2]
-  );
-});
-
-test("rotation: oversize triggers archive + offset reset", async () => {
-  const { dir } = await legacyFixture();
-  const wal = createAuditWal({ dataDir: dir, login: "0123456789abcdef", rotateBytes: 200 });
-
-  for (let i = 0; i < 6; i++) {
-    await wal.appendLine({ id: i, pad: "x".repeat(20) });
-  }
-  const { rows, endOffset } = await wal.readBatch(100);
-  assert.equal(rows.length, 6);
-  await wal.advanceOffset(endOffset);
-
-  const archiveDir = wal._paths.archiveDir;
-  const archived = readdirSync(archiveDir).filter((f) => f.endsWith(".jsonl"));
-  assert.equal(archived.length, 1, "rotation creates one archive segment");
-
-  assert.equal(await wal.readShippedOffset(), 0);
-  await wal.appendLine({ id: 99 });
-  const after = await wal.readBatch();
-  assert.equal(after.rows.length, 1);
-  assert.equal(after.rows[0].id, 99);
-});
-
-test("malformed line is skipped, not blocking the stream", async () => {
-  const { wal } = await legacyFixture();
-  await wal.appendLine({ id: 1 });
-  const fs = await import("node:fs/promises");
-  await fs.appendFile(wal._paths.currentPath, "this is not json\n", "utf8");
-  await wal.appendLine({ id: 3 });
-
-  const { rows } = await wal.readBatch();
-  assert.equal(rows.length, 2, "malformed line skipped, valid rows still returned");
-  assert.deepEqual(
-    rows.map((r) => r.id),
-    [1, 3]
-  );
-});
-
-test("row too large is rejected (cap protects O_APPEND atomicity)", async () => {
-  const { wal } = await legacyFixture();
-  const huge = { pad: "x".repeat(5000) };
-  await assert.rejects(() => wal.appendLine(huge), /too large/);
-});
-
-test("readBatch returns rows in enqueue order even when disk order is scrambled", async () => {
-  const { wal } = await legacyFixture();
-  await Promise.all(
-    Array.from({ length: 10 }, (_, i) => wal.appendLine({ logical_step: i, payload: `row-${i}` }))
-  );
-  const { rows } = await wal.readBatch(20);
-  assert.equal(rows.length, 10);
-  assert.deepEqual(
-    rows.map((r) => r.logical_step),
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-    "rows must come back in enqueue order, not disk order"
-  );
-});
-
-test("readBatch strips internal _seq and _enqueuedAt fields before returning", async () => {
-  const { wal } = await legacyFixture();
-  await wal.appendLine({ id: 1, action: "echo" });
-  const { rows } = await wal.readBatch();
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].id, 1);
-  assert.equal(rows[0].action, "echo");
-  assert.ok(!("_seq" in rows[0]), "_seq must be stripped before shipping");
-  assert.ok(!("_enqueuedAt" in rows[0]), "_enqueuedAt must be stripped before shipping");
-});
-
-test("concurrent appends from many writers do not interleave", async () => {
-  const { dir, wal } = await legacyFixture();
-  const N = 50;
-  const writers = [];
-  for (let i = 0; i < N; i++) {
-    const w = createAuditWal({ dataDir: dir, login: "0123456789abcdef" });
-    writers.push(w.appendLine({ id: i, action: "concurrent" }));
-  }
-  await Promise.all(writers);
-  const { rows } = await wal.readBatch(N + 5);
-  assert.equal(rows.length, N, "all concurrent appends preserved");
-  const ids = new Set(rows.map((r) => r.id));
-  assert.equal(ids.size, N, "no rows lost or duplicated");
-});
-
-test("pendingBytes shrinks after advanceOffset", async () => {
-  const { wal } = await legacyFixture();
-  assert.equal(await wal.pendingBytes(), 0);
-  await wal.appendLine({ id: 1 });
-  await wal.appendLine({ id: 2 });
-  const before = await wal.pendingBytes();
-  assert.ok(before > 0);
-
-  const { endOffset } = await wal.readBatch();
-  await wal.advanceOffset(endOffset);
-  const after = await wal.pendingBytes();
-  assert.equal(after, 0);
-});
-
-test("pruneArchive keeps newest N segments", async () => {
-  const { dir } = await legacyFixture();
-  const wal = createAuditWal({ dataDir: dir, login: "0123456789abcdef", rotateBytes: 50 });
-
-  for (let r = 0; r < 8; r++) {
-    for (let i = 0; i < 3; i++) {
-      await wal.appendLine({ rotation: r, id: i });
-    }
-    const { endOffset } = await wal.readBatch(100);
-    await wal.advanceOffset(endOffset);
-  }
-  const beforePrune = readdirSync(wal._paths.archiveDir).length;
-  assert.ok(beforePrune >= 5);
-
-  await wal.pruneArchive(3);
-  const afterPrune = readdirSync(wal._paths.archiveDir).length;
-  assert.equal(afterPrune, 3, "only the newest 3 segments retained");
-});
 
 // regression: #0010
 test("the installed queue stays below conmap-auto's shared size contract", async () => {
   const contract = JSON.parse(
     await readFile(new URL("./fixtures/block-capture-v1.json", import.meta.url), "utf8")
   );
-  assert.deepEqual(OUTBOX_SIZE_LIMITS, { ...contract.sizeLimits, maxRowBytes: 4000 });
+  assert.deepEqual(AUDIT_SIZE_LIMITS, { ...contract.sizeLimits, maxRowBytes: 4000 });
 });
 
 test("appendLine + readPending round-trip", async () => {
@@ -230,7 +62,7 @@ test("drain persists across new wal instance (restart)", async () => {
   assert.equal(rows.length, 2);
   await deliver(wal);
 
-  const wal2 = createOutbox({ dataDir: dir, login: "0123456789abcdef" });
+  const wal2 = createAuditWal({ dataDir: dir, login: "0123456789abcdef" });
   const second = await wal2.readPending();
   assert.equal(second.length, 0, "shipped rows should not be re-read");
 
@@ -246,7 +78,7 @@ test("crash-replay: missing advance leaves rows for next read", async () => {
   await wal.appendLine({ id: 2 });
   await wal.readPending();
 
-  const wal2 = createOutbox({ dataDir: dir, login: "0123456789abcdef" });
+  const wal2 = createAuditWal({ dataDir: dir, login: "0123456789abcdef" });
   const rows = (await wal2.readPending()).map(({ row }) => row);
   assert.equal(rows.length, 2, "uncommitted rows are replayed");
   assert.deepEqual(
@@ -257,7 +89,7 @@ test("crash-replay: missing advance leaves rows for next read", async () => {
 
 test("rotation: oversize triggers archive + offset reset", async () => {
   const { dir } = await fixture();
-  const wal = createOutbox({
+  const wal = createAuditWal({
     dataDir: dir,
     login: "0123456789abcdef",
     binding: defaultBinding,
@@ -316,7 +148,7 @@ test("dead letters and the immutable login binding survive reopening with privat
   const { dir } = await fixture();
   const binding = { backend: "https://a.invalid", keyId: "key-a" };
   const opts = { dataDir: dir, login: "0123456789abcdef", binding };
-  const wal = createOutbox(opts);
+  const wal = createAuditWal(opts);
   await wal.appendLine({ client_row_id: "row-a", tool: "Bash", input: {} });
   await wal.drain(
     async ({ rows }) => ({
@@ -331,14 +163,14 @@ test("dead letters and the immutable login binding survive reopening with privat
     }),
     { resolveLogin: () => binding }
   );
-  const recovered = createOutbox(opts);
+  const recovered = createAuditWal(opts);
   assert.equal((await recovered.readDeadLetters()).length, 1);
   assert.equal((await stat(wal._paths.offsetPath)).mode & 0o777, 0o600);
   assert.equal((await stat(path.dirname(wal._paths.currentPath))).mode & 0o777, 0o700);
   const stored = await readFile(wal._paths.offsetPath, "utf8");
   assert.ok(stored.includes("key-a"));
   await assert.rejects(
-    () => createOutbox({ ...opts, binding: { ...binding, keyId: "key-b" } }).appendLine({}),
+    () => createAuditWal({ ...opts, binding: { ...binding, keyId: "key-b" } }).appendLine({}),
     /binding/
   );
 });
@@ -358,7 +190,7 @@ test("legacy rows keep their original login and acknowledged prefix across migra
     wal._paths.legacyOffsetPath,
     String(Buffer.byteLength(JSON.stringify(rows[0]) + "\n"))
   );
-  const recovered = createOutbox({ dataDir: dir, login: "0123456789abcdef" });
+  const recovered = createAuditWal({ dataDir: dir, login: "0123456789abcdef" });
   assert.deepEqual(
     (await recovered.readPending()).map(({ row }) => row),
     [{ tool: "Bash" }]
@@ -417,7 +249,7 @@ test("bound legacy rows persist one UUID before delivery and settle by results a
   let resolutions = 0;
   await assert.rejects(
     () =>
-      createOutbox(options).drain(() => assert.fail("sent before the restart"), {
+      createAuditWal(options).drain(() => assert.fail("sent before the restart"), {
         resolveLogin() {
           if (++resolutions === 2) throw new Error("restart before delivery");
           return binding;
@@ -425,7 +257,7 @@ test("bound legacy rows persist one UUID before delivery and settle by results a
       }),
     /restart before delivery/
   );
-  const recovered = createOutbox(options);
+  const recovered = createAuditWal(options);
   const assigned = (await recovered.readPending()).map(({ row }) => row);
   const ids = assigned.map(({ client_row_id }) => client_row_id);
   for (const id of ids.slice(0, -1))
@@ -446,7 +278,7 @@ test("bound legacy rows persist one UUID before delivery and settle by results a
       assert.deepEqual(login, binding);
       assert.deepEqual(outbound, assigned);
       assert.deepEqual(
-        (await createOutbox(options).readPending()).map(({ row }) => row),
+        (await createAuditWal(options).readPending()).map(({ row }) => row),
         assigned
       );
       await appendFile(releasedPath, JSON.stringify(lateRow) + "\n");
@@ -463,10 +295,10 @@ test("bound legacy rows persist one UUID before delivery and settle by results a
     { resolveLogin: () => binding }
   );
   assert.deepEqual(
-    (await createOutbox(options).readPending()).map(({ row }) => row),
+    (await createAuditWal(options).readPending()).map(({ row }) => row),
     [lateRow]
   );
-  await createOutbox(options).drain(
+  await createAuditWal(options).drain(
     async ({ login, rows: outbound }) => {
       assert.deepEqual(login, binding);
       assert.deepEqual(outbound, [lateRow]);
@@ -474,7 +306,7 @@ test("bound legacy rows persist one UUID before delivery and settle by results a
     },
     { resolveLogin: () => binding }
   );
-  assert.deepEqual(await createOutbox(options).readPending(), []);
+  assert.deepEqual(await createAuditWal(options).readPending(), []);
   assert.equal(await readFile(wal._paths.legacyOffsetPath, "utf8"), releasedOffset);
   assert.equal((await stat(releasedPath)).ino, releasedStat.ino);
   assert.equal((await stat(releasedPath)).mode, releasedStat.mode);
@@ -487,7 +319,7 @@ test("bound legacy rows persist one UUID before delivery and settle by results a
 test("batch_oversize outcomes split and resend without losing accepted rows", async () => {
   const { dir } = await fixture();
   const binding = { backend: "https://a.invalid", keyId: "key-a" };
-  const wal = createOutbox({ dataDir: dir, login: "0123456789abcdef", binding });
+  const wal = createAuditWal({ dataDir: dir, login: "0123456789abcdef", binding });
   const [one, two, three] = Array.from({ length: 3 }, () => randomUUID());
   for (const client_row_id of [one, two, three])
     await wal.appendLine({ client_row_id, tool: "Bash" });
@@ -529,7 +361,7 @@ test("batch resizing keeps Retry-After across restart before resending smaller r
     binding,
     clock: { now: () => now, random: () => 0.5 },
   };
-  const wal = createOutbox(options);
+  const wal = createAuditWal(options);
   for (const client_row_id of ["one", "two"]) await wal.appendLine({ client_row_id, tool: "Read" });
   let sends = 0;
   await wal.drain(
@@ -550,7 +382,7 @@ test("batch resizing keeps Retry-After across restart before resending smaller r
     { resolveLogin: () => binding }
   );
   assert.equal(sends, 1);
-  const recovered = createOutbox(options);
+  const recovered = createAuditWal(options);
   await recovered.drain(() => assert.fail("sent before Retry-After"), {
     resolveLogin: () => binding,
   });
@@ -595,7 +427,7 @@ test("an accepted tenth delivery whose acknowledgement failed is recovered witho
       }
     },
   };
-  const wal = createOutbox(options);
+  const wal = createAuditWal(options);
   await wal.appendLine({ client_row_id: "one", tool: "Read" });
   for (let attempt = 1; attempt < 10; attempt += 1) {
     await wal.drain(async () => ({ status: 409, body: {} }), { resolveLogin: () => binding });
@@ -609,7 +441,7 @@ test("an accepted tenth delivery whose acknowledgement failed is recovered witho
       }),
     /injected/
   );
-  const recovered = createOutbox(options);
+  const recovered = createAuditWal(options);
   assert.equal((await recovered.readPending())[0].attempts, 9);
   await recovered.drain(() => assert.fail("sent an eleventh time"), {
     resolveLogin: () => binding,
@@ -676,7 +508,7 @@ test("concurrent appends from many writers do not interleave", async () => {
   const N = 50;
   const writers = [];
   for (let i = 0; i < N; i++) {
-    const w = createOutbox({ dataDir: dir, login: "0123456789abcdef" });
+    const w = createAuditWal({ dataDir: dir, login: "0123456789abcdef" });
     writers.push(w.appendLine({ id: i, action: "concurrent" }));
   }
   await Promise.all(writers);
@@ -692,7 +524,7 @@ test("a separate process owns the delivery lease and its acknowledgement preserv
   const { dir } = await fixture();
   const binding = { backend: "https://a.invalid", keyId: "key-a" };
   const options = { dataDir: dir, login: "0123456789abcdef", binding };
-  const wal = createOutbox(options);
+  const wal = createAuditWal(options);
   await wal.appendLine({ client_row_id: "first", tool: "Read" });
   const child = spawn(
     process.execPath,
@@ -700,9 +532,9 @@ test("a separate process owns the delivery lease and its acknowledgement preserv
       "--input-type=module",
       "-e",
       `
-    import { createOutbox } from ${JSON.stringify(new URL("../scripts/lib/audit-wal.mjs", import.meta.url).href)};
+    import { createAuditWal } from ${JSON.stringify(new URL("../scripts/lib/audit-wal.mjs", import.meta.url).href)};
     const options = JSON.parse(process.argv[1]);
-    const wal = createOutbox(options);
+    const wal = createAuditWal(options);
     await wal.drain(async ({ rows }) => {
       process.stdout.write("sending\\n");
       await new Promise((resolve) => process.stdin.once("data", resolve));
@@ -755,7 +587,7 @@ test("pendingBytes shrinks after drain", async () => {
 // regression: #0010
 test("rotation keeps every delivered segment", async () => {
   const { dir } = await fixture();
-  const wal = createOutbox({
+  const wal = createAuditWal({
     dataDir: dir,
     login: "0123456789abcdef",
     binding: defaultBinding,
@@ -798,7 +630,7 @@ test("a released 0.2.19 reader cannot resend new rows or overwrite their dead le
   await writeFile(offsetPath, String(Buffer.byteLength(shipped)));
   const binding = { backend: "https://a.invalid", keyId: login };
   const options = { dataDir: dir, login, binding };
-  const wal = createOutbox(options);
+  const wal = createAuditWal(options);
   await wal.appendLine({ client_row_id: randomUUID(), tool: "Rejected" });
   await wal.appendLine({ client_row_id: randomUUID(), metadata: "x".repeat(300_000) });
   await wal.drain(
@@ -832,7 +664,7 @@ test("a released 0.2.19 reader cannot resend new rows or overwrite their dead le
   assert.equal((await wal.status(() => binding)).olderVersion, 1);
   assert.equal(await readFile(offsetPath, "utf8"), String(Buffer.byteLength(shipped)));
   await writeFile(offsetPath, String(offset + Buffer.byteLength(buffer.subarray(offset))));
-  const recovered = createOutbox(options);
+  const recovered = createAuditWal(options);
   assert.deepEqual(
     (await recovered.readPending()).map(({ row }) => row),
     [pending]
@@ -854,7 +686,7 @@ test("a long transport outage never exhausts rows and every captured row is deli
         binding,
         clock: { now: () => now, random: () => 0.5 },
       };
-      let wal = createOutbox(options);
+      let wal = createAuditWal(options);
       const captured = Array.from({ length: 12 }, () => ({
         client_row_id: randomUUID(),
         tool: "Read",
@@ -870,7 +702,7 @@ test("a long transport outage never exhausts rows and every captured row is deli
           },
           { resolveLogin: () => binding }
         );
-        wal = createOutbox(options);
+        wal = createAuditWal(options);
         const pending = await wal.readPending();
         assert.equal(pending.length, captured.length);
         assert.ok(pending.every(({ attempts }) => attempts === 0));
@@ -898,7 +730,7 @@ test("a long transport outage never exhausts rows and every captured row is deli
 test("settled history compacts and dead letter history stays off append, restore and idle drain paths", async () => {
   const { dir } = await fixture();
   const binding = { backend: "https://a.invalid", keyId: "key-a" };
-  const wal = createOutbox({ dataDir: dir, login: "0123456789abcdef", binding });
+  const wal = createAuditWal({ dataDir: dir, login: "0123456789abcdef", binding });
   for (let n = 0; n < 100; n += 1)
     await wal.appendLine({ client_row_id: randomUUID(), metadata: "x".repeat(20_000) });
   for (let n = 0; n < 200; n += 1)
@@ -964,7 +796,7 @@ test("a dead letter committed before settlement recovers once after a storage fa
       }
     },
   };
-  const wal = createOutbox(options);
+  const wal = createAuditWal(options);
   const row = { client_row_id: randomUUID(), tool: "Read" };
   await wal.appendLine(row);
   await assert.rejects(
@@ -984,7 +816,7 @@ test("a dead letter committed before settlement recovers once after a storage fa
       ),
     /storage failed/
   );
-  const recovered = createOutbox(options);
+  const recovered = createAuditWal(options);
   assert.deepEqual(await recovered.readPending(), []);
   assert.deepEqual(await recovered.readDeadLetters(), [{ row, reason: "invalid", attempts: 1 }]);
   assert.equal((await recovered.status()).deadLetters, 1);
@@ -999,7 +831,7 @@ test("a released cursor beyond its current segment cannot skip newly captured re
     await mkdir(root, { recursive: true });
     if (legacy) await writeFile(path.join(root, "current.jsonl"), legacy);
     await writeFile(path.join(root, "shipped.offset"), "10000");
-    const wal = createOutbox({ dataDir: dir, login, binding: defaultBinding });
+    const wal = createAuditWal({ dataDir: dir, login, binding: defaultBinding });
     await wal.appendLine({ tool: "New" });
     assert.deepEqual(
       (await wal.readPending()).map(({ row }) => row.tool),
@@ -1036,7 +868,7 @@ test("reading the previous bound outbox preserves dead letters and leaves the re
       revision: null,
     });
     await writeFile(path.join(root, "shipped.offset"), releasedState);
-    const wal = createOutbox({
+    const wal = createAuditWal({
       dataDir: dir,
       login: defaultBinding.keyId,
       binding: defaultBinding,
@@ -1108,7 +940,7 @@ test("a released drainer keeps every unbound row while the new queue scans, repl
       }
     },
   };
-  const wal = createOutbox(options);
+  const wal = createAuditWal(options);
   const current = { client_row_id: randomUUID(), tool: "Current" };
   await wal.appendLine(current);
   await Promise.all([command({ row: oldRows[1] }), wal.readPending()]);
@@ -1128,7 +960,7 @@ test("a released drainer keeps every unbound row while the new queue scans, repl
       ),
     /crash before receipt/
   );
-  const recovered = createOutbox(options);
+  const recovered = createAuditWal(options);
   await recovered.drain(send, { resolveLogin: () => defaultBinding });
   const root = path.join(dir, "audit", defaultBinding.keyId);
   assert.equal(
