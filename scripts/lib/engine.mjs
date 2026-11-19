@@ -58,6 +58,7 @@ import {
   startPrompt,
   tokenPlanCheck,
   updateRuntimeState,
+  updateRunState,
   upsertDiscoveredTool,
   upsertSession,
 } from "./runtime-state.mjs";
@@ -73,6 +74,7 @@ import { selfUpdateOnHook, withNotice } from "./self-update.mjs";
 import { createAuditEnvelope, snapshotAuditContext, emitAudit } from "./audit-capture.mjs";
 import { decisionCode } from "./decision-codes.mjs";
 import { recordCaptureFailure } from "./audit-wal.mjs";
+import { closeRun, recordRunTool, recoverRuns } from "./runs.mjs";
 
 // In-memory store for tool-call start timestamps. Keyed by tool_use_id
 // (or sessionId:toolName fallback). Entries are deleted after PostToolUse /
@@ -484,6 +486,7 @@ export async function handleSessionStart(input, config) {
 }
 
 async function startSession(input, config) {
+  await recoverRuns(input, config);
   await recordHookActivity(input, config);
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
@@ -721,11 +724,18 @@ export async function handlePreToolUse(input, config, runtimeState) {
       : snapshotAuditContext(input.armorAudit, session),
     plan: structuredClone(session.plan),
     generations: recordsPreToolActivity(input) ? await recordHookActivity(input, config) : null,
+    runId: input.armorAudit.prompt_id || session.promptId,
   };
-  let output = await decidePreToolUse(input, config, ctx).catch(async (error) => {
-    const problem = await policyFileProblem(config, error);
-    return denyOrAllow(config, "policy_file_invalid", problem.message);
-  });
+  let output;
+  try {
+    output = await decidePreToolUse(input, config, ctx).catch(async (error) => {
+      const problem = await policyFileProblem(config, error);
+      return denyOrAllow(config, "policy_file_invalid", problem.message);
+    });
+  } catch (error) {
+    await recordRunTool(input, config, ctx.runId, ctx.runVerdict);
+    throw error;
+  }
   const generations = ctx.generations;
   if (generations) {
     const current = getSession(await loadRuntimeState(config.runtimeFile), input.session_id);
@@ -742,13 +752,17 @@ export async function handlePreToolUse(input, config, runtimeState) {
   const code = output?.[DECISION_CODE];
   const source = policySource(code, ctx);
   const decision = output?.hookSpecificOutput?.permissionDecision;
-  if (config.orgMonitor) return monitorPreToolUse(input, config, output, source, ctx.notice);
+  if (config.orgMonitor) {
+    await recordRunTool(input, config, ctx.runId, ctx.runVerdict);
+    return monitorPreToolUse(input, config, output, source, ctx.notice);
+  }
   if (["deny", "ask"].includes(decision) && !ctx.backendAuditId) {
     await auditBlocked(input, withBackendPosture(config), code, ctx, source);
   }
   if (source && decision !== "deny") {
     _toolPolicySources.set(_toolTimingKey(input), source);
   }
+  await recordRunTool(input, config, ctx.runId, ctx.runVerdict);
   if (!ctx.notice) return output;
   if (!output) return allowWithNotice(ctx.notice);
   return {
@@ -997,6 +1011,7 @@ async function decidePreToolUse(input, config, ctx = {}) {
   //     (sanitizeParams truncates long values, which a rule could miss). ---
   const v2 = config.apiKey ? await decideV2(config, toolName, input.tool_input) : null;
   ctx.v2 = v2;
+  ctx.runVerdict = v2;
   if (v2?.code === "backend_unreachable") return denyPreTool("backend_unreachable", v2.reason);
   if (v2?.reason === "signed_out") config = localOnly(config);
   if (v2?.active) ctx.notice = await policyChangeNotice(config, sessionId, v2.active);
@@ -1637,27 +1652,40 @@ export async function handlePostToolUseFailure(input, config) {
   return null;
 }
 
+function retiredCallback(input, session) {
+  const captured = input.armorAudit;
+  return (
+    Boolean(captured?.contextCaptured || captured?.prompt_id) &&
+    captured.prompt_id !== session?.promptId
+  );
+}
+
 export async function handleStop(input, config) {
   await recordHookActivity(input, config);
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
 
-  await updateRuntimeState(config.runtimeFile, (state) => {
+  const closed = await updateRuntimeState(config.runtimeFile, (state) => {
     if (
       !input.agent_id &&
       !input.parent_session_id &&
       !input.is_subagent &&
       getSession(state, sessionId)
     ) {
+      if (retiredCallback(input, state.sessions[sessionId])) return false;
       const session = upsertSession(state, sessionId, { promptOpenSince: null });
       if (session.pendingRequest?.headers?.["X-ArmorIQ-Plan-Kind"] === "refresh")
         session.pendingRequest = null;
+      return { runId: input.armorAudit?.prompt_id || session.promptId };
     }
+    return false;
   });
+  if (!closed) return null;
+  await updateRunState(config, (state) => closeRun(state, closed.runId, "stop"));
 
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   const session = getSession(runtimeState, sessionId);
-  if (!session) return null;
+  if (!session || retiredCallback(input, session)) return null;
 
   // Check if token expired mid-turn
   if (Number.isFinite(session.expiresAt) && nowEpochSeconds() > session.expiresAt) {
@@ -1674,9 +1702,17 @@ export async function handleSessionEnd(input, config) {
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
   await dropWouldBe(config.dataDir, sessionId).catch(() => {});
+  if (input.agent_id || input.parent_session_id || input.is_subagent) return null;
+  const closed = await updateRuntimeState(config.runtimeFile, (state) => {
+    if (retiredCallback(input, state.sessions[sessionId])) return false;
+    return { runId: input.armorAudit?.prompt_id || state.sessions[sessionId]?.promptId };
+  });
+  if (!closed) return null;
+  await updateRunState(config, (state) => closeRun(state, closed.runId, "session_end"));
 
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   const session = runtimeState.sessions ? runtimeState.sessions[sessionId] : undefined;
+  if (retiredCallback(input, session)) return null;
 
   // Revoke at session end so the token cannot outlive the session.
   if (config.autoRevokeOnEnd && session?.intentTokenRaw) {

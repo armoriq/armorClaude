@@ -113,7 +113,7 @@ async function main() {
 
 export async function dispatchHook(event, input, config, dispatch = dispatchViaDaemon) {
   let runtimeState;
-  if (["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(event)) {
+  if (["PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "SessionEnd"].includes(event)) {
     input.armorAudit ??= createAuditEnvelope(input);
     if (!input.armorAudit.contextCaptured) {
       runtimeState = await loadRuntimeState(config.runtimeFile);

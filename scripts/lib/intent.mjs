@@ -16,6 +16,7 @@ import { isBillingError } from "./hook-output.mjs";
 import { createAuditWal, loginTag, recordAuthenticationSuccess } from "./audit-wal.mjs";
 import { clientEvent } from "./client-events.mjs";
 import { createAuditEnvelope } from "./audit-capture.mjs";
+import { recordLocalRunRejection, storeRunRegistration } from "./runs.mjs";
 import {
   authFingerprint,
   resolveProcessSession,
@@ -615,6 +616,7 @@ async function preparePlanRequest(config, payload) {
         session.pendingRequest.deadlineAt = Date.now() + REGISTRATION_DEADLINE_MS;
         delete session.pendingRequest.unconfirmed;
       }
+      session.pendingRequest.pid = process.pid;
       return session.pendingRequest;
     }
     const kind = session.countedPlanId ? "revision" : "new";
@@ -642,9 +644,11 @@ async function preparePlanRequest(config, payload) {
       promptGeneration: session.promptGeneration,
       authGeneration: session.authGeneration,
       deadlineAt: Date.now() + REGISTRATION_DEADLINE_MS,
+      pid: process.pid,
     };
     return session.pendingRequest;
   });
+  if (descriptor) await storeRunRegistration(config, descriptor, "pending");
   return descriptor;
 }
 
@@ -691,6 +695,7 @@ async function recordPlanRequestFailure(config, descriptor, reason, unconfirmed 
       else session.pendingRequest = null;
     }
   });
+  await storeRunRegistration(config, descriptor, "failed");
   const tag = loginTag(config.backendEndpoint, config.apiKey);
   const event = clientEvent("plan_request_failed", "health", 1, reason, Date.now(), {
     event_id: createAuditEnvelope({
@@ -711,7 +716,12 @@ async function recordPlanRequestFailure(config, descriptor, reason, unconfirmed 
 }
 
 async function sendPlanRequest(config, descriptor, reloadConfig = () => config) {
-  return sendPreparedPlanRequest(config, descriptor, reloadConfig);
+  try {
+    return await sendPreparedPlanRequest(config, descriptor, reloadConfig);
+  } catch (error) {
+    await storeRunRegistration(config, descriptor, "failed");
+    throw error;
+  }
 }
 
 async function sendPreparedPlanRequest(config, descriptor, reloadConfig) {
@@ -730,7 +740,10 @@ async function sendPreparedPlanRequest(config, descriptor, reloadConfig) {
       syncSessionAuth(state, reloadConfig(), body.context_id);
       return requestIsCurrent(state.sessions[body.context_id], descriptor);
     });
-    if (!current) throw registrationError("plan retired before registration completed");
+    if (!current) {
+      await storeRunRegistration(config, descriptor, "failed");
+      throw registrationError("plan retired before registration completed");
+    }
     const remaining = descriptor.deadlineAt - Date.now();
     if (remaining <= 0) break;
     if (descriptor.retryAt > Date.now()) {
@@ -773,6 +786,7 @@ async function sendPreparedPlanRequest(config, descriptor, reloadConfig) {
             : token.planId,
         kind: token.kind || headers["X-ArmorIQ-Plan-Kind"],
       };
+      await storeRunRegistration(config, descriptor, "confirmed", result.countedPlanId);
       const installed = await updateRuntimeState(config.runtimeFile, (state) => {
         syncSessionAuth(state, reloadConfig(), body.context_id);
         const session = state.sessions[body.context_id];
@@ -1040,15 +1054,19 @@ function registeredReply(session, plan) {
 export async function registerIntentPlan(
   config,
   plan,
-  { reloadConfig = () => config, forceRevision = false } = {}
+  { reloadConfig = () => config, forceRevision = false, runId: expectedRunId } = {}
 ) {
   let confirmed = false;
+  let runId;
   try {
     const prepared = await updateRuntimeState(config.runtimeFile, async (state) => {
       const sessionId = resolveProcessSession(state);
       if (!sessionId) throw registrationError("session identity unavailable");
       syncSessionAuth(state, config, sessionId);
       const session = state.sessions[sessionId];
+      runId = session.promptId;
+      if (expectedRunId && expectedRunId !== runId)
+        throw registrationError("plan retired before registration completed");
       const reason =
         !config.apiKey || config.signedOut
           ? "logged_out"
@@ -1061,7 +1079,9 @@ export async function registerIntentPlan(
         return { reply: registrationReply(`Plan recorded locally, not registered (${reason}).`) };
       }
       if (forceRevision && !session.countedPlanId)
-        throw registrationError("no current plan in this prompt to reanchor");
+        throw Object.assign(registrationError("no current plan in this prompt to reanchor"), {
+          localRejection: true,
+        });
       if (
         !forceRevision &&
         session.countedPlanId &&
@@ -1108,6 +1128,8 @@ export async function registerIntentPlan(
       return registeredReply(session, plan);
     });
   } catch (error) {
+    if (error.localRejection && runId)
+      await recordLocalRunRejection(config, `${forceRevision}:${planHash(plan)}`, runId);
     const reason = requestReason(config, undefined, error);
     return registrationReply(
       error.unconfirmed ||

@@ -1,7 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readlinkSync } from "node:fs";
-import { link, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
+import {
+  link,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { setTimeout as sleep } from "node:timers/promises";
 import path from "node:path";
@@ -9,6 +19,7 @@ import { isDeepStrictEqual } from "node:util";
 import { nowEpochSeconds, sha256Hex } from "./common.mjs";
 import { ensurePrivateDir, PRIVATE_FILE_MODE, readJson, writeJson } from "./fs-store.mjs";
 import { processInfo } from "./usage-sessions.mjs";
+import { applyRunTool, closeRun, openRun, reportRunCaptureFailure } from "./runs.mjs";
 
 const MAX_SESSION_AGE_SECONDS = 60 * 60 * 24;
 const snapshots = new WeakMap();
@@ -235,6 +246,7 @@ export async function loadRuntimeState(runtimeFilePath) {
       : {};
   const discoveredTools = Array.isArray(raw?.discoveredTools) ? raw.discoveredTools : [];
   const state = { sessions, mcpRegistry, discoveredTools };
+  if (raw?.runs) state.runs = raw.runs;
   if (typeof raw?.activeSessionId === "string") state.activeSessionId = raw.activeSessionId;
   for (const [id, session] of Object.entries(sessions)) {
     sessions[id] = { ...sessionDefaults(), ...session };
@@ -382,6 +394,103 @@ export async function updateRuntimeState(file, change) {
   });
 }
 
+export const runStateFile = (config) => `${config.runtimeFile}.runs.json`;
+const runToolsFile = (config) => `${runStateFile(config)}.tools.jsonl`;
+
+export async function loadRunState(config) {
+  if (!config.runReportingEnabled) return { runs: {} };
+  let state;
+  try {
+    state = JSON.parse(await readFile(runStateFile(config), "utf8"));
+    if (!state?.runs || typeof state.runs !== "object" || Array.isArray(state.runs))
+      throw new Error("Invalid run state");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    state = { runs: (await loadRuntimeState(config.runtimeFile)).runs ?? {} };
+  }
+  let journal;
+  try {
+    journal = await readFile(runToolsFile(config), "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    return state;
+  }
+  for (const line of journal.slice(0, journal.lastIndexOf("\n") + 1).split("\n")) {
+    if (line) applyRunTool(state, JSON.parse(line));
+  }
+  return state;
+}
+
+async function writeRunState(file, state) {
+  const tmp = `${file}.tmp.${randomUUID()}`;
+  try {
+    const handle = await open(tmp, "wx", PRIVATE_FILE_MODE);
+    try {
+      await handle.writeFile(JSON.stringify(state));
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tmp, file);
+    const directory = await open(path.dirname(file), "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  } finally {
+    await unlink(tmp).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  }
+}
+
+export async function updateRunState(config, change) {
+  if (!config.runReportingEnabled) return;
+  try {
+    return await withRuntimeLock(runStateFile(config), async () => {
+      const state = await loadRunState(config);
+      const before = structuredClone(state);
+      const result = await change(state);
+      if (!isDeepStrictEqual(before, state)) await writeRunState(runStateFile(config), state);
+      return result;
+    });
+  } catch {
+    await reportRunCaptureFailure(config);
+  }
+}
+
+export async function appendRunTool(config, event) {
+  return withRuntimeLock(runStateFile(config), async () => {
+    const state = await loadRunState(config);
+    if (!applyRunTool(state, event)) return;
+    const file = runToolsFile(config);
+    const handle = await open(file, "a+", PRIVATE_FILE_MODE);
+    try {
+      const previous = await handle.readFile();
+      const complete = previous.lastIndexOf(10) + 1;
+      if (complete < previous.length) {
+        // Preserve a torn receipt before repairing the append boundary.
+        await writeRunState(`${file}.incomplete.${randomUUID()}`, {
+          raw: previous.subarray(complete).toString("utf8"),
+          raw_base64: previous.subarray(complete).toString("base64"),
+        });
+        await handle.truncate(complete);
+      }
+      await handle.writeFile(JSON.stringify(event) + "\n");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    const directory = await open(path.dirname(file), "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  });
+}
+
 export function retirePlan(session) {
   Object.assign(session, {
     retirementEpoch: (session.retirementEpoch ?? 0) + 1,
@@ -480,7 +589,7 @@ export async function recordHookActivity(input, config, claudeProcessId) {
 
 export async function startPrompt(input, config) {
   if (input.agent_id || input.parent_session_id || input.is_subagent) return;
-  return updateRuntimeState(config.runtimeFile, (state) => {
+  const started = await updateRuntimeState(config.runtimeFile, (state) => {
     const fingerprint = syncSessionAuth(state, config, input.session_id);
     const session = upsertSession(state, input.session_id, { authFingerprint: fingerprint });
     session.authBackendEndpoint = config.backendEndpoint;
@@ -489,6 +598,7 @@ export async function startPrompt(input, config) {
     const hash = sha256Hex(input.prompt);
     const age = now - (session.promptIdentityAt ?? 0);
     if (session.promptIdentityHash === hash && age >= 0 && age <= 5000) return;
+    const previous = session.promptId;
     retirePlan(session);
     Object.assign(session, {
       promptId: randomUUID(),
@@ -501,6 +611,17 @@ export async function startPrompt(input, config) {
       lastPrompt: input.prompt,
       lastPromptAt: nowEpochSeconds(),
     });
+    return { previous, session: structuredClone(session), now };
+  });
+  if (!started || !config.runReportingEnabled) return;
+  await updateRunState(config, (state) => {
+    closeRun(state, started.previous, "next_prompt", started.now);
+    openRun(
+      { ...state, sessions: { [input.session_id]: started.session } },
+      input.session_id,
+      config,
+      started.now
+    );
   });
 }
 

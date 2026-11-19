@@ -2,7 +2,8 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isPlainObject } from "./common.mjs";
 import { loginCommand } from "./config.mjs";
-import { auditLoginConfig, auditStatus, healthStatus } from "./audit-wal.mjs";
+import { auditLoginConfig, auditStatus, healthStatus, runsStatus } from "./audit-wal.mjs";
+import { flushRunReports } from "./runs.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 import { saveOrgMode } from "./org-mode.mjs";
 import { loadPolicyState, savePolicyState } from "./policy.mjs";
@@ -2034,10 +2035,14 @@ export async function handleArmorPolicyCommand(prompt, config) {
 
   switch (parsed.cmd) {
     case "status": {
+      await flushRunReports(config);
       const status = await auditStatus(config.dataDir, (binding) =>
         auditLoginConfig(binding, config) ? binding : null
       );
       const health = await healthStatus(config.dataDir, (binding) =>
+        auditLoginConfig(binding, config) ? binding : null
+      );
+      const runs = await runsStatus(config.dataDir, (binding) =>
         auditLoginConfig(binding, config) ? binding : null
       );
       return [
@@ -2052,6 +2057,10 @@ export async function handleArmorPolicyCommand(prompt, config) {
         `Health reporting held: ${health.holds?.join(", ") || "none"}`,
         `Health dead letters: ${health.deadLetters}`,
         `Undeliverable health events: ${health.undeliverable}`,
+        `Pending run reports: ${runs.pending}`,
+        `Run reporting paused: ${runs.paused ? "yes" : "no"}`,
+        `Run reporting held: ${runs.holds?.join(", ") || "none"}`,
+        `Undeliverable run reports: ${runs.undeliverable}`,
       ].join("\n");
     }
     case "help":
