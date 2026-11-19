@@ -479,100 +479,27 @@ test("SessionEnd does NOT call client.revoke when autoRevokeOnEnd is false", asy
   assert.equal(calls.length, 0, "flag off → revoke must not fire");
 });
 
-test("Phase 4 A2: Stop hook proactively refreshes a near-expiry token", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-a2-"));
-  // Setting useSdkIntent: true with a stub injected into the SDK cache so we
-  // can verify requestIntent fires from inside handleStop. apiKey must start
-  // with ak_test_ to pass the SDK's prefix validator.
-  const config = buildConfig(tmp, {
-    intentEndpoint: "",
-    useSdkIntent: true,
-    apiKey: "ak_test_a2",
-    userId: "test-user-a2",
-    refreshThresholdSeconds: 30,
-    validitySeconds: 600,
+// regression: #0007
+test("Stop closes a legacy session without refreshing its near expiry token", async (t) => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-stop-"));
+  const config = buildConfig(tmp, { apiKey: "ak_test_stop", userId: "test-stop" });
+  const prior = await loadRuntimeState(config.runtimeFile);
+  const tokenRaw = JSON.stringify({ tokenId: "old", plan: { steps: [{ action: "Read" }] } });
+  upsertSession(prior, "legacy", {
+    intentTokenRaw: tokenRaw,
+    plan: { steps: [{ action: "Read" }] },
+    expiresAt: Math.floor(Date.now() / 1000) + 60,
   });
-
-  // Seed a session with a plan + a token that's ALMOST expired (< 4×30 = 120s).
-  const expiresAt = Math.floor(Date.now() / 1000) + 60; // 60s left
-  const priorState = await loadRuntimeState(config.runtimeFile);
-  upsertSession(priorState, "sess-a2-1", {
-    intentTokenRaw: JSON.stringify({ tokenId: "tok_old", plan: { steps: [] } }),
-    plan: { goal: "g", steps: [{ action: "Read" }] },
-    expiresAt,
-    lastPrompt: "test prompt",
+  await saveRuntimeState(config.runtimeFile, prior);
+  const { getSdkClient } = await import("../scripts/lib/intent.mjs");
+  const issue = t.mock.method(getSdkClient(config), "getIntentToken", async () => {
+    throw new Error("Stop must not request a token");
   });
-  await saveRuntimeState(config.runtimeFile, priorState);
-
-  const calls = [];
-  const intentMod = await import("../scripts/lib/intent.mjs");
-  const client = intentMod.getSdkClient(config);
-  const originalCapture = client.capturePlan;
-  const originalIssue = client.getIntentToken;
-  client.capturePlan = (_llm, _goal, plan) => ({ ok: true, plan });
-  client.getIntentToken = async (planCapture) => {
-    calls.push({ kind: "getIntentToken", plan: planCapture?.plan });
-    return {
-      tokenId: "tok_refreshed",
-      planHash: "h_new",
-      signature: "sig",
-      issuedAt: Date.now() / 1000,
-      expiresAt: Date.now() / 1000 + 600,
-      policy: {},
-      compositeIdentity: "",
-      stepProofs: [],
-      totalSteps: 0,
-      rawToken: { token: { token_id: "tok_refreshed" } },
-    };
-  };
-
-  try {
-    await handleStop({ hook_event_name: "Stop", session_id: "sess-a2-1" }, config);
-  } finally {
-    client.capturePlan = originalCapture;
-    if (originalIssue) client.getIntentToken = originalIssue;
-    else delete client.getIntentToken;
-  }
-
-  assert.ok(
-    calls.some((c) => c.kind === "getIntentToken"),
-    "handleStop should pre-refresh the near-expiry token via getIntentToken"
-  );
-});
-
-test("Phase 4 A2: Stop hook does NOT refresh when token is fresh", async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), "armorclaude-a2-fresh-"));
-  const config = buildConfig(tmp, {
-    useSdkIntent: true,
-    apiKey: "ak_test_a2_fresh",
-    userId: "test-user-a2-fresh",
-    refreshThresholdSeconds: 30,
-    validitySeconds: 600,
-  });
-  const expiresAt = Math.floor(Date.now() / 1000) + 600; // 10 min left
-  const priorState = await loadRuntimeState(config.runtimeFile);
-  upsertSession(priorState, "sess-a2-2", {
-    intentTokenRaw: JSON.stringify({ tokenId: "tok_fresh" }),
-    plan: { goal: "g", steps: [{ action: "Read" }] },
-    expiresAt,
-  });
-  await saveRuntimeState(config.runtimeFile, priorState);
-
-  const calls = [];
-  const intentMod = await import("../scripts/lib/intent.mjs");
-  const client = intentMod.getSdkClient(config);
-  const originalIssue = client.getIntentToken;
-  client.getIntentToken = async () => {
-    calls.push({ kind: "getIntentToken" });
-    return {};
-  };
-  try {
-    await handleStop({ hook_event_name: "Stop", session_id: "sess-a2-2" }, config);
-  } finally {
-    if (originalIssue) client.getIntentToken = originalIssue;
-    else delete client.getIntentToken;
-  }
-  assert.equal(calls.length, 0, "fresh token must not trigger a refresh");
+  await handleStop({ session_id: "legacy" }, config);
+  assert.equal(issue.mock.callCount(), 0);
+  const current = (await loadRuntimeState(config.runtimeFile)).sessions.legacy;
+  assert.equal(current.promptOpenSince, null);
+  assert.equal(current.intentTokenRaw, tokenRaw);
 });
 
 test("ArmorClaude's own MCP tools are never drift-blocked (deadlock prevention)", async () => {

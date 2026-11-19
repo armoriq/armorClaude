@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { computePolicyHash, loadPolicyState, savePolicyState } from "../scripts/lib/policy.mjs";
 import { startBackend, startHookSession, waitFor } from "./helpers/hook-session.mjs";
@@ -25,9 +25,8 @@ function tokenRoute(planId) {
 
 const denied = (output) => output?.hookSpecificOutput?.permissionDecision === "deny";
 
-test("with no confirmed policy, intent is captured: directive, plan, token and plan-linked audit rows, nothing denied (#294)", async (t) => {
-  const planId = randomUUID();
-  const backend = await startBackend(tokenRoute(planId));
+test("with no confirmed policy, tools run without a plan or token request and audit rows have no plan", async (t) => {
+  const backend = await startBackend(tokenRoute(randomUUID()));
   const { dataDir, hook } = await startHookSession(t, backend);
   assert.equal(existsSync(path.join(dataDir, "policy.json")), false);
 
@@ -42,8 +41,7 @@ test("with no confirmed policy, intent is captured: directive, plan, token and p
   const list = { tool_name: "Bash", tool_input: { command: "ls" } };
   assert.equal(denied(await hook({ hook_event_name: "PreToolUse", ...list })), false);
   const tokenRequests = backend.requests.filter((r) => r.route === "POST /iap/sdk/token");
-  assert.equal(tokenRequests.length, 1);
-  assert.equal(tokenRequests[0].body.plan.steps[0].action, "Bash");
+  assert.equal(tokenRequests.length, 0);
   await hook({ hook_event_name: "PostToolUse", ...list, tool_response: { stdout: "a\n" } });
 
   const offPlan = { tool_name: "Write", tool_input: { file_path: "notes.txt", content: "hi" } };
@@ -52,10 +50,10 @@ test("with no confirmed policy, intent is captured: directive, plan, token and p
 
   await waitFor(() => backend.auditRows.length === 2, 15_000, "two audit rows at the backend");
   assert.deepEqual(
-    backend.auditRows.map((r) => [r.tool, r.plan_id]),
+    backend.auditRows.map((r) => [r.tool, r.plan_id ?? null]),
     [
-      ["Bash", planId],
-      ["Write", planId],
+      ["Bash", null],
+      ["Write", null],
     ]
   );
 });
@@ -88,7 +86,8 @@ test("under an all-allow policy an expired intent token that cannot be refreshed
   assert.equal(denied(output), false, JSON.stringify(output));
 });
 
-test("a plan captured under allow-all does not count as registered once an enforcing policy is confirmed (#294)", async (t) => {
+// regression: #0007
+test("tools run under allow all but need registration once an enforcing policy is confirmed", async (t) => {
   const backend = await startBackend(tokenRoute(randomUUID()));
   const { dataDir, hook } = await startHookSession(t, backend);
   const bash = { tool_name: "Bash", tool_input: { command: "ls" } };
@@ -135,7 +134,8 @@ test("under an all-allow policy a malformed CSRG proof header does not block the
   assert.equal(denied(output), false, JSON.stringify(output));
 });
 
-test("under an all-allow policy a failed token request is not retried until the next prompt (#294)", async (t) => {
+// regression: #0007
+test("under allow all repeated tools and new prompts never request a token", async (t) => {
   const backend = await startBackend({
     "POST /iap/sdk/token": () => [402, { message: "Payment required: upgrade to Pro" }],
   });
@@ -146,11 +146,37 @@ test("under an all-allow policy a failed token request is not retried until the 
   await hook({ hook_event_name: "UserPromptSubmit", prompt: "list the files" });
   assert.equal(denied(await hook(bash)), false);
   const afterFirst = tokenRequests().length;
-  assert.ok(afterFirst > 0);
+  assert.equal(afterFirst, 0);
   for (let i = 0; i < 2; i++) assert.equal(denied(await hook(bash)), false);
   assert.equal(tokenRequests().length, afterFirst);
 
   await hook({ hook_event_name: "UserPromptSubmit", prompt: "list them again" });
   assert.equal(denied(await hook(bash)), false);
-  assert.ok(tokenRequests().length > afterFirst);
+  assert.equal(tokenRequests().length, 0);
+});
+
+// regression: #0007
+test("ExitPlanMode does not register a plan from the approved plan file", async (t) => {
+  const backend = await startBackend(tokenRoute(randomUUID()));
+  const { env, dataDir, sessionId, hook } = await startHookSession(t, backend);
+  await hook({ hook_event_name: "UserPromptSubmit", prompt: "write notes" });
+  const planFilePath = path.join(env.HOME, ".claude", "plans", `${sessionId}.md`);
+  await mkdir(path.dirname(planFilePath), { recursive: true });
+  await writeFile(
+    planFilePath,
+    '# Plan\n```json\n{"goal":"write notes","steps":[{"action":"Write"}]}\n```\n'
+  );
+  const output = await hook({
+    hook_event_name: "PreToolUse",
+    tool_name: "ExitPlanMode",
+    transcript_path: `sessions/${sessionId}.jsonl`,
+    tool_input: {},
+  });
+  assert.equal(denied(output), false);
+  assert.equal(backend.requests.filter((r) => r.route === "POST /iap/sdk/token").length, 0);
+  const session = JSON.parse(await readFile(path.join(dataDir, "runtime.json"), "utf8")).sessions[
+    sessionId
+  ];
+  assert.equal(session.countedPlanId, null);
+  assert.equal(session.plan, undefined);
 });

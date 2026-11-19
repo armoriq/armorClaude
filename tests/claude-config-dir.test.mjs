@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 import { claudeConfigDir } from "../scripts/lib/claude-paths.mjs";
 import { loadConfig } from "../scripts/lib/config.mjs";
 import { projectsDir } from "../scripts/lib/live-usage.mjs";
-import { resolvePlanFilePath } from "../scripts/lib/planner.mjs";
 import {
   assistant,
   backend,
@@ -30,18 +29,6 @@ const worker = path.join(
   "usage-worker.mjs"
 );
 
-function withConfigDir(value, fn) {
-  const saved = process.env.CLAUDE_CONFIG_DIR;
-  if (value === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-  else process.env.CLAUDE_CONFIG_DIR = value;
-  try {
-    return fn();
-  } finally {
-    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-    else process.env.CLAUDE_CONFIG_DIR = saved;
-  }
-}
-
 test("Claude Code paths follow CLAUDE_CONFIG_DIR and fall back to ~/.claude", () => {
   const custom = path.join(homedir(), ".claude-second");
   assert.equal(claudeConfigDir({ CLAUDE_CONFIG_DIR: custom }), custom);
@@ -51,15 +38,6 @@ test("Claude Code paths follow CLAUDE_CONFIG_DIR and fall back to ~/.claude", ()
   assert.equal(projectsDir({ CLAUDE_CONFIG_DIR: custom }), path.join(custom, "projects"));
   assert.equal(loadConfig({ CLAUDE_CONFIG_DIR: custom }).dataDir, path.join(custom, "armorclaude"));
   assert.equal(loadConfig({}).dataDir, path.join(homedir(), ".claude", "armorclaude"));
-  const input = { transcript_path: "/x/sessions/plan-name.jsonl" };
-  assert.equal(
-    withConfigDir(custom, () => resolvePlanFilePath(input)),
-    path.join(custom, "plans", "plan-name.md")
-  );
-  assert.equal(
-    withConfigDir(undefined, () => resolvePlanFilePath(input)),
-    path.join(homedir(), ".claude", "plans", "plan-name.md")
-  );
 });
 
 function writeConfigSession(configDir, sessionId, usage) {

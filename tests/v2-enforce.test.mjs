@@ -6,7 +6,12 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { daemonLogPath } from "../scripts/lib/daemon-log.mjs";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
-import { startBackend, startHookSession, waitFor } from "./helpers/hook-session.mjs";
+import {
+  startBackend,
+  startHookSession,
+  startPolicyMcp,
+  waitFor,
+} from "./helpers/hook-session.mjs";
 
 const POLICY_DOCUMENT = JSON.parse(
   readFileSync(new URL("./fixtures/v2-agent-policy.json", import.meta.url), "utf8")
@@ -58,9 +63,16 @@ const decisionOf = (output) => output?.hookSpecificOutput?.permissionDecision ??
 const reasonOf = (output) => output?.hookSpecificOutput?.permissionDecisionReason ?? "";
 const routed = (backend, route) => backend.requests.filter((r) => r.route.startsWith(route));
 
-test("the minted plan carries each step's tool input as arguments, the field the backend's v2 plan check reads", async (t) => {
+test("the registered plan carries each step's tool input as arguments, the field the backend's v2 plan check reads", async (t) => {
   const backend = await v2Backend(randomUUID());
-  const { hook } = await startHookSession(t, backend);
+  const { env, sessionId, hook } = await startHookSession(t, backend);
+  await hook({ hook_event_name: "UserPromptSubmit", prompt: "list files" });
+  const client = await startPolicyMcp(t, env, sessionId);
+  const result = await client.callTool({
+    name: "register_intent_plan",
+    arguments: { goal: "list files", steps: [{ action: "Bash", arguments: { command: "ls" } }] },
+  });
+  assert.notEqual(result.isError, true, result.content[0].text);
   await hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
   const [mint] = routed(backend, "POST /iap/sdk/token");
   assert.ok(mint, "no token mint");
@@ -114,7 +126,14 @@ test("a v2 hold stops the call, files one delegation request without an amount, 
             requiresApproval: true,
           },
   });
-  const { hook } = await startHookSession(t, backend);
+  const { env, sessionId, hook } = await startHookSession(t, backend);
+  await hook({ hook_event_name: "UserPromptSubmit", prompt: "write notes" });
+  const client = await startPolicyMcp(t, env, sessionId);
+  const result = await client.callTool({
+    name: "register_intent_plan",
+    arguments: { goal: "write notes", steps: [{ action: "Bash" }, { action: "Write" }] },
+  });
+  assert.notEqual(result.isError, true, result.content[0].text);
   await hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
   const write = {
     hook_event_name: "PreToolUse",
@@ -164,7 +183,14 @@ test("a spent approval is forgotten, so the same held call later files a new req
       { delegationId: `deleg-${++filed}`, status: "pending" },
     ],
   });
-  const { hook } = await startHookSession(t, backend);
+  const { env, sessionId, hook } = await startHookSession(t, backend);
+  await hook({ hook_event_name: "UserPromptSubmit", prompt: "write notes" });
+  const client = await startPolicyMcp(t, env, sessionId);
+  const registered = await client.callTool({
+    name: "register_intent_plan",
+    arguments: { goal: "write notes", steps: [{ action: "Bash" }, { action: "Write" }] },
+  });
+  assert.notEqual(registered.isError, true, registered.content[0].text);
   await hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
   const write = {
     hook_event_name: "PreToolUse",
@@ -445,7 +471,13 @@ const holdOnce = () => ({
 test("a hold read from the product-slug bundle is enforced as the agent the intent token was minted for", async (t) => {
   const bundle = slugBundle([entry("agent-1", "args-and-holds", POLICY_DOCUMENT, "agent")]);
   const backend = await v2Backend(randomUUID(), { bundle: () => [200, bundle], enforce: holdOnce });
-  const { hook } = await startHookSession(t, backend);
+  const { env, sessionId, hook } = await startHookSession(t, backend);
+  await hook({ hook_event_name: "UserPromptSubmit", prompt: "write notes" });
+  const client = await startPolicyMcp(t, env, sessionId);
+  await client.callTool({
+    name: "register_intent_plan",
+    arguments: { goal: "write notes", steps: [{ action: "Bash" }, { action: "Write" }] },
+  });
   await bash(hook, "ls");
 
   const held = await hook(heldWrite);
@@ -506,8 +538,11 @@ test("in enforcement mode the directive keeps the mandatory wording", async (t) 
   });
   const prompt = await hook({ hook_event_name: "UserPromptSubmit", prompt: "write hello.txt" });
   const directive = prompt?.hookSpecificOutput?.additionalContext ?? "";
-  assert.match(directive, /ArmorClaude intent enforcement is active. Before using any tool/);
-  assert.match(directive, /BEFORE any other tool call/);
+  assert.match(
+    directive,
+    /ArmorClaude intent enforcement is active. Before the first tool that needs a plan/
+  );
+  assert.match(directive, /argument before the first tool that needs one/);
   assert.match(directive, /before relying on enforcement/);
   assert.match(directive, /Tool calls without a registered plan will be blocked/);
 });

@@ -31,6 +31,7 @@ import {
 import { DAEMON_VERSION } from "./lib/daemon-version.mjs";
 import { launchLiveUsage } from "./lib/usage-sync-launch.mjs";
 import { sessionOutput } from "./lib/relogin.mjs";
+import { startIntentRefreshLoop } from "./lib/intent.mjs";
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
@@ -101,6 +102,7 @@ function effectiveConfigFor(configEnv) {
   if (!configEnv || typeof configEnv !== "object") return config;
   if (requestConfigSignature(configEnv) === requestConfigSignature(config)) return config;
   const merged = { ...config };
+  merged.signedOut = configEnv.signedOut === true;
   for (const k of REQUEST_CONFIG_KEYS) {
     if (configEnv[k] !== undefined) merged[k] = configEnv[k];
   }
@@ -217,6 +219,7 @@ const auditTimer = setInterval(() => {
   flushAudit("interval");
 }, AUDIT_FLUSH_INTERVAL_MS);
 auditTimer.unref();
+const stopIntentRefresh = startIntentRefreshLoop(() => loadConfig());
 
 // `cfg` is the per-request effective config snapshot (see effectiveConfigFor)
 // so enforcement + audit gating never read a module-global that a concurrent
@@ -408,6 +411,7 @@ function shutdown(code) {
 }
 
 async function stopAndExit(code) {
+  stopIntentRefresh();
   server.close();
   await flushAudit("shutdown").catch(() => undefined);
   cleanupSocket();

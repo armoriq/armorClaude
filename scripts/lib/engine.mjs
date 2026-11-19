@@ -9,8 +9,8 @@ import {
   DECISION_CODE,
   addPromptContext,
   armorReply,
-  askPreTool,
   allowWithNotice,
+  askPreTool,
   blockPrompt,
   denyPreTool,
   denyPreToolWithHint,
@@ -24,6 +24,7 @@ import {
 import { getTemplateNames, getTemplate } from "./policy-templates.mjs";
 import {
   checkIntentTokenPlan,
+  billingUpgradeUrl,
   checkToolAgainstPlan,
   extractAllowedActions,
   findPlanStepIndices,
@@ -32,15 +33,15 @@ import {
   parseCsrgProofHeaders,
   planCheckDenial,
   recordSessionTokenUsedStepIndices,
-  requestIntent,
+  refreshIntent,
   resolveCsrgProofsFromToken,
   validateCsrgProofHeaders,
 } from "./intent.mjs";
 import { createIapService, reanchorViaSdk, revokeViaSdk } from "./iap-service.mjs";
 import { PolicyFileError, computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
 import { normalizePolicyIr } from "./policy-ir.mjs";
-import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
-import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
+import { INTENT_PLAN_FORMAT } from "./intent-schema.mjs";
+import { recordsPreToolActivity } from "./hook-activity.mjs";
 import { localOnly, notSignedIn, withBackendPosture } from "./config.mjs";
 import { capabilityOf } from "./backend-posture.mjs";
 import { readJson, writePrivateFile } from "./fs-store.mjs";
@@ -52,9 +53,12 @@ import {
   getSession,
   loadRuntimeState,
   planCheckFile,
+  recordHookActivity,
   saveRuntimeState,
-  setActiveSessionId,
+  sameGenerations,
+  startPrompt,
   tokenPlanCheck,
+  updateRuntimeState,
   upsertDiscoveredTool,
   upsertSession,
 } from "./runtime-state.mjs";
@@ -287,6 +291,7 @@ function formatRemoteVerifyDeny(toolName, verifyResult) {
 }
 
 function readIntentTokenRaw(input, session) {
+  if (session.promptId) return session.intentTokenRaw || "";
   const candidates = [
     input.intentTokenRaw,
     input.intent_token_raw,
@@ -514,6 +519,7 @@ export async function handleSessionStart(input, config) {
 }
 
 async function startSession(input, config) {
+  await recordHookActivity(input, config);
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
 
@@ -523,9 +529,6 @@ async function startSession(input, config) {
     startedAt: nowEpochSeconds(),
     discoveredTools: [],
   });
-  // Stamp the active-session pointer so the policy MCP server (which cannot see
-  // session_id) can scope register_intent_plan + Trust Update ops to this session.
-  setActiveSessionId(runtimeState, sessionId);
   await saveRuntimeState(config.runtimeFile, runtimeState);
 
   // --- Fire-and-forget: sync MCP registry from backend (if apiKey set) ---
@@ -647,6 +650,7 @@ async function startSession(input, config) {
 }
 
 export async function handleUserPromptExpansion(input, config) {
+  await recordHookActivity(input, config);
   const prompt = typeof input?.prompt === "string" ? input.prompt.trim() : "";
   if (isArmorPolicyCommand(prompt)) {
     const response = await handleArmorPolicyCommand(prompt, config);
@@ -679,11 +683,14 @@ export async function handleUserPromptSubmit(input, config) {
 }
 
 async function promptSubmit(input, config) {
+  await recordHookActivity(input, config);
   const prompt = typeof input.prompt === "string" ? input.prompt : "";
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-  if (!prompt || !sessionId) {
+  if (typeof input.prompt !== "string" || !sessionId) {
     return null;
   }
+  if (input.agent_id || input.parent_session_id || input.is_subagent) return null;
+  await startPrompt(input, config);
 
   // --- /armor commands: human-only, policy-immune ---
   if (isArmorPolicyCommand(prompt)) {
@@ -694,22 +701,6 @@ async function promptSubmit(input, config) {
     return blockPrompt(legacyArmorPolicyMessage());
   }
 
-  // --- Store prompt in session ---
-  const runtimeState = await loadRuntimeState(config.runtimeFile);
-  upsertSession(runtimeState, sessionId, {
-    lastPrompt: prompt,
-    lastPromptAt: nowEpochSeconds(),
-    intentRequestFailed: false,
-  });
-  // Refresh the active-session pointer: register_intent_plan (MCP) is typically
-  // the next event, and it resolves the session id from here.
-  setActiveSessionId(runtimeState, sessionId);
-  await saveRuntimeState(config.runtimeFile, runtimeState);
-
-  // --- Inject directive: tell Claude to register its intent plan ---
-  // Claude will call the `register_intent_plan` MCP tool (or include a JSON
-  // block in its plan file) as its first action. This uses the session's own
-  // LLM — no separate API key or extra LLM call needed.
   const policyState = await loadPolicyState(config.policyFile);
   const mode = intentMode(config, policyState.policy);
   const parts = [];
@@ -717,21 +708,19 @@ async function promptSubmit(input, config) {
     const capture = mode === "capture";
     parts.push(
       (capture
-        ? "ArmorClaude intent capture is active. Declare your plan in this exact JSON " +
-          "shape so your tool calls are recorded against it:\n\n"
-        : "ArmorClaude intent enforcement is active. Before using any tool, " +
+        ? "ArmorClaude intent capture is active. Before the first tool that needs a plan, " +
+          "declare your plan in this exact JSON shape so tool calls are recorded against it:\n\n"
+        : "ArmorClaude intent enforcement is active. Before the first tool that needs a plan, " +
           "declare your plan in this exact JSON shape:\n\n") +
         INTENT_PLAN_FORMAT +
         "\n\n" +
         "How to submit:\n" +
-        "- If in plan mode: include the JSON block (fenced with ```json) " +
-        "at the end of your plan file.\n" +
-        "- Otherwise: call the register_intent_plan tool (provided by the " +
+        "Call the register_intent_plan tool (provided by the " +
         "armorclaude-policy MCP server; it may appear namespaced, e.g. " +
         "mcp__armorclaude-policy__register_intent_plan) with the JSON as the " +
         (capture
-          ? "argument, as your first tool call.\n"
-          : "argument BEFORE any other tool call.\n") +
+          ? "argument, as your first tool call that needs a plan. Chat only prompts need no plan.\n"
+          : "argument before the first tool that needs one. Chat only prompts need no plan.\n") +
         "If that tool is not in your tool list, the ArmorClaude policy MCP " +
         "server is not connected: do not fabricate the call, and tell the " +
         "user to verify it with `claude mcp list` (expect armorclaude-policy " +
@@ -758,10 +747,25 @@ async function policyFileProblem(config, error) {
 
 export async function handlePreToolUse(input, config) {
   const ctx = {};
+  ctx.generations = recordsPreToolActivity(input) ? await recordHookActivity(input, config) : null;
   const output = await decidePreToolUse(input, config, ctx).catch(async (error) => {
     const problem = await policyFileProblem(config, error);
     return denyOrAllow(config, "policy_file_invalid", problem.message);
   });
+
+  const generations = ctx.generations;
+  if (generations) {
+    const current = getSession(await loadRuntimeState(config.runtimeFile), input.session_id);
+    if (!current || !sameGenerations(generations, current)) {
+      const { policy } = await loadPolicyState(config.policyFile);
+      if (!isFrictionlessAllowPolicy(policy))
+        return denyOrAllow(
+          config,
+          "intent_plan_missing",
+          "ArmorClaude intent plan retired during tool check"
+        );
+    }
+  }
   const code = output?.[DECISION_CODE];
   const source = policySource(code, ctx);
   const decision = output?.hookSpecificOutput?.permissionDecision;
@@ -993,11 +997,6 @@ async function decidePreToolUse(input, config, ctx = {}) {
     }
   }
 
-  // --- ExitPlanMode interception: capture the plan, then allow ---
-  if (norm === "exitplanmode") {
-    return await handleExitPlanModeCapture(input, sessionId, config);
-  }
-
   // Side-effect-free tools skip the pipeline. Bash, Edit, Write and NotebookEdit
   // must never be added here: they mutate state and would bypass enforcement.
   const coordinationTools = new Set([
@@ -1048,6 +1047,8 @@ async function decidePreToolUse(input, config, ctx = {}) {
     return blocked || safePolicyOutput;
   }
 
+  if (!ctx.generations) ctx.generations = await recordHookActivity(input, config);
+
   // --- Load runtime state (reused for MCP gate, plan consumption, and rest of handler) ---
   const runtimeState = await loadRuntimeState(config.runtimeFile);
 
@@ -1091,9 +1092,25 @@ async function decidePreToolUse(input, config, ctx = {}) {
   const legacyPendingPath = path.join(config.dataDir, "pending-plan.json");
   let pendingPath = sessionPendingPath;
   let pending = sessionPendingPath ? await readJson(sessionPendingPath, null) : null;
-  if (!pending) {
+  if (!pending && !getSession(runtimeState, sessionId)?.promptId) {
     pending = await readJson(legacyPendingPath, null);
     pendingPath = legacyPendingPath;
+  }
+  const pendingSession = getSession(runtimeState, sessionId);
+  if (
+    pending &&
+    (pendingSession?.promptId ||
+      pendingSession?.authGeneration > 0 ||
+      pending.promptGeneration !== undefined ||
+      pending.authGeneration !== undefined) &&
+    (!sameGenerations(pending, pendingSession) || pending.sessionId !== sessionId)
+  ) {
+    await unlink(pendingPath).catch(() => {});
+    pending = null;
+  }
+  if (pending?.tokenRaw && pendingSession?.promptId) {
+    await unlink(pendingPath).catch(() => {});
+    pending = null;
   }
   if (pending && (pending.tokenRaw || pending.plan)) {
     const pendingPolicyState = await loadPolicyState(config.policyFile);
@@ -1218,13 +1235,9 @@ async function decidePreToolUse(input, config, ctx = {}) {
 
   // --- Intent token verification ---
   // Reuse the runtimeState loaded above instead of re-reading from disk.
-  const session = getSession(runtimeState, sessionId) || {};
-  // Auto-reload on credential change: if the cached token was minted with
-  // a different API key than the one currently configured, discard it so
-  // the mint path runs fresh below. Otherwise a new `armoriq login` silently
-  // has no effect until the token expires.
+  let session = getSession(runtimeState, sessionId) || {};
   if (invalidateTokenOnKeyChange(session, config)) {
-    debugLog(config, "API key changed (prefix differs); discarded cached token for fresh mint");
+    debugLog(config, "API key changed (prefix differs); discarded cached intent token");
     upsertSession(runtimeState, sessionId, session);
   }
   if (invalidateTokenOnCompilerChange(session)) {
@@ -1241,66 +1254,35 @@ async function decidePreToolUse(input, config, ctx = {}) {
       ? ""
       : readIntentTokenRaw(input, session);
   let localPlan = session.plan;
+  let billingDegraded =
+    session.unregisteredLocalPlan?.reason === "billing" &&
+    isBillingError(`402 ${session.unregisteredLocalPlan.message}`);
   let localExpiresAt = session.expiresAt;
   let remoteAllowed = false;
   let tokenCheckMatched = false;
-  // Set on a backend 402. Drops only the remote-token requirement; local
-  // policy deny/hold/allow is still enforced.
-  let billingDegraded = false;
-  let billingNotice = "";
   let usedStepIndices =
     intentTokenRaw && localPlan
       ? getSessionTokenUsedStepIndices(session, intentTokenRaw)
       : undefined;
 
-  // Proactive refresh: if the token is about to expire and we still have the
-  // plan, re-issue silently so the user never sees a "token expired" deny in
-  // the middle of a multi-step turn. If the refresh fails, flow falls through
-  // to the existing expiry check below.
-  const refreshThreshold = Number.isFinite(config.refreshThresholdSeconds)
-    ? config.refreshThresholdSeconds
-    : 30;
-  if (
-    intentTokenRaw &&
-    isPlainObject(localPlan) &&
-    Number.isFinite(localExpiresAt) &&
-    localExpiresAt - nowEpochSeconds() < refreshThreshold &&
-    config.apiKey
-  ) {
-    try {
-      const refreshed = await requestIntent(config, {
-        prompt: session.lastPrompt || `Refresh intent for ${toolName}`,
-        plan: localPlan,
-        session_id: sessionId,
-        toolName,
-        toolInput,
-        policy_hash: currentPolicyHash,
-        policy: policyState.policy,
-        validitySeconds: config.validitySeconds,
-        metadata: { source: "claude-code", trigger: "auto_refresh" },
-      });
-      if (!refreshed.skipped) {
-        const merged = mergeIntentIntoSession(session, refreshed, config);
-        merged.policyHash = currentPolicyHash;
-        merged.intentPolicyCompilerVersion = INTENT_POLICY_COMPILER_VERSION;
-        upsertSession(runtimeState, sessionId, merged);
-        intentTokenRaw =
-          typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : intentTokenRaw;
-        localPlan = merged.plan || localPlan;
-        localExpiresAt = merged.expiresAt || localExpiresAt;
-        debugLog(config, "intent token auto-refreshed near expiry");
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      debugLog(config, `auto-refresh failed: ${message}`);
+  if (intentTokenRaw && session.countedPlanId && Date.parse(session.tokenExpiresAt) <= Date.now()) {
+    await refreshIntent(config, sessionId, { expiredOnly: true });
+    const current = getSession(await loadRuntimeState(config.runtimeFile), sessionId);
+    if (current && sameGenerations(session, current)) {
+      session = upsertSession(runtimeState, sessionId, current);
+      intentTokenRaw = session.intentTokenRaw || "";
+      localPlan = session.plan;
+      billingDegraded = session.unregisteredLocalPlan?.reason === "billing";
+      localExpiresAt = session.expiresAt;
+      usedStepIndices =
+        intentTokenRaw && localPlan
+          ? getSessionTokenUsedStepIndices(session, intentTokenRaw)
+          : undefined;
     }
   }
 
-  // Check the plan before minting: the backend builds the minted plan from
-  // toolName/toolInput, so minting first lets an off-plan call validate
-  // against a plan derived from itself and drift enforcement fails open.
   if (!intentTokenRaw && config.apiKey && !allowAll && enforceIntent && shouldDeny(config)) {
-    if (isPlainObject(localPlan)) {
+    if (isPlainObject(localPlan) && (!session.promptId || billingDegraded)) {
       const preMintCheck = checkToolAgainstPlan({
         plan: localPlan,
         toolName,
@@ -1320,8 +1302,6 @@ async function decidePreToolUse(input, config, ctx = {}) {
         );
       }
     } else {
-      // Nothing registered for this session. Minting a plan from the tool call
-      // would rubber-stamp it, so require register_intent_plan instead.
       return denyPreToolWithHint(
         "intent_plan_missing",
         "ArmorClaude intent plan missing for this session",
@@ -1331,69 +1311,6 @@ async function decidePreToolUse(input, config, ctx = {}) {
           goal: session.lastPrompt,
         }
       );
-    }
-  }
-
-  // If no token, try to acquire one.
-  if (!intentTokenRaw && config.apiKey && !(allowAll && session.intentRequestFailed)) {
-    try {
-      const intentResponse = await requestIntent(config, {
-        prompt: session.lastPrompt || `Use tool ${toolName}`,
-        // Bind the token to the plan the user registered. Without this the
-        // backend synthesizes one from toolName/toolInput and the registered
-        // plan is silently replaced.
-        ...(isPlainObject(localPlan) ? { plan: localPlan } : {}),
-        session_id: sessionId,
-        toolName,
-        toolInput,
-        policy_hash: currentPolicyHash,
-        policy: policyState.policy,
-        validitySeconds: config.validitySeconds,
-        metadata: {
-          source: "claude-code",
-          trigger: "pre_tool_use",
-        },
-      });
-      const merged = mergeIntentIntoSession(session, intentResponse, config);
-      merged.policyHash = currentPolicyHash;
-      merged.intentPolicyCompilerVersion = INTENT_POLICY_COMPILER_VERSION;
-      merged.planCaptured = !isPlainObject(localPlan) || session.planCaptured === true;
-      upsertSession(runtimeState, sessionId, merged);
-      intentTokenRaw = typeof merged.intentTokenRaw === "string" ? merged.intentTokenRaw : "";
-      localPlan = merged.plan || localPlan;
-      localExpiresAt = merged.expiresAt || localExpiresAt;
-      usedStepIndices =
-        intentTokenRaw && localPlan
-          ? getSessionTokenUsedStepIndices(merged, intentTokenRaw)
-          : undefined;
-    } catch (error) {
-      if (allowAll) upsertSession(runtimeState, sessionId, { intentRequestFailed: true });
-      const message = error instanceof Error ? error.message : String(error);
-      // A billing 402 only takes the remote layer away; local deny/hold/allow still
-      // apply below. Neither block nor blanket-allow: degrade, fall through, and
-      // nudge to upgrade once per session.
-      if (isBillingError(message)) {
-        billingDegraded = true;
-        debugLog(
-          config,
-          `billing gate: remote layer degraded, local policy still enforced: ${message}`
-        );
-        if (!session.billingNoticeShown) {
-          upsertSession(runtimeState, sessionId, { billingNoticeShown: true });
-          const upgradeUrl =
-            config.upgradeUrl ||
-            process.env.ARMORCLAUDE_UPGRADE_URL ||
-            "https://tools.armoriq.ai/tools/billing";
-          billingNotice =
-            `⚠ ArmorIQ Pro required for remote audit & CSRG proofs. Your policy is ` +
-            `still enforced locally (allow / deny / hold). Upgrade: ${upgradeUrl}`;
-        }
-      } else if (enforceIntent && shouldDeny(config)) {
-        return denyPreTool(
-          "intent_planning_failed",
-          `ArmorClaude intent planning failed: ${message}`
-        );
-      }
     }
   }
 
@@ -1487,7 +1404,7 @@ async function decidePreToolUse(input, config, ctx = {}) {
     !allowAll &&
     Number.isFinite(localExpiresAt) &&
     localExpiresAt > 0 &&
-    nowEpochSeconds() > localExpiresAt
+    Date.now() / 1000 >= localExpiresAt
   ) {
     const deny = denyOrAllow(
       config,
@@ -1530,15 +1447,7 @@ async function decidePreToolUse(input, config, ctx = {}) {
   }
 
   // --- Enforce intent requirement ---
-  // billingDegraded relaxes ONLY the remote-token requirement — local policy
-  // (deny/hold/allow) was already applied above and still governs the outcome.
-  if (
-    enforceIntent &&
-    !billingDegraded &&
-    !remoteAllowed &&
-    !tokenCheckMatched &&
-    !localPlanMatched
-  ) {
+  if (enforceIntent && !remoteAllowed && !tokenCheckMatched && !localPlanMatched) {
     if (shouldDeny(config)) {
       return denyPreToolWithHint(
         "intent_plan_missing",
@@ -1589,91 +1498,21 @@ async function decidePreToolUse(input, config, ctx = {}) {
     const askReason =
       policyDecision.reason ||
       `ArmorClaude policy requires your approval before running ${toolName}.`;
-    const ask = askPreTool(
-      "policy_requires_approval",
-      billingNotice ? `${askReason}\n\n${billingNotice}` : askReason
+    return askPreTool("policy_requires_approval", askReason);
+  }
+  if (billingDegraded && !session.billingNoticeShown) {
+    upsertSession(runtimeState, sessionId, { billingNoticeShown: true });
+    await saveRuntimeState(config.runtimeFile, runtimeState);
+    return allowWithNotice(
+      `ArmorIQ billing has paused remote audit and CSRG proofs. Your policy is still enforced locally. Upgrade: ${billingUpgradeUrl(config)}`
     );
-    if (billingNotice) ask.systemMessage = billingNotice;
-    return ask;
   }
-  // Allowed. Surface the one-time upgrade nudge if we degraded the remote layer.
-  return billingNotice ? allowWithNotice(billingNotice) : null;
-}
-
-async function handleExitPlanModeCapture(input, sessionId, config) {
-  const runtimeState = await loadRuntimeState(config.runtimeFile);
-  const session = getSession(runtimeState, sessionId) || {};
-
-  try {
-    const planFilePath = resolvePlanFilePath(input);
-    if (planFilePath) {
-      // Prefer structured JSON block (from the directive) over heuristic parsing
-      const { readFile } = await import("node:fs/promises");
-      let plan = null;
-      try {
-        const content = await readFile(planFilePath, "utf8");
-        const jsonBlock = extractPlanJsonBlock(content);
-        if (jsonBlock) {
-          const parsed = INTENT_PLAN_ZOD.safeParse(jsonBlock);
-          if (parsed.success) {
-            plan = normalizeIntentPlan(parsed.data);
-            plan.metadata.source = "plan-file-json";
-          }
-        }
-      } catch {
-        /* fall through to heuristic */
-      }
-
-      // Fallback: heuristic markdown parsing
-      if (!plan) {
-        plan = await parsePlanFile(planFilePath);
-      }
-
-      if (plan && plan.steps.length > 0) {
-        debugLog(
-          config,
-          `captured plan from ExitPlanMode: ${plan.steps.length} steps (${plan.metadata?.source || "heuristic"})`
-        );
-
-        // Send plan to ArmorIQ for intent token
-        if (config.apiKey) {
-          const policyState = await loadPolicyState(config.policyFile);
-          const policyHash = computePolicyHash(policyState.policy);
-          const intentResponse = await requestIntent(config, {
-            prompt: session.lastPrompt || plan.metadata?.goal || "Plan execution",
-            plan,
-            session_id: sessionId,
-            policy_hash: policyHash,
-            policy: policyState.policy,
-            validitySeconds: config.validitySeconds,
-            metadata: { source: "claude-code", planning: "plan-mode" },
-          });
-          const merged = mergeIntentIntoSession(session, intentResponse, config);
-          merged.policyHash = policyHash;
-          merged.intentPolicyCompilerVersion = INTENT_POLICY_COMPILER_VERSION;
-          merged.planCaptured = false;
-          upsertSession(runtimeState, sessionId, merged);
-        } else {
-          // Store plan locally without ArmorIQ token
-          session.plan = plan;
-          session.planCaptured = false;
-          session.allowedActions = Array.from(extractAllowedActions(plan));
-          upsertSession(runtimeState, sessionId, session);
-        }
-
-        await saveRuntimeState(config.runtimeFile, runtimeState);
-      }
-    }
-  } catch (error) {
-    debugLog(config, `ExitPlanMode capture error: ${error}`);
-  }
-
-  // Always allow ExitPlanMode to proceed
   return null;
 }
 
 export async function handlePostToolUse(input, config) {
   const policySourceOfCall = takePolicySource(input);
+  await recordHookActivity(input, config);
   if (!config.auditEnabled || !config.apiKey) {
     return null;
   }
@@ -1741,6 +1580,7 @@ export async function handlePostToolUse(input, config) {
 
 export async function handlePostToolUseFailure(input, config) {
   const policySourceOfCall = takePolicySource(input);
+  await recordHookActivity(input, config);
   if (!config.auditEnabled || !config.apiKey) {
     return null;
   }
@@ -1786,8 +1626,22 @@ export async function handlePostToolUseFailure(input, config) {
 }
 
 export async function handleStop(input, config) {
+  await recordHookActivity(input, config);
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
+
+  await updateRuntimeState(config.runtimeFile, (state) => {
+    if (
+      !input.agent_id &&
+      !input.parent_session_id &&
+      !input.is_subagent &&
+      getSession(state, sessionId)
+    ) {
+      const session = upsertSession(state, sessionId, { promptOpenSince: null });
+      if (session.pendingRequest?.headers?.["X-ArmorIQ-Plan-Kind"] === "refresh")
+        session.pendingRequest = null;
+    }
+  });
 
   const runtimeState = await loadRuntimeState(config.runtimeFile);
   const session = getSession(runtimeState, sessionId);
@@ -1798,57 +1652,13 @@ export async function handleStop(input, config) {
     debugLog(config, "intent token expired during turn");
   }
 
-  const refreshThresholdSec = Number.isFinite(config.refreshThresholdSeconds)
-    ? config.refreshThresholdSeconds
-    : 30;
-  // Refresh more aggressively at turn boundary than mid-turn — predict the
-  // user's next turn could fire a tool within ~2-3 minutes, so refresh if
-  // less than `refreshThresholdSec * 4` left.
-  const stopRefreshThresholdSec = refreshThresholdSec * 4;
-  const tokenLeft = Number.isFinite(session.expiresAt) ? session.expiresAt - nowEpochSeconds() : 0;
-  if (
-    session.intentTokenRaw &&
-    isPlainObject(session.plan) &&
-    tokenLeft > 0 &&
-    tokenLeft < stopRefreshThresholdSec &&
-    config.apiKey
-  ) {
-    try {
-      const policyState = await loadPolicyState(config.policyFile);
-      const policyHash = computePolicyHash(policyState.policy);
-      const refreshed = await requestIntent(config, {
-        prompt: session.lastPrompt || "Stop-hook proactive refresh",
-        plan: session.plan,
-        session_id: sessionId,
-        policy_hash: policyHash,
-        policy: policyState.policy,
-        validitySeconds: config.validitySeconds,
-        metadata: { source: "claude-code", trigger: "stop_proactive_refresh" },
-      });
-      if (!refreshed.skipped) {
-        const merged = mergeIntentIntoSession(session, refreshed, config);
-        merged.policyHash = policyHash;
-        merged.intentPolicyCompilerVersion = INTENT_POLICY_COMPILER_VERSION;
-        upsertSession(runtimeState, sessionId, merged);
-        debugLog(
-          config,
-          `[A2] token pre-refreshed at Stop, was ${tokenLeft}s left, threshold=${stopRefreshThresholdSec}s`
-        );
-      }
-    } catch (error) {
-      // Best-effort. If refresh fails, the in-line refresh in PreToolUse
-      // will fire on the next tool call as a safety net.
-      const msg = error instanceof Error ? error.message : String(error);
-      debugLog(config, `[A2] stop-refresh failed (will fall back to in-line): ${msg}`);
-    }
-  }
-
   upsertSession(runtimeState, sessionId, { lastStopAt: nowEpochSeconds() });
   await saveRuntimeState(config.runtimeFile, runtimeState);
   return null;
 }
 
 export async function handleSessionEnd(input, config) {
+  await recordHookActivity(input, config);
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   if (!sessionId) return null;
   await dropWouldBe(config.dataDir, sessionId).catch(() => {});
