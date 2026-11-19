@@ -92,7 +92,7 @@ Sign in from a terminal and approve the request in your browser:
 armoriq login --product armorclaude
 ```
 
-ArmorClaude picks the key up on its next hook and switches to `enforce`.
+ArmorClaude picks the key up on its next hook and follows your workspace's mode. A new workspace starts in Quiet: calls run, and the ones your policy would block are listed on the [Monitor page](https://tools.armoriq.ai/monitor). Set **Tool calls in the chat** to **Block** there to block them, from the next session.
 
 Now every tool call:
 - gets a signed JWT intent token
@@ -125,13 +125,9 @@ You'll see the runs at <https://customer.armoriq.ai>.
 claude plugin disable armorclaude
 ```
 
-**Want monitor mode (log only, never block)?**
+**Want calls to run and only be recorded, never blocked?**
 
-```bash
-ARMORCLAUDE_MODE=monitor claude
-```
-
-Or set it via `/plugin` → configure → `mode: monitor`.
+Set **Tool calls in the chat** to **Quiet** or **Show in chat** on the [Monitor page](https://tools.armoriq.ai/monitor). A workspace admin can also do this for one teammate in its **Teammates** card.
 
 ## Where to go next
 
