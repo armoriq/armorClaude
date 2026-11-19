@@ -396,29 +396,149 @@ export async function updateRuntimeState(file, change) {
 
 export const runStateFile = (config) => `${config.runtimeFile}.runs.json`;
 const runToolsFile = (config) => `${runStateFile(config)}.tools.jsonl`;
+const runStores = new Map();
+const RUN_JOURNAL_BYTES = 65_536;
 
 export async function loadRunState(config) {
   if (!config.runReportingEnabled) return { runs: {} };
+  return withRuntimeLock(runStateFile(config), async () =>
+    structuredClone((await readRunStore(config)).state)
+  );
+}
+
+async function runFileInfo(file) {
+  try {
+    return await stat(file);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    return null;
+  }
+}
+
+function sameRunFile(a, b) {
+  return (
+    a?.dev === b?.dev &&
+    a?.ino === b?.ino &&
+    a?.size === b?.size &&
+    a?.mtimeMs === b?.mtimeMs &&
+    a?.ctimeMs === b?.ctimeMs
+  );
+}
+
+async function syncRunDirectory(file) {
+  const directory = await open(path.dirname(file), "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
+async function retainRunFile(file, kind) {
+  await rename(file, `${file}.${kind}.${randomUUID()}`);
+  await syncRunDirectory(file);
+}
+
+function rememberRunStore(config, store) {
+  const file = runStateFile(config);
+  runStores.delete(file);
+  runStores.set(file, store);
+  if (runStores.size > 32) runStores.delete(runStores.keys().next().value);
+  return store;
+}
+
+async function readRunStore(config) {
+  const file = runStateFile(config);
+  let snapshotInfo = await runFileInfo(file);
+  const journalInfo = await runFileInfo(runToolsFile(config));
+  const cached = runStores.get(file);
+  if (
+    cached &&
+    sameRunFile(cached.snapshotInfo, snapshotInfo) &&
+    sameRunFile(cached.journalInfo, journalInfo)
+  )
+    return cached;
   let state;
   try {
-    state = JSON.parse(await readFile(runStateFile(config), "utf8"));
+    state = JSON.parse(await readFile(file, "utf8"));
     if (!state?.runs || typeof state.runs !== "object" || Array.isArray(state.runs))
-      throw new Error("Invalid run state");
+      throw new SyntaxError("Invalid run state");
   } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-    state = { runs: (await loadRuntimeState(config.runtimeFile)).runs ?? {} };
+    if (error instanceof SyntaxError) {
+      await retainRunFile(file, "corrupt");
+      await reportRunCaptureFailure(config);
+      state = { runs: {} };
+      await writeRunState(file, state);
+      snapshotInfo = await runFileInfo(file);
+    } else {
+      if (error.code !== "ENOENT") throw error;
+      state = { runs: (await loadRuntimeState(config.runtimeFile)).runs ?? {} };
+    }
   }
-  let journal;
-  try {
-    journal = await readFile(runToolsFile(config), "utf8");
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-    return state;
+  const store = { state, snapshotInfo, journalInfo, complete: 0, tail: Buffer.alloc(0) };
+  if (journalInfo) {
+    const cursor = state.toolJournal;
+    const offset =
+      cursor?.dev === journalInfo.dev &&
+      cursor?.ino === journalInfo.ino &&
+      Number.isSafeInteger(cursor.offset) &&
+      cursor.offset >= 0 &&
+      cursor.offset <= journalInfo.size
+        ? cursor.offset
+        : 0;
+    const handle = await open(runToolsFile(config), "r");
+    const journal = Buffer.alloc(journalInfo.size - offset);
+    try {
+      let read = 0;
+      while (read < journal.length) {
+        const { bytesRead } = await handle.read(
+          journal,
+          read,
+          journal.length - read,
+          offset + read
+        );
+        if (!bytesRead) throw new Error("Run journal changed while reading");
+        read += bytesRead;
+      }
+    } finally {
+      await handle.close();
+    }
+    const complete = journal.lastIndexOf(10) + 1;
+    store.complete = offset + complete;
+    store.tail = journal.subarray(complete);
+    let corrupt = false;
+    for (const line of journal.subarray(0, complete).toString("utf8").split("\n")) {
+      if (!line) continue;
+      try {
+        const event = JSON.parse(line);
+        if (!event || typeof event.runId !== "string" || typeof event.id !== "string")
+          throw new SyntaxError("Invalid run tool receipt");
+        applyRunTool(state, event);
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        corrupt = true;
+      }
+    }
+    if (corrupt) {
+      await saveRunStore(config, store, "corrupt");
+      await reportRunCaptureFailure(config);
+    }
   }
-  for (const line of journal.slice(0, journal.lastIndexOf("\n") + 1).split("\n")) {
-    if (line) applyRunTool(state, JSON.parse(line));
-  }
-  return state;
+  return rememberRunStore(config, store);
+}
+
+async function saveRunStore(config, store, kind = "archive") {
+  const { state, journalInfo } = store;
+  // The snapshot cursor prevents replay if a crash interrupts the retained journal rename.
+  if (journalInfo)
+    state.toolJournal = { dev: journalInfo.dev, ino: journalInfo.ino, offset: store.complete };
+  await writeRunState(runStateFile(config), state);
+  if (journalInfo) await retainRunFile(runToolsFile(config), kind);
+  store.snapshotInfo = await runFileInfo(runStateFile(config));
+  store.journalInfo = null;
+  store.complete = 0;
+  store.tail = Buffer.alloc(0);
+  rememberRunStore(config, store);
 }
 
 async function writeRunState(file, state) {
@@ -449,46 +569,56 @@ export async function updateRunState(config, change) {
   if (!config.runReportingEnabled) return;
   try {
     return await withRuntimeLock(runStateFile(config), async () => {
-      const state = await loadRunState(config);
+      const store = await readRunStore(config);
+      const state = store.state;
       const before = structuredClone(state);
       const result = await change(state);
-      if (!isDeepStrictEqual(before, state)) await writeRunState(runStateFile(config), state);
+      if (!isDeepStrictEqual(before, state) || store.journalInfo?.size >= RUN_JOURNAL_BYTES)
+        await saveRunStore(config, store);
       return result;
     });
   } catch {
+    runStores.delete(runStateFile(config));
     await reportRunCaptureFailure(config);
   }
 }
 
 export async function appendRunTool(config, event) {
-  return withRuntimeLock(runStateFile(config), async () => {
-    const state = await loadRunState(config);
-    if (!applyRunTool(state, event)) return;
-    const file = runToolsFile(config);
-    const handle = await open(file, "a+", PRIVATE_FILE_MODE);
-    try {
-      const previous = await handle.readFile();
-      const complete = previous.lastIndexOf(10) + 1;
-      if (complete < previous.length) {
-        // Preserve a torn receipt before repairing the append boundary.
-        await writeRunState(`${file}.incomplete.${randomUUID()}`, {
-          raw: previous.subarray(complete).toString("utf8"),
-          raw_base64: previous.subarray(complete).toString("base64"),
-        });
-        await handle.truncate(complete);
+  if (!config.runReportingEnabled) return;
+  try {
+    return await withRuntimeLock(runStateFile(config), async () => {
+      const store = await readRunStore(config);
+      if (!applyRunTool(store.state, event)) {
+        if (store.journalInfo?.size >= RUN_JOURNAL_BYTES) await saveRunStore(config, store);
+        return;
       }
-      await handle.writeFile(JSON.stringify(event) + "\n");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    const directory = await open(path.dirname(file), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  });
+      const file = runToolsFile(config);
+      const handle = await open(file, "a+", PRIVATE_FILE_MODE);
+      try {
+        if (store.tail.length) {
+          // Preserve a torn receipt before repairing the append boundary.
+          await writeRunState(`${file}.incomplete.${randomUUID()}`, {
+            raw: store.tail.toString("utf8"),
+            raw_base64: store.tail.toString("base64"),
+          });
+          await handle.truncate(store.complete);
+        }
+        const line = JSON.stringify(event) + "\n";
+        await handle.writeFile(line);
+        await handle.sync();
+        store.complete += Buffer.byteLength(line);
+      } finally {
+        await handle.close();
+      }
+      if (!store.journalInfo) await syncRunDirectory(file);
+      store.journalInfo = await runFileInfo(file);
+      store.tail = Buffer.alloc(0);
+      if (store.journalInfo.size >= RUN_JOURNAL_BYTES) await saveRunStore(config, store);
+    });
+  } catch (error) {
+    runStores.delete(runStateFile(config));
+    throw error;
+  }
 }
 
 export function retirePlan(session) {
@@ -589,7 +719,7 @@ export async function recordHookActivity(input, config, claudeProcessId) {
 
 export async function startPrompt(input, config) {
   if (input.agent_id || input.parent_session_id || input.is_subagent) return;
-  const started = await updateRuntimeState(config.runtimeFile, (state) => {
+  await updateRuntimeState(config.runtimeFile, async (state) => {
     const fingerprint = syncSessionAuth(state, config, input.session_id);
     const session = upsertSession(state, input.session_id, { authFingerprint: fingerprint });
     session.authBackendEndpoint = config.backendEndpoint;
@@ -611,17 +741,16 @@ export async function startPrompt(input, config) {
       lastPrompt: input.prompt,
       lastPromptAt: nowEpochSeconds(),
     });
-    return { previous, session: structuredClone(session), now };
-  });
-  if (!started || !config.runReportingEnabled) return;
-  await updateRunState(config, (state) => {
-    closeRun(state, started.previous, "next_prompt", started.now);
-    openRun(
-      { ...state, sessions: { [input.session_id]: started.session } },
-      input.session_id,
-      config,
-      started.now
-    );
+    // Publishing the prompt first would let a crash lose its only run report.
+    await updateRunState(config, (runs) => {
+      closeRun(runs, previous, "next_prompt", now);
+      openRun(
+        { ...runs, sessions: { [input.session_id]: session } },
+        input.session_id,
+        config,
+        now
+      );
+    });
   });
 }
 

@@ -475,14 +475,21 @@ for (const stream of ["audit", "health", "runs"]) {
       assert.equal(paused.held, "org_required");
       assert.equal(paused.authPaused, false);
       assert.equal(paused.undeliverable, 1);
-      for (let n = 0; n < 5; n++) {
-        store.advance(120_000);
+      let sends = 1;
+      for (const minutes of [5, 10, 20, 40, 60, 60]) {
+        store.advance(minutes * 60_000 - 1);
         await store.open(stream).authenticationSucceeded(store.binding);
         await store.open(stream).drain(() => assert.fail("held endpoint sent again too early"), {
           ...store,
           probe: () => assert.fail("org_required is not an auth pause"),
         });
+        store.advance(1);
+        await store.open(stream).drain(() => {
+          sends++;
+          return { status: 403, body: { error: "org_required" } };
+        }, store);
       }
+      assert.equal(sends, 7);
       assert.deepEqual(
         (await wal.readPending()).map(({ row, attempts }) => [row, attempts]),
         [[value, 0]]
@@ -500,14 +507,34 @@ for (const stream of ["audit", "health", "runs"]) {
             : "Run reporting";
       assert.match(text, new RegExp(`${label} held: org_required`));
       store.advance(3_600_000);
-      await store
-        .open(stream)
-        .drain(accepted, { ...store, probe: () => assert.fail("hold retried as auth") });
+      await store.open(stream).drain(() => {
+        throw new Error("offline while held");
+      }, store);
+      assert.equal((await wal.status(store.resolveLogin)).held, "org_required");
+      assert.equal((await wal.readPending())[0].attempts, 0);
+      store.advance(3_600_000);
+      await store.open(stream).drain(() => ({ status: 503, body: {} }), store);
+      assert.equal((await wal.status(store.resolveLogin)).held, "org_required");
+      assert.equal((await wal.readPending())[0].attempts, 0);
+      store.advance(3_600_000);
+      await store.open(stream).drain((batch) => ({ ...accepted(batch), status: 422 }), {
+        ...store,
+        probe: () => assert.fail("hold retried as auth"),
+      });
       assert.deepEqual(await wal.readPending(), []);
       assert.equal((await wal.status(store.resolveLogin)).held, null);
       await wal.appendLine(row());
       await wal.drain(async () => ({ status: 403, body: { error: "org_required" } }), store);
+      store.advance(300_000);
+      let retried = false;
+      await store.open(stream).drain(() => {
+        retried = true;
+        return { status: 403, body: { error: "org_required" } };
+      }, store);
+      assert.equal(retried, true, "a successful send resets the hold backoff");
       await store.open(stream).restoreLogin("new-login-revision");
+      await wal.drain(async () => ({ status: 403, body: { error: "org_required" } }), store);
+      store.advance(300_000);
       await wal.drain(accepted, store);
       assert.deepEqual(await wal.readPending(), []);
     });

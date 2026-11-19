@@ -270,7 +270,8 @@ export function createAuditWal(opts) {
     lockTtlMs: 120_000,
     authProbeMs: 120_000,
     healthProbeMs: 30_000,
-    holdProbeMs: 3_600_000,
+    holdProbeMs: 300_000,
+    maxHoldProbeMs: 3_600_000,
     ...opts.timing,
   };
   const bound = identified(opts.binding)
@@ -797,13 +798,22 @@ export function createAuditWal(opts) {
                 reply.status < 500 &&
                 ![400, 401, 403, 408, 409, 413, 422, 429].includes(reply.status)
               ? `http_${reply.status}`
-              : !reply?.status && state.endpointPaused
-                ? (state.held ?? "endpoint_unavailable")
-                : null);
+              : state.held === "org_required" && !results
+                ? state.held
+                : !reply?.status && state.endpointPaused
+                  ? (state.held ?? "endpoint_unavailable")
+                  : null);
+        state.holdRetries = hold === "org_required" ? (state.holdRetries ?? 0) + 1 : 0;
         state.endpointPaused = Boolean(hold);
         state.held = hold;
         state.probeAt = hold
-          ? clock.now() + (hold === "org_required" ? timing.holdProbeMs : timing.healthProbeMs)
+          ? clock.now() +
+            (hold === "org_required"
+              ? Math.min(
+                  timing.maxHoldProbeMs,
+                  timing.holdProbeMs * 2 ** Math.min(state.holdRetries - 1, 20)
+                )
+              : timing.healthProbeMs)
           : 0;
         if (hold) {
           state.paused = false;
@@ -1079,6 +1089,7 @@ export function createAuditWal(opts) {
         state.paused = false;
         state.endpointPaused = false;
         state.held = null;
+        state.holdRetries = 0;
         state.probeAt = 0;
         delete state.nextProbeAt;
         state.revision = revision ?? null;

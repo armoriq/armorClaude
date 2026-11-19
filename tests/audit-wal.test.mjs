@@ -754,7 +754,6 @@ test("settled history compacts and dead letter history stays off append, restore
     dataDir: dir,
     login: "0123456789abcdef",
     binding,
-    clock: { now: () => 1_800_000_000_000, random: () => 0 },
   });
   for (let n = 0; n < 100; n += 1)
     await wal.appendLine({ client_row_id: randomUUID(), metadata: "x".repeat(20_000) });
@@ -763,6 +762,17 @@ test("settled history compacts and dead letter history stays off append, restore
   await wal.drain(async () => ({ status: 200, body: { failures: [] } }), {
     resolveLogin: () => binding,
   });
+  await wal.reportHealth(undefined, { resolveLogin: () => binding });
+  const events = await createAuditWal({
+    dataDir: dir,
+    login: "0123456789abcdef",
+    binding,
+    stream: "health",
+  }).readPending();
+  assert.equal(
+    events.reduce((total, { row }) => total + row.count, 0),
+    100
+  );
   const statePath = path.join(dir, "audit", "0123456789abcdef", "outbox-state.json");
   const deadPath = path.join(dir, "audit", "0123456789abcdef", "dead-letters.jsonl");
   await wal.restoreLogin("same-login");
