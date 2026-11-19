@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { sdkModule } from "./sdk.mjs";
+import { recordAuthenticationSuccess } from "./audit-wal.mjs";
 
 export function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -183,8 +184,9 @@ export function sha256Hex(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-export async function postJson(url, payload, headers, timeoutMs) {
+export async function postJson(url, payload, headers, timeoutMs, authenticatedConfig) {
   const controller = new AbortController();
+  if (new URL(url).pathname === "/iap/audit/batch") timeoutMs = Math.max(timeoutMs || 8000, 15_000);
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
@@ -193,6 +195,12 @@ export async function postJson(url, payload, headers, timeoutMs) {
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
+    if (
+      response.ok &&
+      authenticatedConfig &&
+      new URL(url).origin === new URL(authenticatedConfig.backendEndpoint).origin
+    )
+      await recordAuthenticationSuccess(authenticatedConfig);
     const text = await response.text();
     let data = null;
     if (text) {
@@ -202,7 +210,13 @@ export async function postJson(url, payload, headers, timeoutMs) {
         data = null;
       }
     }
-    return { ok: response.ok, status: response.status, text, data };
+    return {
+      ok: response.ok,
+      status: response.status,
+      text,
+      data,
+      headers: { "retry-after": response.headers.get("retry-after") ?? "" },
+    };
   } finally {
     clearTimeout(timeout);
   }

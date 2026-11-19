@@ -55,7 +55,7 @@ const decisionOf = (output) => output?.hookSpecificOutput?.permissionDecision ??
 const reasonOf = (output) => output?.hookSpecificOutput?.permissionDecisionReason ?? "";
 
 function queuedRows(dataDir, backend) {
-  const wal = path.join(dataDir, "audit", loginTag(backend.url, API_KEY), "current.jsonl");
+  const wal = path.join(dataDir, "audit", loginTag(backend.url, API_KEY), "outbox-current.jsonl");
   if (!existsSync(wal)) return [];
   return readFileSync(wal, "utf8")
     .split("\n")

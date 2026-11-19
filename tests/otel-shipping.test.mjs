@@ -1587,7 +1587,7 @@ test("a deny-with-hint exports the rule's code and keeps the prompt and tool inp
       "only the session state keeps the prompt"
     );
     const [walFile, ...others] = holders(/TOOL_SECRET_41/);
-    assert.match(walFile, /^audit\/[0-9a-f]{16}\/current\.jsonl$/);
+    assert.match(walFile, /^audit\/[0-9a-f]{16}\/(?:outbox-)?current\.jsonl$/);
     assert.deepEqual(others, [], "only the blocked audit row keeps the tool input");
     await shipSpoolWithDaemon(env, dataDir);
     const [policy] = backend.exports.filter((s) => s.name === "armoriq.policy.evaluate");

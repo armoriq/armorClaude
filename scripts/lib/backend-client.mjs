@@ -1,4 +1,5 @@
 import { postJson, buildAuthHeaders } from "./common.mjs";
+import { recordAuthenticationSuccess } from "./audit-wal.mjs";
 
 function endpoint(config, path) {
   const base = (config.backendEndpoint || "").replace(/\/+$/, "");
@@ -9,8 +10,8 @@ function hasBackend(config) {
   return Boolean(config.apiKey && config.backendEndpoint);
 }
 
-export async function enforceCall(config, body) {
-  return jsonRequest(config, "POST", "/iap/sdk/enforce", body);
+export async function enforceCall(config, body, headers = {}) {
+  return jsonRequest(config, "POST", "/iap/sdk/enforce", body, headers);
 }
 
 export async function autoRegisterMcp(config, serverName) {
@@ -20,7 +21,8 @@ export async function autoRegisterMcp(config, serverName) {
       endpoint(config, "/mcp/auto-register"),
       { mcpName: serverName, source: "armorclaude-autodetect" },
       buildAuthHeaders(config),
-      config.timeoutMs || 8000
+      config.timeoutMs || 8000,
+      config
     );
     return { ok: res.ok, status: res.status, data: res.data };
   } catch (err) {
@@ -28,16 +30,17 @@ export async function autoRegisterMcp(config, serverName) {
   }
 }
 
-async function jsonRequest(config, method, apiPath, body) {
+async function jsonRequest(config, method, apiPath, body, headers = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs || 8000);
   try {
     const res = await fetch(endpoint(config, apiPath), {
       method,
-      headers: buildAuthHeaders(config),
+      headers: { ...buildAuthHeaders(config), ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
+    if (res.ok) await recordAuthenticationSuccess(config);
     const data = await res.json().catch(() => null);
     return { ok: res.ok, status: res.status, data };
   } finally {
@@ -115,6 +118,7 @@ export async function syncMcpRegistry(config) {
       headers: buildAuthHeaders(config),
       signal: controller.signal,
     });
+    if (res.ok) await recordAuthenticationSuccess(config);
     clearTimeout(timeout);
     const data = await res.json().catch(() => null);
     return {
@@ -134,7 +138,8 @@ export async function keyOwner(config) {
       endpoint(config, "/iap/validate-key"),
       {},
       buildAuthHeaders(config),
-      config.timeoutMs || 8000
+      config.timeoutMs || 8000,
+      config
     );
     const userId = res.data?.userId;
     if (!res.ok) return { ok: false, reason: `validate-key returned ${res.status}` };
@@ -156,6 +161,7 @@ export async function pendingHistorySync(config, deviceId) {
       headers: buildAuthHeaders(config),
       signal: controller.signal,
     });
+    if (res.ok) await recordAuthenticationSuccess(config);
     const data = await res.json().catch(() => null);
     if (!res.ok) return { ok: false, reason: `device-history-sync returned ${res.status}` };
     return {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
@@ -14,6 +14,70 @@ import {
 import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.mjs";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
 import { saveProfile, loadProfile } from "../scripts/lib/policy-profiles.mjs";
+import { postJson } from "../scripts/lib/common.mjs";
+import { createOutbox, loginTag } from "../scripts/lib/audit-wal.mjs";
+import { getSdkClient } from "../scripts/lib/intent.mjs";
+
+// regression: #0010
+test("successful authenticated backend calls lift only the matching persisted audit pause", async (t) => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "armor-auth-success-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const backendEndpoint = "http://127.0.0.1:1";
+  const apiKey = "ak_test_original_credential_000000";
+  const binding = { backend: backendEndpoint, keyId: loginTag(backendEndpoint, apiKey) };
+  const options = { dataDir, login: binding.keyId, binding };
+  const config = { dataDir, backendEndpoint, apiKey, timeoutMs: 1000 };
+  let status = 200;
+  t.mock.method(globalThis, "fetch", async () => Response.json({ policy: {} }, { status }));
+  const sdkCall = async (cfg) => {
+    const client = getSdkClient({ ...cfg, userId: "test-user", agentId: "test-agent" });
+    await client.httpClient.get(`${cfg.backendEndpoint}/iap/validate-key`, {
+      adapter: async (request) => ({ config: request, status, data: {}, headers: {} }),
+    });
+  };
+  for (const call of [pullProfiles, (cfg) => autoRegisterMcp(cfg, "test-server"), sdkCall]) {
+    const wal = createOutbox(options);
+    await wal.appendLine({ tool: "Read" });
+    await wal.drain(async () => ({ status: 401, body: {} }), { resolveLogin: () => binding });
+    for (const other of [
+      { ...config, apiKey: "ak_test_other_credential_000000000" },
+      { ...config, backendEndpoint: "http://127.0.0.1:2" },
+    ]) {
+      await call(other);
+      assert.equal((await wal.status(() => binding)).undeliverable, 1);
+    }
+    await postJson(`${backendEndpoint}/health`, {}, {}, 1000);
+    assert.equal((await wal.status(() => binding)).undeliverable, 1);
+    status = 401;
+    await call(config);
+    assert.equal((await wal.status(() => binding)).undeliverable, 1);
+    status = 200;
+    await call(config);
+    const recovered = createOutbox(options);
+    assert.equal((await recovered.status(() => binding)).undeliverable, 0);
+    await recovered.drain(async () => ({ status: 200, body: { failures: [] } }), {
+      resolveLogin: () => binding,
+    });
+    assert.deepEqual(await recovered.readPending(), []);
+  }
+});
+
+// regression: #0010
+test("audit delivery allows the backend's full ten second batch budget", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const reply = Promise.withResolvers();
+  let signal;
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    signal = init.signal;
+    await reply.promise;
+    return Response.json({ failures: [] });
+  });
+  const request = postJson("http://127.0.0.1:1/iap/audit/batch", { rows: [] }, {}, 8000);
+  t.mock.timers.tick(10_000);
+  assert.equal(signal.aborted, false);
+  reply.resolve();
+  assert.equal((await request).status, 200);
+});
 
 function buildConfig(tmpDir, overrides = {}) {
   return {

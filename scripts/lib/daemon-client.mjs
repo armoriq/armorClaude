@@ -239,12 +239,10 @@ export async function dispatchViaDaemon({ event, input, config }) {
 }
 
 /**
- * Fire-and-forget audit enqueue. Returns immediately after the write
- * completes (microseconds), does not wait for any reply. If the daemon is
- * unreachable, returns false and the caller should fall back to a sync
- * createAuditLog.
+ * Audit enqueue waits for the daemon's durable receipt. If the daemon is
+ * unreachable, returns false and the caller appends to the WAL directly.
  */
-export async function enqueueAuditViaDaemon({ dto, config }) {
+export async function enqueueAuditViaDaemon({ dto, config, fallback = false }) {
   const socketPath = daemonSocketPath(config.dataDir);
   let sock;
   try {
@@ -253,15 +251,16 @@ export async function enqueueAuditViaDaemon({ dto, config }) {
     return false;
   }
   try {
-    sock.write(
-      JSON.stringify({
-        type: "audit_enqueue",
-        dto,
-        login: loginTag(config.backendEndpoint, config.apiKey),
-        reqId: makeReqId(),
-      }) + "\n"
-    );
-    return true;
+    const login = loginTag(config.backendEndpoint, config.apiKey);
+    const reply = await exchange(sock, {
+      type: "audit_enqueue",
+      dto,
+      login,
+      binding: { backend: config.backendEndpoint, keyId: login },
+      fallback,
+      reqId: makeReqId(),
+    });
+    return reply?.ok === true && reply?.durable === true;
   } catch {
     return false;
   } finally {
