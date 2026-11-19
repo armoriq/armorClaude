@@ -5,7 +5,16 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { DAEMON_VERSION } from "../scripts/lib/daemon-version.mjs";
+import { installedPluginRoot } from "./helpers/hook-session.mjs";
+
+// regression: #0013
+test("bootstrap hooks and direct handlers use the same daemon installation identity", async () => {
+  const root = await installedPluginRoot();
+  const installed = await import(pathToFileURL(path.join(root, "scripts/lib/daemon-version.mjs")));
+  assert.equal(installed.DAEMON_VERSION, DAEMON_VERSION);
+});
 
 // regression: #0010
 test("the installed bootstrap hook denies invalid input without installing packages", async (t) => {
