@@ -80,6 +80,7 @@ export const REQUEST_CONFIG_KEYS = [
   "orgMonitor",
   "orgMonitorNotices",
   "orgModeForced",
+  "validitySeconds",
 ];
 
 const USABLE_KEY = /^ak_(test|live|claw)_/;
@@ -110,6 +111,11 @@ function normalizeArmoriqEnv(value) {
  * development/local/test; unset, armorclaude-dev uses staging and armorclaude production.
  */
 export function loadConfig(env = process.env) {
+  const validityValue = env.ARMORIQ_INTENT_VALIDITY_SECONDS;
+  const validitySeconds = validityValue === undefined ? 3600 : Number(validityValue);
+  if (!Number.isInteger(validitySeconds) || validitySeconds < 180 || validitySeconds > 3600) {
+    throw new Error("ARMORIQ_INTENT_VALIDITY_SECONDS must be an integer from 180 to 3600");
+  }
   // ── Paths ──
   const dataDir =
     env.CLAUDE_PLUGIN_DATA?.trim() ||
@@ -245,7 +251,7 @@ export function loadConfig(env = process.env) {
     contextId: "default",
 
     // Tuning — sane defaults nobody tunes.
-    validitySeconds: 3600,
+    validitySeconds,
     refreshThresholdSeconds: 30,
     timeoutMs: 8000,
     maxRetries: 1,
@@ -276,5 +282,5 @@ export function localOnly(config) {
 }
 
 export function withBackendPosture(config) {
-  return signedOut(config) ? localOnly(config) : config;
+  return signedOut(config) ? localOnly(config) : { ...config, signedOut: false };
 }

@@ -6,6 +6,9 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import armoriqSdk from "@armoriq/sdk";
 import { daemonSocketPath } from "../../scripts/lib/daemon-socket.mjs";
 import { writeLoginProfiles } from "./login-profile.mjs";
 
@@ -13,6 +16,26 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const hookRouter = path.join(repoRoot, "scripts", "hook-router.mjs");
 const daemonScript = path.join(repoRoot, "scripts", "daemon.mjs");
 export const API_KEY = "ak_test_hooksession000000000000000000";
+
+export function mockTokenBackend(t, handler) {
+  const requests = [];
+  const original = armoriqSdk.ArmorIQClient.prototype.createHttpClient;
+  t.mock.method(armoriqSdk.ArmorIQClient.prototype, "createHttpClient", function (...args) {
+    const client = original.apply(this, args);
+    client.defaults.adapter = async (request) => {
+      const outgoing = {
+        body: JSON.parse(request.data),
+        headers: request.headers.toJSON(),
+        timeout: request.timeout,
+      };
+      requests.push(outgoing);
+      const [status, data, headers = {}] = await handler(outgoing, requests.length);
+      return { status, data, headers, config: request, statusText: String(status) };
+    };
+    return client;
+  });
+  return requests;
+}
 
 export async function waitFor(predicate, ms, what) {
   const until = Date.now() + ms;
@@ -28,13 +51,14 @@ export async function startBackend(routes = {}) {
   const server = createServer((req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
+    req.on("end", async () => {
       const text = Buffer.concat(chunks).toString("utf8");
       const body = text ? JSON.parse(text) : null;
       const route = `${req.method} ${req.url}`;
       requests.push({
         route,
         body,
+        headers: req.headers,
         client: req.headers["x-armoriq-client"],
         monitorAware: req.headers["x-armoriq-monitor-aware"],
       });
@@ -44,16 +68,13 @@ export async function startBackend(routes = {}) {
         res.end(JSON.stringify({ written: body.rows.length, failures: [] }));
         return;
       }
-      const bare = `${req.method} ${req.url.split("?")[0]}`;
-      const handler =
-        Object.entries(routes).find(([name]) => name === route)?.[1] ??
-        Object.entries(routes).find(([name]) => name === bare)?.[1];
-      const [status, reply] =
-        handler?.(body, req) ??
+      const handler = routes[route] ?? routes[`${req.method} ${req.url.split("?")[0]}`];
+      const [status, reply, headers = {}] =
+        (await handler?.(body, req)) ??
         (route.startsWith("GET /policy/bundles/current")
           ? [200, { orgId: "org-test", agents: [] }]
           : [404, {}]);
-      res.writeHead(status, { "content-type": "application/json" });
+      res.writeHead(status, { "content-type": "application/json", ...headers });
       res.end(JSON.stringify(reply));
     });
   });
@@ -68,6 +89,35 @@ export async function startBackend(routes = {}) {
         server.close(resolve);
       }),
   };
+}
+
+export async function startPolicyMcp(t, env, sessionId) {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [
+      "--input-type=module",
+      "-e",
+      `
+        import { spawn } from 'node:child_process';
+        import { updateRuntimeState } from ${JSON.stringify(new URL("../../scripts/lib/runtime-state.mjs", import.meta.url).href)};
+        await updateRuntimeState(process.argv[1], state => {
+          state.sessions[process.argv[2]].claudeProcessId = process.pid;
+        });
+        const server = spawn(process.execPath, [process.argv[3]], { stdio: 'inherit' });
+        process.on('SIGTERM', () => server.kill());
+        server.on('exit', code => process.exit(code ?? 1));
+      `,
+      path.join(env.CLAUDE_PLUGIN_DATA, "runtime.json"),
+      sessionId,
+      path.join(repoRoot, "scripts/policy-mcp.mjs"),
+    ],
+    env,
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "contract-test", version: "1" });
+  t.after(() => client.close());
+  await client.connect(transport);
+  return client;
 }
 
 export async function startHookSession(t, backend, extraEnv = {}) {
