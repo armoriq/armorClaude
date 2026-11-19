@@ -15,6 +15,7 @@ import {
 } from "./lib/runtime-state.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { loadPolicyState } from "./lib/policy.mjs";
+import { recordLocalRunRejection, reportRunCaptureFailure } from "./lib/runs.mjs";
 
 function toTextResult(text, extra = {}) {
   return {
@@ -65,8 +66,31 @@ async function loadStateAndConfig() {
   return { config, state };
 }
 
+async function registrationRunId(config) {
+  if (!config.runReportingEnabled) return;
+  try {
+    const runtimeState = await loadRuntimeState(config.runtimeFile);
+    return runtimeState.sessions[resolveProcessSession(runtimeState)]?.promptId;
+  } catch {
+    await reportRunCaptureFailure(config);
+  }
+}
+
 async function run() {
-  await ensurePrivateDir(loadConfig().dataDir);
+  const initialConfig = loadConfig();
+  await ensurePrivateDir(initialConfig.dataDir);
+  const countRejections = initialConfig.runReportingEnabled;
+  async function recordRejection(key) {
+    if (!countRejections) return;
+    try {
+      const config = loadConfig();
+      if (!config.runReportingEnabled) return;
+      await recordLocalRunRejection(config, key, await registrationRunId(config));
+    } catch {
+      await reportRunCaptureFailure(initialConfig);
+    }
+  }
+  const planArgument = (schema) => (countRejections ? z.union([schema, z.unknown()]) : schema);
   const server = new McpServer({
     name: "armorclaude-policy",
     version: "0.1.0",
@@ -110,17 +134,13 @@ async function run() {
       // whole plan wrapped in a `plan` field). The handler below coerces
       // them to the canonical shape before validating with INTENT_PLAN_ZOD.
       inputSchema: {
-        goal: z
-          .string()
-          .min(1)
+        goal: planArgument(z.string().min(1))
           .optional()
           .describe("One-line summary of what the plan accomplishes"),
-        steps: z
-          .union([z.array(PLAN_STEP_SCHEMA).min(1), z.string().min(1)])
+        steps: planArgument(z.union([z.array(PLAN_STEP_SCHEMA).min(1), z.string().min(1)]))
           .optional()
           .describe("Ordered list of tool calls (array, or JSON-stringified array)"),
-        plan: z
-          .union([INTENT_PLAN_ZOD, z.string().min(1)])
+        plan: planArgument(z.union([INTENT_PLAN_ZOD, z.string().min(1)]))
           .optional()
           .describe("Alternative: pass the whole plan as an object or JSON string"),
       },
@@ -129,12 +149,17 @@ async function run() {
       const coerced = coercePlanArgs(args);
       const parsed = INTENT_PLAN_ZOD.safeParse(coerced);
       if (!parsed.success) {
-        return { ...toTextResult(`Plan not registered: ${parsed.error.message}.`), isError: true };
+        const reply = {
+          ...toTextResult(`Plan not registered: ${parsed.error.message}.`),
+          isError: true,
+        };
+        await recordRejection(JSON.stringify(coerced));
+        return reply;
       }
-
       const config = loadConfig();
       return registerIntentPlan(config, normalizeIntentPlan(parsed.data), {
         reloadConfig: loadConfig,
+        runId: await registrationRunId(config),
       });
     }
   );
@@ -234,7 +259,7 @@ async function run() {
         "tamper-evident lineage in the IAP audit log. Re-mints the working " +
         "token so subsequent tool calls succeed.",
       inputSchema: {
-        updatedPlan: INTENT_PLAN_ZOD.describe("The revised plan structure"),
+        updatedPlan: planArgument(INTENT_PLAN_ZOD).describe("The revised plan structure"),
         reason: z
           .string()
           .optional()
@@ -244,16 +269,29 @@ async function run() {
     async (args) => {
       const parsed = INTENT_PLAN_ZOD.safeParse(args.updatedPlan);
       if (!parsed.success) {
-        return { ...toTextResult(`Plan not registered: ${parsed.error.message}.`), isError: true };
+        const reply = {
+          ...toTextResult(`Plan not registered: ${parsed.error.message}.`),
+          isError: true,
+        };
+        await recordRejection(JSON.stringify(args.updatedPlan ?? null));
+        return reply;
       }
-      const updatedPlan = normalizeIntentPlan(parsed.data);
       const config = loadConfig();
-      const runtimeState = await loadRuntimeState(config.runtimeFile);
-      const sessionId = resolveProcessSession(runtimeState);
-      const intentToken = parseToken(runtimeState.sessions[sessionId]?.intentTokenRaw);
+      const updatedPlan = normalizeIntentPlan(parsed.data);
+      let runtimeState;
+      let sessionId;
+      let intentToken;
+      try {
+        runtimeState = await loadRuntimeState(config.runtimeFile);
+        sessionId = resolveProcessSession(runtimeState);
+        intentToken = parseToken(runtimeState.sessions[sessionId]?.intentTokenRaw);
+      } catch {
+        if (config.runReportingEnabled) await reportRunCaptureFailure(config);
+      }
       const registration = await registerIntentPlan(config, updatedPlan, {
         reloadConfig: loadConfig,
         forceRevision: true,
+        runId: config.runReportingEnabled ? runtimeState?.sessions[sessionId]?.promptId : undefined,
       });
       if (registration.isError || !intentToken || !config.apiKey || config.mode === "monitor")
         return registration;

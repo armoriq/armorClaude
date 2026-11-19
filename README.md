@@ -212,6 +212,7 @@ Whether calls are blocked comes from your login and the workspace mode above, no
 |----------|---------|-------------|
 | `ARMORIQ_OBSERVABILITY_DISABLED` | `false` | Set to `true`/`1`/`yes` to stop sending execution traces to the ArmorIQ dashboard. Observability is **on by default** when an API key is set — see [Data & Privacy](#data--privacy). Equivalent to the `disable_observability` plugin option. |
 | `ARMORIQ_USAGE_SYNC_DISABLED` | `false` | Set to `true`/`1`/`yes` to stop the token usage sync. Applies only while observability is on. Equivalent to the `disable_usage_sync` plugin option. |
+| `ARMORIQ_RUN_REPORTING_ENABLED` | `false` | Set to `true` only after every serving backend revision supports prompt ids. Reports prompt starts and turn endings, tool counts, confirmed plan ids and reasons for missing plans through `/iap/runs/batch`. Reports stay bound to the login at prompt start. Delivery pauses on logout or a missing endpoint. Authenticated monitor sessions are included. Run state and unsent receipts live beside the runtime file in `runtime.json.runs.json`. Each hook's switch value also controls daemon delivery until the next hook or daemon reload. `/armorclaude:armor status` shows pending and paused run reports. |
 
 **Policy Management:**
 | Variable | Default | Description |
