@@ -147,23 +147,26 @@ function withSessionLock(sessionId, fn) {
 }
 
 const AUDIT_FLUSH_INTERVAL_MS = 5_000;
-const auditRoot = path.join(config.dataDir, "audit");
 const logins = new Map();
 
-function loginWal(tag, binding) {
-  if (!logins.has(tag) || (binding && !logins.get(tag).binding))
-    logins.set(tag, {
+function loginWal(tag, binding, stream = "audit") {
+  const key = `${stream}:${tag}`;
+  if (!logins.has(key) || (binding && !logins.get(key).binding))
+    logins.set(key, {
       binding,
-      wal: createAuditWal({ dataDir: config.dataDir, login: tag, binding }),
+      stream,
+      wal: createAuditWal({ dataDir: config.dataDir, login: tag, binding, stream }),
     });
-  return logins.get(tag);
+  return logins.get(key);
 }
 
 async function trackLogin(cfg) {
-  if (!cfg.auditEnabled || !cfg.apiKey || cfg.signedOut) return;
+  if (!cfg.apiKey || cfg.signedOut) return;
   const tag = loginTag(cfg.backendEndpoint, cfg.apiKey);
-  const entry = loginWal(tag, { backend: cfg.backendEndpoint, keyId: tag });
-  await restoreAuditLogin(entry, cfg);
+  for (const stream of cfg.auditEnabled ? ["audit", "health"] : ["health"]) {
+    const entry = loginWal(tag, { backend: cfg.backendEndpoint, keyId: tag }, stream);
+    await restoreAuditLogin(entry, cfg);
+  }
 }
 
 async function restoreAuditLogin(entry, cfg) {
@@ -174,17 +177,48 @@ async function restoreAuditLogin(entry, cfg) {
 }
 
 function adoptAuditDir() {
-  if (!existsSync(auditRoot)) return;
-  for (const name of readdirSync(auditRoot)) {
-    if (LOGIN_TAG.test(name)) loginWal(name);
+  for (const stream of ["audit", "health"]) {
+    const root = path.join(config.dataDir, stream);
+    if (!existsSync(root)) continue;
+    try {
+      for (const name of readdirSync(root)) {
+        if (LOGIN_TAG.test(name)) loginWal(name, undefined, stream);
+      }
+    } catch {
+      process.stderr.write(`[daemon] ${stream} outbox discovery failed\n`);
+    }
   }
 }
 
 async function flushAudit(reason) {
   adoptAuditDir();
+  await flushEntries(
+    [...logins.values()].filter((entry) => entry.stream !== "health"),
+    reason
+  );
+  adoptAuditDir();
+  await flushEntries(
+    [...logins.values()].filter((entry) => entry.stream === "health"),
+    reason
+  );
+}
+
+function requestFlush(reason) {
+  void flushAudit(reason).catch(() => {
+    process.stderr.write(`[daemon] outbox flush failed reason=${reason}\n`);
+  });
+}
+
+async function flushEntries(entries, reason) {
   await Promise.all(
-    [...logins.values()].map(async (entry) => {
-      entry.flush ??= shipLogin(entry).finally(() => {
+    entries.map(async (entry) => {
+      if (entry.flush) entry.flushAgain = true;
+      entry.flush ??= (async () => {
+        do {
+          entry.flushAgain = false;
+          await shipLogin(entry);
+        } while (entry.flushAgain);
+      })().finally(() => {
         entry.flush = null;
       });
       try {
@@ -199,42 +233,56 @@ async function flushAudit(reason) {
 }
 
 async function shipLogin(entry) {
-  const binding =
-    entry.binding || (await entry.wal.readPending()).find(({ login }) => login)?.login;
+  const binding = entry.binding || (await entry.wal.readBinding());
   if (!binding) return;
   const cfg = auditLoginConfig(binding, loadConfig());
-  if (!cfg) return;
   if (!entry.binding) {
     entry.binding = binding;
-    entry.wal = createAuditWal({ dataDir: config.dataDir, login: binding.keyId, binding });
+    entry.wal = createAuditWal({
+      dataDir: config.dataDir,
+      login: binding.keyId,
+      binding,
+      stream: entry.stream,
+    });
   }
-  await restoreAuditLogin(entry, cfg);
-  await entry.wal.drain(
-    async ({ rows }) => {
-      const current = auditLoginConfig(binding, loadConfig());
-      if (!current) return { status: 401, body: {} };
-      const response = await postJson(
-        `${binding.backend}/iap/audit/batch`,
-        { rows },
-        buildAuthHeaders(current),
-        current.timeoutMs || 8000
-      );
-      return { status: response.status, body: response.data, headers: response.headers };
-    },
-    {
-      resolveLogin: () => (auditLoginConfig(binding, loadConfig()) ? binding : null),
-      probe: async () => {
+  const resolveLogin = () => (auditLoginConfig(binding, loadConfig()) ? binding : null);
+  if (cfg) {
+    await restoreAuditLogin(entry, cfg);
+    await entry.wal.drain(
+      async ({ rows }) => {
         const current = auditLoginConfig(binding, loadConfig());
-        if (!current) return { status: 401 };
-        return postJson(
-          `${binding.backend}/iap/validate-key`,
-          {},
+        if (!current) return { status: 401, body: {} };
+        const response = await postJson(
+          `${binding.backend}${entry.stream === "health" ? "/iap/client-events" : "/iap/audit/batch"}`,
+          entry.stream === "health" ? { events: rows } : { rows },
           buildAuthHeaders(current),
           current.timeoutMs || 8000
         );
+        return {
+          status: response.status,
+          body: response.data,
+          headers: response.headers,
+          ...(response.status === 403 && response.data?.error === "org_required"
+            ? { hold: "org_required" }
+            : {}),
+        };
       },
-    }
-  );
+      {
+        resolveLogin,
+        probe: async () => {
+          const current = auditLoginConfig(binding, loadConfig());
+          if (!current) return { status: 401 };
+          return postJson(
+            `${binding.backend}/iap/validate-key`,
+            {},
+            buildAuthHeaders(current),
+            current.timeoutMs || 8000
+          );
+        },
+      }
+    );
+  }
+  await entry.wal.reportHealth(undefined, { resolveLogin });
   await entry.wal.pruneArchive();
 }
 
@@ -255,7 +303,7 @@ async function enqueueAudit(dto, login, binding, fallback) {
 }
 
 const auditTimer = setInterval(() => {
-  flushAudit("interval");
+  requestFlush("interval");
 }, AUDIT_FLUSH_INTERVAL_MS);
 auditTimer.unref();
 const stopIntentRefresh = startIntentRefreshLoop(() => loadConfig());
@@ -279,14 +327,13 @@ async function dispatchHook(event, input, cfg) {
       return handlePostToolUseFailure(input, cfg);
     case "Stop": {
       const out = await handleStop(input, cfg);
-      // Started, not awaited: SessionEnd waits on this session's lock, and Claude Code cancels a
-      // SessionEnd hook after about 1.5 s. Rows stay in the WAL until an upload succeeds.
-      flushAudit("stop").catch(() => undefined);
+      // Stage turn-end rows before returning, then deliver without holding the session lock.
+      requestFlush("stop");
       return out;
     }
     case "SessionEnd": {
       const out = await handleSessionEnd(input, cfg);
-      flushAudit("session_end").catch(() => undefined);
+      requestFlush("session_end");
       return out;
     }
     default:

@@ -258,6 +258,10 @@ test("bound legacy rows persist one UUID before delivery and settle by results a
     /restart before delivery/
   );
   const recovered = createAuditWal(options);
+  assert.deepEqual(
+    (await recovered.readPending()).slice(0, 5).map(({ enqueuedAt }) => enqueuedAt),
+    [2, 3, 4, 5, 6]
+  );
   const assigned = (await recovered.readPending()).map(({ row }) => row);
   const ids = assigned.map(({ client_row_id }) => client_row_id);
   for (const id of ids.slice(0, -1))
@@ -472,6 +476,22 @@ test("local status counts pending rows without a login, dead letters and capture
   assert.match(output, /Written by an older version and not sent by this version: 1/);
   assert.match(output, /Dead letters: 1/);
   assert.match(output, /Capture failures: 1/);
+  const binding = { backend: "https://backend.invalid", keyId: "0123456789abcdef" };
+  const health = createAuditWal({ dataDir: dir, login: binding.keyId, binding, stream: "health" });
+  await health.appendLine({
+    event_id: randomUUID(),
+    type: "plan_request_failed",
+    queue: "health",
+    count: 1,
+    reason_code: "timeout",
+    occurred_at: new Date().toISOString(),
+  });
+  await health.drain(async () => ({ status: 404, body: {} }), { resolveLogin: () => binding });
+  const paused = await handleArmorPolicyCommand("/armor status", { dataDir: dir });
+  assert.match(paused, /Pending health events: 1/);
+  assert.match(paused, /Health reporting paused: yes/);
+  assert.match(paused, /Health dead letters: 0/);
+  assert.match(paused, /Undeliverable health events: 1/);
 });
 
 test("readPending returns rows in enqueue order even when disk order is scrambled", async () => {
@@ -730,7 +750,12 @@ test("a long transport outage never exhausts rows and every captured row is deli
 test("settled history compacts and dead letter history stays off append, restore and idle drain paths", async () => {
   const { dir } = await fixture();
   const binding = { backend: "https://a.invalid", keyId: "key-a" };
-  const wal = createAuditWal({ dataDir: dir, login: "0123456789abcdef", binding });
+  const wal = createAuditWal({
+    dataDir: dir,
+    login: "0123456789abcdef",
+    binding,
+    clock: { now: () => 1_800_000_000_000, random: () => 0 },
+  });
   for (let n = 0; n < 100; n += 1)
     await wal.appendLine({ client_row_id: randomUUID(), metadata: "x".repeat(20_000) });
   for (let n = 0; n < 200; n += 1)

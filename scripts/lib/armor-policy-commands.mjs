@@ -2,7 +2,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isPlainObject } from "./common.mjs";
 import { loginCommand } from "./config.mjs";
-import { auditLoginConfig, auditStatus } from "./audit-wal.mjs";
+import { auditLoginConfig, auditStatus, healthStatus } from "./audit-wal.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 import { saveOrgMode } from "./org-mode.mjs";
 import { loadPolicyState, savePolicyState } from "./policy.mjs";
@@ -2037,12 +2037,21 @@ export async function handleArmorPolicyCommand(prompt, config) {
       const status = await auditStatus(config.dataDir, (binding) =>
         auditLoginConfig(binding, config) ? binding : null
       );
+      const health = await healthStatus(config.dataDir, (binding) =>
+        auditLoginConfig(binding, config) ? binding : null
+      );
       return [
         "ArmorClaude audit delivery",
         `Undeliverable: ${status.undeliverable}`,
         `Written by an older version and not sent by this version: ${status.olderVersion}`,
         `Dead letters: ${status.deadLetters}`,
         `Capture failures: ${status.captureFailures}`,
+        `Audit delivery held: ${status.holds?.join(", ") || "none"}`,
+        `Pending health events: ${health.pending}`,
+        `Health reporting paused: ${health.paused ? "yes" : "no"}`,
+        `Health reporting held: ${health.holds?.join(", ") || "none"}`,
+        `Health dead letters: ${health.deadLetters}`,
+        `Undeliverable health events: ${health.undeliverable}`,
       ].join("\n");
     }
     case "help":
