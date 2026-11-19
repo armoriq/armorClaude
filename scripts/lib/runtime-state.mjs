@@ -127,7 +127,7 @@ function sessionDefaults() {
   };
 }
 
-async function withRuntimeLock(file, change) {
+async function acquireRuntimeLock(file) {
   await ensurePrivateDir(path.dirname(file));
   const lock = `${file}.lock`;
   const owner = `${lock}.${process.pid}.${randomUUID()}`;
@@ -150,10 +150,25 @@ async function withRuntimeLock(file, change) {
         await sleep(10);
       }
     }
+  } catch (error) {
+    await unlink(owner);
+    throw error;
+  }
+  return async () => {
+    try {
+      await unlink(lock);
+    } finally {
+      await unlink(owner);
+    }
+  };
+}
+
+async function withRuntimeLock(file, change) {
+  const release = await acquireRuntimeLock(file);
+  try {
     return await change();
   } finally {
-    if (acquired) await unlink(lock);
-    await unlink(owner);
+    await release();
   }
 }
 
@@ -568,19 +583,21 @@ async function writeRunState(file, state) {
 export async function updateRunState(config, change) {
   if (!config.runReportingEnabled) return;
   try {
-    return await withRuntimeLock(runStateFile(config), async () => {
-      const store = await readRunStore(config);
-      const state = store.state;
-      const before = structuredClone(state);
-      const result = await change(state);
-      if (!isDeepStrictEqual(before, state) || store.journalInfo?.size >= RUN_JOURNAL_BYTES)
-        await saveRunStore(config, store);
-      return result;
-    });
+    return await withRuntimeLock(runStateFile(config), () => changeRunState(config, change));
   } catch {
     runStores.delete(runStateFile(config));
     await reportRunCaptureFailure(config);
   }
+}
+
+async function changeRunState(config, change) {
+  const store = await readRunStore(config);
+  const state = store.state;
+  const before = structuredClone(state);
+  const result = await change(state);
+  if (!isDeepStrictEqual(before, state) || store.journalInfo?.size >= RUN_JOURNAL_BYTES)
+    await saveRunStore(config, store);
+  return result;
 }
 
 export async function appendRunTool(config, event) {
@@ -719,39 +736,65 @@ export async function recordHookActivity(input, config, claudeProcessId) {
 
 export async function startPrompt(input, config) {
   if (input.agent_id || input.parent_session_id || input.is_subagent) return;
-  await updateRuntimeState(config.runtimeFile, async (state) => {
-    const fingerprint = syncSessionAuth(state, config, input.session_id);
-    const session = upsertSession(state, input.session_id, { authFingerprint: fingerprint });
-    session.authBackendEndpoint = config.backendEndpoint;
-    state.activeSessionId = input.session_id;
-    const now = Date.now();
-    const hash = sha256Hex(input.prompt);
-    const age = now - (session.promptIdentityAt ?? 0);
-    if (session.promptIdentityHash === hash && age >= 0 && age <= 5000) return;
-    const previous = session.promptId;
-    retirePlan(session);
-    Object.assign(session, {
-      promptId: randomUUID(),
-      promptGeneration: session.promptGeneration + 1,
-      retirementEpoch: 0,
-      promptOpenSince: now,
-      lastActivityAt: now,
-      promptIdentityHash: hash,
-      promptIdentityAt: now,
-      lastPrompt: input.prompt,
-      lastPromptAt: nowEpochSeconds(),
+  let releaseRun;
+  if (config.runReportingEnabled) {
+    try {
+      // Waiting for the run lock with the session lock held can make tool enforcement time out.
+      releaseRun = await acquireRuntimeLock(runStateFile(config));
+    } catch {
+      await reportRunCaptureFailure(config);
+    }
+  }
+  try {
+    await updateRuntimeState(config.runtimeFile, async (state) => {
+      const fingerprint = syncSessionAuth(state, config, input.session_id);
+      const session = upsertSession(state, input.session_id, { authFingerprint: fingerprint });
+      session.authBackendEndpoint = config.backendEndpoint;
+      state.activeSessionId = input.session_id;
+      const now = Date.now();
+      const hash = sha256Hex(input.prompt);
+      const age = now - (session.promptIdentityAt ?? 0);
+      if (session.promptIdentityHash === hash && age >= 0 && age <= 5000) return;
+      const previous = session.promptId;
+      retirePlan(session);
+      Object.assign(session, {
+        promptId: randomUUID(),
+        promptGeneration: session.promptGeneration + 1,
+        retirementEpoch: 0,
+        promptOpenSince: now,
+        lastActivityAt: now,
+        promptIdentityHash: hash,
+        promptIdentityAt: now,
+        lastPrompt: input.prompt,
+        lastPromptAt: nowEpochSeconds(),
+      });
+      // Publishing the prompt first would let a crash lose its only run report.
+      if (releaseRun) {
+        try {
+          await changeRunState(config, (runs) => {
+            closeRun(runs, previous, "next_prompt", now);
+            openRun(
+              { ...runs, sessions: { [input.session_id]: session } },
+              input.session_id,
+              config,
+              now
+            );
+          });
+        } catch {
+          runStores.delete(runStateFile(config));
+          await reportRunCaptureFailure(config);
+        }
+      }
     });
-    // Publishing the prompt first would let a crash lose its only run report.
-    await updateRunState(config, (runs) => {
-      closeRun(runs, previous, "next_prompt", now);
-      openRun(
-        { ...runs, sessions: { [input.session_id]: session } },
-        input.session_id,
-        config,
-        now
-      );
-    });
-  });
+  } finally {
+    if (releaseRun) {
+      try {
+        await releaseRun();
+      } catch {
+        await reportRunCaptureFailure(config);
+      }
+    }
+  }
 }
 
 export function upsertDiscoveredTool(runtimeState, toolName) {

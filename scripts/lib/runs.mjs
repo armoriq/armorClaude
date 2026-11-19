@@ -1,13 +1,35 @@
 import { randomUUID } from "node:crypto";
+import { open } from "node:fs/promises";
+import path from "node:path";
 import { normalizeToolName, sha256Hex } from "./common.mjs";
-import { createAuditWal, loginTag, recordCaptureFailure } from "./audit-wal.mjs";
+import { createAuditWal, loginTag } from "./audit-wal.mjs";
+import { ensurePrivateDir, PRIVATE_FILE_MODE } from "./fs-store.mjs";
 import { backendUnreachable } from "./backend-posture.mjs";
 import { appendRunTool, loadRuntimeState, loadRunState, updateRunState } from "./runtime-state.mjs";
 
 export async function reportRunCaptureFailure(config) {
   process.stderr.write("[armorclaude] run bookkeeping could not be stored.\n");
   try {
-    await recordCaptureFailure(config.dataDir, "internal_error");
+    await ensurePrivateDir(config.dataDir);
+    const file = await open(
+      path.join(config.dataDir, "run-capture-failures.jsonl"),
+      "a",
+      PRIVATE_FILE_MODE
+    );
+    try {
+      await file.writeFile(
+        JSON.stringify({ code: "internal_error", executed_at: new Date().toISOString() }) + "\n"
+      );
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    const directory = await open(config.dataDir, "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   } catch {
     // A reporting storage failure must not replace the hook decision or registration reply.
   }

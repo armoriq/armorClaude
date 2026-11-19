@@ -2061,6 +2061,7 @@ export async function handleArmorPolicyCommand(prompt, config) {
         `Run reporting paused: ${runs.paused ? "yes" : "no"}`,
         `Run reporting held: ${runs.holds?.join(", ") || "none"}`,
         `Undeliverable run reports: ${runs.undeliverable}`,
+        `Run bookkeeping failures: ${runs.captureFailures}`,
       ].join("\n");
     }
     case "help":

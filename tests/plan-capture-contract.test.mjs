@@ -24,7 +24,7 @@ import {
   startHookSession,
   startPolicyMcp,
 } from "./helpers/hook-session.mjs";
-import { loadConfigWithLogins, withHome } from "./helpers/login-profile.mjs";
+import { loadConfigWithLogins, withHome, writeLoginProfiles } from "./helpers/login-profile.mjs";
 
 const fixtures = JSON.parse(
   await readFile(new URL("./fixtures/plan-capture-v1.json", import.meta.url))
@@ -526,6 +526,80 @@ test("shared validity takes precedence and invalid values stop configuration", (
       /ARMORIQ_INTENT_VALIDITY_SECONDS/
     );
   }
+});
+
+// regression: #0007
+test("MCP revoke retires the local plan and registers the same prompt under a fresh epoch", async (t) => {
+  const s = await session(t);
+  const home = await mkdtemp(path.join(os.tmpdir(), "aq-revoke-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  writeLoginProfiles(home, [{ backend: s.config.backendEndpoint, apiKey: s.config.apiKey }]);
+  const requestsFile = path.join(home, "requests.jsonl");
+  const preload = path.join(home, "sdk-http.mjs");
+  await writeFile(
+    preload,
+    `
+    import sdk from ${JSON.stringify(import.meta.resolve("@armoriq/sdk"))};
+    import { appendFileSync } from "node:fs";
+    const create = sdk.ArmorIQClient.prototype.createHttpClient;
+    const responses = new Map();
+    sdk.ArmorIQClient.prototype.createHttpClient = function (...args) {
+      const client = create.apply(this, args);
+      client.defaults.adapter = async request => {
+        const headers = request.headers.toJSON();
+        appendFileSync(${JSON.stringify(requestsFile)}, JSON.stringify({ url: request.url, headers }) + "\\n");
+        let data;
+        if (request.url.endsWith("/iap/sdk/token")) {
+          const key = headers["Idempotency-Key"];
+          if (!responses.has(key)) responses.set(key, responses.size === 0 ? ${JSON.stringify(issued(firstId))} : ${JSON.stringify(issued(secondId))});
+          data = responses.get(key);
+        } else if (request.url.endsWith("/iap/trust/revoke")) data = { trustId: "revoked-plan" };
+        else throw new Error("Unexpected SDK request: " + request.url);
+        return { status: 200, data, headers: {}, config: request, statusText: "OK" };
+      };
+      return client;
+    };
+  `
+  );
+  const client = await startPolicyMcp(
+    t,
+    {
+      PATH: process.env.PATH,
+      HOME: home,
+      CLAUDE_PLUGIN_DATA: s.config.dataDir,
+      ARMORIQ_ENV: "local",
+      ARMORIQ_BACKEND_URL: s.config.backendEndpoint,
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${preload}`].filter(Boolean).join(" "),
+    },
+    s.sessionId
+  );
+  const args = {
+    name: "register_intent_plan",
+    arguments: { goal: "Read the source", steps: [{ action: "Read" }] },
+  };
+  const first = await client.callTool(args);
+  assert.notEqual(first.isError, true, first.content[0].text);
+  const before = await s.state();
+  const revoked = await client.callTool({ name: "trust_revoke", arguments: { reason: "stop" } });
+  assert.match(revoked.content[0].text, /^Token revoked\./);
+  const retired = await s.state();
+  assert.equal(retired.promptId, before.promptId);
+  assert.equal(retired.retirementEpoch, before.retirementEpoch + 1);
+  assert.equal(retired.countedPlanId, null);
+  assert.equal(retired.pendingRequest, null);
+  assert.equal(retired.intentTokenRaw, "");
+  const registered = await client.callTool(args);
+  assert.notEqual(registered.isError, true, registered.content[0].text);
+  assert.equal((await s.state()).countedPlanId, secondId);
+  const requests = (await readFile(requestsFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse)
+    .filter(({ url }) => url.endsWith("/iap/sdk/token"));
+  assert.equal(requests.length, 2);
+  assert.notEqual(requests[1].headers["Idempotency-Key"], requests[0].headers["Idempotency-Key"]);
+  assert.equal(requests[1].headers["X-ArmorIQ-Plan-Kind"], "new");
+  assert.equal(requests[1].headers["X-ArmorIQ-Prompt-Id"], before.promptId);
 });
 
 test("MCP registration exposes confirmed ids and errors from the mock backend", async (t) => {
