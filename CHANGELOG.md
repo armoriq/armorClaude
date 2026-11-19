@@ -4,9 +4,12 @@ Changes to the ArmorClaude plugin, newest first. A stable install picks up code 
 
 ## [Unreleased]
 
-- feat(monitor): an org in Monitor, the default until an admin turns Enforce on, runs in the background: nothing is blocked or held and nothing shows in the session; each call writes one audit row with `would_be`, `would_be_code` and `would_be_reason` when Enforce would have stopped it, and a hold files no approval request. The mode comes from `enforcementMode` on the org policy pull; `ARMORIQ_ORG_MODE=enforce` forces Enforce on one machine (#492)
-- feat(monitor): every request says the client runs Monitor itself (`X-ArmorIQ-Monitor-Aware: 1`), so conmap serves it the real policy; an older copy gets an allow-all stand-in instead, and an updated copy puts back the policy that stand-in replaced
-- feat(monitor): Monitor with notes (`monitorNotices: true` on the org policy pull) still runs every call, and shows one line in the chat for each call Enforce would have blocked or held
+## [0.2.22] - 2026-11-19
+
+- feat(monitor): an org in Monitor, the default until an admin turns Enforce on, runs in the background: nothing is blocked or held and nothing shows in the session; each call writes one audit row with `would_be`, `would_be_code` and `would_be_reason` when Enforce would have stopped it, and a hold files no approval request. The mode comes from `enforcementMode` on the org policy pull; `ARMORIQ_ORG_MODE=enforce` forces Enforce on one machine (#493)
+- feat(monitor): every request says the client runs Monitor itself (`X-ArmorIQ-Monitor-Aware: 1`), so conmap serves it the real policy; an older copy gets an allow-all stand-in instead, and an updated copy puts back the policy that stand-in replaced (#493)
+- feat(monitor): Monitor with notes (`monitorNotices: true` on the org policy pull) still runs every call, and shows one line in the chat for each call Enforce would have blocked or held (#493)
+- feat(policy): v2 bundles are read as `armorclaude`, falling back to `claude-code` on a backend without slug resolution; the org's active policy is a floor the agent's own policy can only tighten, shadow policies log their verdicts without deciding, and with no active v2 policy the v1 policy decides (#494)
 
 ## [0.2.21] - 2026-11-18
 
