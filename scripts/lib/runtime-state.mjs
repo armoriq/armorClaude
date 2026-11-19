@@ -547,13 +547,3 @@ export function getTrustOps(runtimeState, sessionId) {
   const session = getSession(runtimeState, sessionId);
   return Array.isArray(session?.trustOpsLog) ? session.trustOpsLog : [];
 }
-
-export function setActiveSessionId(runtimeState, sessionId) {
-  if (!sessionId || typeof sessionId !== "string") return;
-  runtimeState.activeSessionId = sessionId;
-  runtimeState.activeSessionAt = nowEpochSeconds();
-}
-
-export function getActiveSessionId(runtimeState) {
-  return typeof runtimeState?.activeSessionId === "string" ? runtimeState.activeSessionId : "";
-}
