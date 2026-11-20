@@ -96,7 +96,7 @@ export function extractPlanFromIntentToken(raw) {
   return { plan: planCandidate, expiresAt, planCheck: parsed.planCheck };
 }
 
-function planCheckDenial(planCheck, toolName) {
+export function planCheckDenial(planCheck, toolName) {
   const tool = normalizeToolName(toolName);
   const named = (entry) => normalizeToolName(String(entry).split(":")[0]) === tool;
   if (!(planCheck?.deniedTools ?? []).some(named)) return null;
