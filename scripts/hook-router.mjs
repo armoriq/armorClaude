@@ -1,6 +1,6 @@
 import { loadConfig } from "./lib/config.mjs";
 import { denyPreTool } from "./lib/hook-output.mjs";
-import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
+import { DaemonHandlerError, dispatchViaDaemon } from "./lib/daemon-client.mjs";
 import { appendDaemonLog } from "./lib/daemon-log.mjs";
 import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
 import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
@@ -55,6 +55,7 @@ async function dispatchInDaemon(event, input, config) {
     if (output) emitJson(output);
     return true;
   } catch (err) {
+    if (err instanceof DaemonHandlerError) throw err;
     logDaemonFallback(event, err, config);
     return false;
   }
