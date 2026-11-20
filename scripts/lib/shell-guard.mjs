@@ -198,7 +198,8 @@ function changeDir([, ...args], base) {
 const wordsOf = (tokens) => tokens.flatMap((t) => (t.word === undefined ? [] : [t.word]));
 
 const isUnder = (target, protectedPath) =>
-  target === protectedPath || target.startsWith(protectedPath + path.sep);
+  target === protectedPath ||
+  target.startsWith(protectedPath.endsWith(path.sep) ? protectedPath : protectedPath + path.sep);
 
 export const isProtectedPath = (target, protectedPaths) =>
   protectedPaths.some((p) => isUnder(path.resolve(target), path.resolve(p)));
