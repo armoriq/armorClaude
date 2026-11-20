@@ -30,6 +30,7 @@ import {
   getSdkClient,
   getSessionTokenUsedStepIndices,
   parseCsrgProofHeaders,
+  planCheckDenial,
   recordSessionTokenUsedStepIndices,
   requestIntent,
   resolveCsrgProofsFromToken,
@@ -50,8 +51,10 @@ import {
   appendTrustOp,
   getSession,
   loadRuntimeState,
+  planCheckFile,
   saveRuntimeState,
   setActiveSessionId,
+  tokenPlanCheck,
   upsertDiscoveredTool,
   upsertSession,
 } from "./runtime-state.mjs";
@@ -854,6 +857,23 @@ async function auditBlocked(input, config, code, source, v2) {
   }
 }
 
+async function sessionPlanCheck(config, sessionId) {
+  const file = planCheckFile(config.runtimeFile, sessionId);
+  if (!file) return null;
+  for (const pendingPath of [
+    path.join(config.dataDir, `pending-plan.${sessionId}.json`),
+    path.join(config.dataDir, "pending-plan.json"),
+  ]) {
+    const pending = await readJson(pendingPath, null);
+    if (pending && (pending.tokenRaw || pending.plan)) {
+      return pending.intentPolicyCompilerVersion === INTENT_POLICY_COMPILER_VERSION
+        ? tokenPlanCheck(pending.tokenRaw)
+        : null;
+    }
+  }
+  return readJson(file, null);
+}
+
 async function decidePreToolUse(input, config, ctx = {}) {
   // Record start timestamp BEFORE any deny/early-return so even denied calls
   // have timing data available for PostToolUse/PostToolUseFailure.
@@ -989,8 +1009,13 @@ async function decidePreToolUse(input, config, ctx = {}) {
     );
     ctx.v1 = safePolicyDecision;
     const safePolicyOutput = preToolPolicyOutput(safePolicyDecision, toolName);
-    if (safePolicyOutput) return safePolicyOutput;
-    return null;
+    const policyDecision = safePolicyOutput?.hookSpecificOutput?.permissionDecision;
+    if (policyDecision === "deny" || isFrictionlessAllowPolicy(safePolicyState.policy))
+      return safePolicyOutput;
+    const denial = planCheckDenial(await sessionPlanCheck(config, sessionId), toolName);
+    const blocked =
+      denial && (await tokenBlocked(config, { planCheckDenied: true, blockReason: denial }));
+    return blocked || safePolicyOutput;
   }
 
   // --- Load runtime state (reused for MCP gate, plan consumption, and rest of handler) ---
