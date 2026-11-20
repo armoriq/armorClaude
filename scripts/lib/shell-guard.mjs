@@ -113,22 +113,80 @@ function destinations(args) {
   return [dest, ...sources.map((s) => path.join(dest, path.basename(s)))];
 }
 
+const RECURSIVE = /^(-[a-zA-Z]*R|--recursive$)/;
+const whole = (words) => words.map((word) => ({ word, whole: true }));
+const exact = (words) => words.map((word) => ({ word, whole: false }));
+
 function commandTargets([name, ...args]) {
   const command = path.basename(name ?? "");
-  if (command === "mv") return [...operands(args).files, ...destinations(args)];
-  if (EVERY_OPERAND.has(command)) return operands(args).files;
-  if (INTO_DESTINATION.has(command)) return destinations(args);
+  if (command === "mv") {
+    const { files, targetDir } = operands(args);
+    return [...whole(targetDir ? files : files.slice(0, -1)), ...exact(destinations(args))];
+  }
+  if (command === "rm") return whole(operands(args).files);
+  if ((command === "chmod" || command === "chown") && args.some((a) => RECURSIVE.test(a)))
+    return whole(operands(args).files);
+  if (EVERY_OPERAND.has(command)) return exact(operands(args).files);
+  if (INTO_DESTINATION.has(command)) return exact(destinations(args));
   if (command === "sed" && args.some((a) => /^(-i|--in-place)/.test(a)))
-    return operands(args).files;
-  if (command === "dd") return args.filter((a) => a.startsWith("of=")).map((a) => a.slice(3));
+    return exact(operands(args).files);
+  if (command === "dd")
+    return exact(args.filter((a) => a.startsWith("of=")).map((a) => a.slice(3)));
   return [];
 }
 
+const expandHome = (word) => word.replace(/^(~|\$HOME|\$\{HOME\})(?=\/|$)/, homedir());
+const SPECIAL = /[$`*?[]/;
+
+function absoluteOf(word, base) {
+  if (path.isAbsolute(word)) return path.resolve(word);
+  return base ? path.resolve(base, word) : null;
+}
+
 function resolveWord(word, base) {
-  const expanded = word.replace(/^(~|\$HOME|\$\{HOME\})(?=\/|$)/, homedir());
-  if (/[$*?`[]/.test(expanded)) return null;
-  if (path.isAbsolute(expanded)) return path.resolve(expanded);
-  return base ? path.resolve(base, expanded) : null;
+  const expanded = expandHome(word);
+  return SPECIAL.test(expanded) ? null : absoluteOf(expanded, base);
+}
+
+function globRegex(pattern) {
+  let source = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    const close = c === "[" ? pattern.indexOf("]", i + 2) : -1;
+    if (pattern[i - 1] === "/" && (c === "*" || c === "?" || close !== -1)) source += "(?!\\.)";
+    if (c === "*") source += "[^/]*";
+    else if (c === "?") source += "[^/]";
+    else if (close !== -1) {
+      source += `[${pattern
+        .slice(i + 1, close)
+        .replace(/^!/, "^")
+        .replace(/\\/g, "\\\\")}]`;
+      i = close;
+    } else source += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${source}$`);
+}
+
+function lineage(target) {
+  const chain = [target];
+  while (path.dirname(chain.at(-1)) !== chain.at(-1)) chain.push(path.dirname(chain.at(-1)));
+  return chain;
+}
+
+function patternHits(expanded, base, resolvedProtected, wholeTree) {
+  const special = expanded.search(SPECIAL);
+  const slash = expanded.lastIndexOf("/", special);
+  const dir = absoluteOf(slash === -1 ? "." : expanded.slice(0, slash + 1) || "/", base);
+  if (!dir) return null;
+  if (resolvedProtected.some((p) => isUnder(dir, p))) return true;
+  if (/[$`]/.test(expanded)) {
+    const head = expanded.slice(slash + 1, special);
+    return resolvedProtected.some(
+      (p) => p !== dir && isUnder(p, dir) && path.relative(dir, p).startsWith(head)
+    );
+  }
+  const regex = globRegex(path.join(dir, expanded.slice(slash + 1)));
+  return resolvedProtected.some((p) => (wholeTree ? lineage(p) : [p]).some((c) => regex.test(c)));
 }
 
 function changeDir([, ...args], base) {
@@ -142,13 +200,20 @@ const wordsOf = (tokens) => tokens.flatMap((t) => (t.word === undefined ? [] : [
 const isUnder = (target, protectedPath) =>
   target === protectedPath || target.startsWith(protectedPath + path.sep);
 
+export const isProtectedPath = (target, protectedPaths) =>
+  protectedPaths.some((p) => isUnder(path.resolve(target), path.resolve(p)));
+
 export function writesProtectedPath(command, cwd, protectedPaths) {
   const resolvedProtected = protectedPaths.map((p) => path.resolve(p));
   const basenames = new Set(protectedPaths.map((p) => path.basename(p)));
   const mentions = (word) => basenames.has(path.basename(word));
-  const hits = (word, base) => {
-    const target = resolveWord(word, base);
-    return target ? resolvedProtected.some((p) => isUnder(target, p)) : mentions(word);
+  const hits = ({ word, whole }, base) => {
+    const expanded = expandHome(word);
+    if (SPECIAL.test(expanded))
+      return patternHits(expanded, base, resolvedProtected, whole) || mentions(word);
+    const target = absoluteOf(expanded, base);
+    if (!target) return mentions(word);
+    return resolvedProtected.some((p) => isUnder(target, p) || (whole && isUnder(p, target)));
   };
   const tokens = lex(command);
   if (!tokens) return command.split(/[\s"'=<>]+/).some(mentions);
@@ -159,7 +224,7 @@ export function writesProtectedPath(command, cwd, protectedPaths) {
     if (cmd[0] === "cd" || cmd[0] === "pushd") base = changeDir(cmd, base);
     if (stdin && WRITE_COMMANDS.has(path.basename(cmd[0] ?? "")) && words.some(mentions))
       return true;
-    if ([...redirects, ...commandTargets(cmd)].some((w) => hits(w, base))) return true;
+    if ([...exact(redirects), ...commandTargets(cmd)].some((w) => hits(w, base))) return true;
   }
   return false;
 }
