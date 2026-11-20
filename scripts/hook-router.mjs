@@ -61,6 +61,8 @@ async function dispatchInDaemon(event, input, config) {
   }
 }
 
+let hookEvent = "";
+
 async function main() {
   const config = loadConfig();
   ensurePrivateDirSync(config.dataDir);
@@ -78,6 +80,7 @@ async function main() {
     return;
   }
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
+  hookEvent = event;
   debugLog(config, `hook=${event}`);
   await trackUsageSession(event, input, config);
 
@@ -117,7 +120,10 @@ main().catch((error) => {
   if (debug) {
     process.stderr.write(`[armorclaude] error=${message}\n`);
   }
-  if (mode === "enforce") {
-    emitJson(denyPreTool("internal_error", `ArmorClaude internal error: ${message}`));
+  if (mode !== "enforce") return;
+  if (hookEvent && hookEvent !== "PreToolUse") {
+    emitJson({ systemMessage: `ArmorClaude internal error in ${hookEvent}: ${message}` });
+    return;
   }
+  emitJson(denyPreTool("internal_error", `ArmorClaude internal error: ${message}`));
 });

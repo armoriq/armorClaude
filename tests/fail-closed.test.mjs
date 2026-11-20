@@ -31,6 +31,14 @@ test("a handler that throws inside the daemon denies the call in enforce mode", 
   assert.match(reasonOf(output), /ArmorClaude internal error: .*EISDIR/);
 });
 
+test("a handler that throws outside PreToolUse reports the error in a shape Claude Code accepts", async (t) => {
+  const { dataDir, hook } = await session(t);
+  await mkdir(path.join(dataDir, "runtime.json"));
+  const output = await hook({ hook_event_name: "SessionStart" });
+  assert.equal(output?.hookSpecificOutput, undefined, JSON.stringify(output));
+  assert.match(output?.systemMessage ?? "", /ArmorClaude internal error in SessionStart: .*EISDIR/);
+});
+
 test("a handler that throws inside the daemon still lets the call run in org Monitor", async (t) => {
   const { dataDir, hook } = await session(t, { ARMORIQ_ORG_MODE: "" }, monitorRoutes);
   await hook({ hook_event_name: "SessionStart" });
