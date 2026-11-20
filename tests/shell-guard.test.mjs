@@ -1,5 +1,6 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import os from "node:os";
 import { loadConfig } from "../scripts/lib/config.mjs";
 import { handlePreToolUse, handleSessionStart } from "../scripts/lib/engine.mjs";
@@ -169,4 +170,24 @@ test("the monitor banner says tool calls are not checked against a plan", async 
   const context = out.hookSpecificOutput.additionalContext;
   assert.match(context, /tool calls are not checked against a plan/);
   assert.doesNotMatch(context, /not blocked/);
+});
+
+test("without a session cwd, relative paths are not resolved against the daemon's own cwd", async () => {
+  const dataDir = realpathSync(config.dataDir);
+  const saved = process.cwd();
+  process.chdir(dataDir);
+  try {
+    for (const [tool_name, tool_input] of [
+      ["Write", { file_path: "notes.txt", content: "hi" }],
+      ["Bash", { command: "rm -f notes.txt" }],
+    ]) {
+      const out = await handlePreToolUse(
+        { hook_event_name: "PreToolUse", session_id: "guard", tool_name, tool_input },
+        { ...config, dataDir }
+      );
+      assert.notEqual(out?.hookSpecificOutput?.permissionDecision, "deny", tool_name);
+    }
+  } finally {
+    process.chdir(saved);
+  }
 });

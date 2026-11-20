@@ -908,12 +908,17 @@ async function decidePreToolUse(input, config, ctx = {}) {
     config.runtimeFile,
     path.join(homedir(), ".armoriq", "credentials.json"),
   ];
+  const sessionCwd = typeof input.cwd === "string" && input.cwd ? input.cwd : null;
   if (["write", "edit", "notebookedit"].includes(norm)) {
     const target = toolInput?.file_path || toolInput?.notebook_path || toolInput?.path || "";
+    const resolved =
+      typeof target === "string" && target && (path.isAbsolute(target) || sessionCwd)
+        ? path.resolve(sessionCwd ?? "/", target)
+        : null;
     if (
       typeof target === "string" &&
       target &&
-      (isProtectedPath(path.resolve(input.cwd || process.cwd(), target), PROTECTED_PATHS) ||
+      ((resolved && isProtectedPath(resolved, PROTECTED_PATHS)) ||
         target.includes("armorclaude/policy") ||
         target.includes("armorclaude/profiles"))
     ) {
@@ -931,8 +936,7 @@ async function decidePreToolUse(input, config, ctx = {}) {
         "ArmorClaude: policy management is human-only. Type /armorclaude:armor policy in the terminal."
       );
     }
-    const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
-    if (writesProtectedPath(cmd, cwd, PROTECTED_PATHS)) {
+    if (writesProtectedPath(cmd, sessionCwd, PROTECTED_PATHS)) {
       return denyPreTool(
         "protected_policy_file",
         "ArmorClaude: shell commands that write, move or delete ArmorClaude policy, state or credential files are blocked. Use /armorclaude:armor policy commands."
