@@ -218,14 +218,24 @@ function bound(floor, own) {
 }
 
 function evaluateCall(ir, agent, call, documents) {
-  return callInputs(agent, call)
-    .map((input) => ir.evaluate(input, documents))
-    .reduce((best, next) =>
+  const strictest = (evaluations) =>
+    evaluations.reduce((best, next) =>
       ir.VERDICT_RANK[next.verdict] > ir.VERDICT_RANK[best.verdict] ? next : best
     );
+  const decide = (rows) =>
+    strictest(callInputs(agent, call, rows).map((input) => ir.evaluate(input, documents)));
+  const tools = agent?.tools ?? [];
+  const known = candidateTools(tools, call);
+  const evaluation = decide(known);
+  if (!call.mcpServer || known.some((t) => t.server === call.mcpServer)) return evaluation;
+  const elsewhere = candidateTools(tools, { tool: call.tool }).filter((t) => t.server);
+  if (!elsewhere.length || evaluation.verdict !== "allow") return evaluation;
+  const other = decide(elsewhere);
+  if (other.verdict === "allow") return evaluation;
+  return { ...other, verdict: "hold", approval: other.verdict === "hold" ? other.approval : null };
 }
 
-function callInputs(agent, call) {
+function callInputs(agent, call, known) {
   const base = {
     tool: call.tool,
     arguments: call.arguments,
@@ -239,12 +249,22 @@ function callInputs(agent, call) {
     );
     base.member = { email: call.userEmail, ...(known && { membershipId: known.membershipId }) };
   }
-  const tools = agent?.tools ?? [];
-  const named = tools.filter((t) => t.name === call.tool || t.qualifiedName === call.tool);
-  const owned = call.mcpServer ? named.filter((t) => t.server === call.mcpServer) : [];
-  const known = owned.length ? owned : named;
+  if (call.mcpServer) base.qualifiedName = `mcp__${call.mcpServer}__${call.tool}`;
   if (!known.length) return [base];
-  return known.map((t) => ({ ...base, schemaHash: t.schemaHash, capabilities: t.capabilities }));
+  return known.map((t) => ({
+    ...base,
+    schemaHash: t.schemaHash,
+    capabilities: t.capabilities,
+    ...(t.qualifiedName &&
+      (!call.mcpServer || t.server === call.mcpServer) && { qualifiedName: t.qualifiedName }),
+  }));
+}
+
+function candidateTools(tools, call) {
+  const named = tools.filter((t) => t.name === call.tool || t.qualifiedName === call.tool);
+  if (!call.mcpServer) return named;
+  const owned = named.filter((t) => t.server === call.mcpServer);
+  return owned.length ? owned : named.filter((t) => !t.server);
 }
 
 function block(reason) {
