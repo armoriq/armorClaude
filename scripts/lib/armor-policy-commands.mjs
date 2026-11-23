@@ -2631,6 +2631,46 @@ async function restoreAfterStandIn(config) {
   );
 }
 
+const SYNCED_FROM_SERVER = new Set(["dashboard-sync", "monitor-restore"]);
+
+const ALLOW_ALL_POLICY = {
+  schemaVersion: "armor.policy.v1",
+  defaults: { decision: "allow" },
+  statements: [{ id: "allow-all", effect: "permit", action: { type: "tool", eq: "*" } }],
+};
+
+function serverOwned(history, policy) {
+  const hash = canonicalPolicyHash(policy);
+  const same = history.filter((e) => e?.policy && canonicalPolicyHash(e.policy) === hash);
+  return same.length > 0 && same.every((e) => SYNCED_FROM_SERVER.has(e.updatedBy));
+}
+
+async function dropServerPolicy(config) {
+  const state = await loadPolicyState(config.policyFile);
+  if (!serverOwned(state.history, state.policy)) return null;
+  const own = state.history.findLast(
+    (e) => e?.policy && !isStandIn(e.policy) && !serverOwned(state.history, e.policy)
+  );
+  const now = new Date().toISOString();
+  const version = state.version + 1;
+  const reason = own
+    ? "the connected org has no active policy; restored the local policy"
+    : "the connected org has no active policy; dropped the policy synced from another org";
+  const policy = normalizePolicyIr(own?.policy ?? ALLOW_ALL_POLICY);
+  const updatedBy = "org-switch";
+  const nextState = {
+    version,
+    updatedAt: now,
+    updatedBy,
+    policy,
+    history: [...state.history, { version, updatedAt: now, updatedBy, reason, policy }],
+  };
+  await savePolicyState(config.policyFile, nextState);
+  const crypto = await issueCryptoPolicyTokenForState(config, nextState);
+  if (!crypto.ok) await clearCryptoPolicyToken(config);
+  return { ok: true, changed: true, version, dropped: own ? "restored" : "dropped" };
+}
+
 export async function syncActivePolicyFromBackend(config) {
   if (!config.apiKey) return { ok: false, changed: false, reason: "no api key" };
 
@@ -2642,7 +2682,8 @@ export async function syncActivePolicyFromBackend(config) {
   const active = result.profiles.find((p) => p?.policy);
   if (!active?.policy)
     return (
-      (await restoreAfterStandIn(config)) ?? {
+      (await restoreAfterStandIn(config)) ??
+      (await dropServerPolicy(config)) ?? {
         ok: false,
         changed: false,
         reason: "no active org policy",

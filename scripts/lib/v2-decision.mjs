@@ -294,9 +294,10 @@ export async function resolveV2Hold(
   }
   const { tool, mcpServer } = v2Call(toolName);
   const args = isPlainObject(toolArgs) ? toolArgs : {};
+  const domain = mcpServer ?? config.mcpName;
   const res = await enforceCall(config, {
     tool,
-    mcp: mcpServer ?? config.mcpName,
+    mcp: domain,
     arguments: args,
     intent_token: intentToken,
     agent_id: config.agentId,
@@ -309,7 +310,11 @@ export async function resolveV2Hold(
       reason: `ArmorIQ enforce failed for ${toolName} (HTTP ${res.status})`,
     };
   }
-  if (verdict.allowed === true) return { action: "allow", reason: verdict.reason || "allowed" };
+  if (verdict.allowed === true) {
+    if (verdict.reason === "approved_delegation")
+      forgetDelegation(session, intentToken, domain, tool, args);
+    return { action: "allow", reason: verdict.reason || "allowed" };
+  }
   if (verdict.enforcementAction !== "hold") {
     return { action: "block", reason: verdict.message || verdict.reason || "blocked" };
   }
@@ -317,7 +322,7 @@ export async function resolveV2Hold(
     session,
     intentToken,
     tool,
-    domain: mcpServer ?? config.mcpName,
+    domain,
     args,
     reason: verdict.reason,
   });
@@ -331,8 +336,19 @@ export async function resolveV2Hold(
   };
 }
 
+function callShape(intentToken, domain, tool, args) {
+  return sha256Hex(JSON.stringify([intentToken.plan_id, domain, tool, args]));
+}
+
+function forgetDelegation(session, intentToken, domain, tool, args) {
+  if (!isPlainObject(session.v2Delegations)) return;
+  const rest = { ...session.v2Delegations };
+  delete rest[callShape(intentToken, domain, tool, args)];
+  session.v2Delegations = rest;
+}
+
 async function fileDelegation(config, { session, intentToken, tool, domain, args, reason }) {
-  const shape = sha256Hex(JSON.stringify([intentToken.plan_id, domain, tool, args]));
+  const shape = callShape(intentToken, domain, tool, args);
   const filed = isPlainObject(session.v2Delegations) ? session.v2Delegations : {};
   if (filed[shape]) return { delegationId: filed[shape] };
   if (!config.userEmail) return { error: "the signed-in profile has no email" };

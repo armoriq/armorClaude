@@ -146,6 +146,42 @@ test("a v2 hold stops the call, files one delegation request without an amount, 
   assert.equal(decisionOf(await hook(write)), "allow");
 });
 
+test("a spent approval is forgotten, so the same held call later files a new request", async (t) => {
+  const planId = randomUUID();
+  let approved = false;
+  let filed = 0;
+  const backend = await startBackend({
+    "GET /policy/bundles/current": () => [200, BUNDLE],
+    "POST /iap/sdk/token": () => tokenReply(planId),
+    "POST /iap/sdk/enforce": () => [
+      200,
+      approved
+        ? { allowed: true, enforcementAction: "allow", reason: "approved_delegation" }
+        : { allowed: false, enforcementAction: "hold", reason: "hold:Write#0" },
+    ],
+    "POST /delegation/request": () => [
+      201,
+      { delegationId: `deleg-${++filed}`, status: "pending" },
+    ],
+  });
+  const { hook } = await startHookSession(t, backend);
+  await hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
+  const write = {
+    hook_event_name: "PreToolUse",
+    tool_name: "Write",
+    tool_input: { file_path: "/workspace/secrets/a.txt", content: "hi" },
+  };
+
+  assert.match(reasonOf(await hook(write)), /Approval request deleg-1 is waiting/);
+  approved = true;
+  assert.equal(decisionOf(await hook(write)), "allow");
+  approved = false;
+  const again = await hook(write);
+  assert.equal(decisionOf(again), "deny", JSON.stringify(again));
+  assert.match(reasonOf(again), /Approval request deleg-2 is waiting/);
+  assert.equal(routed(backend, "POST /delegation/request").length, 2);
+});
+
 test("in Monitor a v2 hold runs the call and files no approval request, even with a plan on the session", async (t) => {
   const planId = randomUUID();
   const backend = await v2Backend(planId, {
@@ -443,6 +479,37 @@ test("in capture mode the prompt directive names the v2 policies that still bloc
     /ArmorIQ policies "no-curl-anywhere", "args-and-holds" still decide each call/
   );
   assert.doesNotMatch(directive, /blocks none/);
+});
+
+test("in capture mode the directive asks for the plan without enforcement wording", async (t) => {
+  const directive = await capturePrompt(
+    t,
+    slugBundle([entry("agent-1", "args-and-holds", POLICY_DOCUMENT, "agent")])
+  );
+  assert.match(directive, /ArmorClaude intent capture is active/);
+  assert.match(directive, /as your first tool call/);
+  assert.match(directive, /ArmorIQ policy "args-and-holds" still decides each call/);
+  assert.doesNotMatch(directive, /BEFORE any other tool call|relying on enforcement|enforcement/);
+});
+
+test("in enforcement mode the directive keeps the mandatory wording", async (t) => {
+  const backend = await v2Backend(randomUUID());
+  const { hook, dataDir } = await startHookSession(t, backend);
+  await savePolicyState(path.join(dataDir, "policy.json"), {
+    version: 1,
+    updatedBy: "user",
+    policy: {
+      schemaVersion: "armor.policy.v1",
+      defaults: { decision: "allow" },
+      statements: [{ id: "no-glob", effect: "forbid", action: { type: "tool", eq: "Glob" } }],
+    },
+  });
+  const prompt = await hook({ hook_event_name: "UserPromptSubmit", prompt: "write hello.txt" });
+  const directive = prompt?.hookSpecificOutput?.additionalContext ?? "";
+  assert.match(directive, /ArmorClaude intent enforcement is active. Before using any tool/);
+  assert.match(directive, /BEFORE any other tool call/);
+  assert.match(directive, /before relying on enforcement/);
+  assert.match(directive, /Tool calls without a registered plan will be blocked/);
 });
 
 test("in capture mode with no active v2 policy the directive says nothing is blocked", async (t) => {
