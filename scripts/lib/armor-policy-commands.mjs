@@ -2668,7 +2668,7 @@ async function dropServerPolicy(config) {
   await savePolicyState(config.policyFile, nextState);
   const crypto = await issueCryptoPolicyTokenForState(config, nextState);
   if (!crypto.ok) await clearCryptoPolicyToken(config);
-  return { ok: true, changed: true, version };
+  return { ok: true, changed: true, version, dropped: own ? "restored" : "dropped" };
 }
 
 export async function syncActivePolicyFromBackend(config) {

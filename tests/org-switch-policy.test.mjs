@@ -52,7 +52,9 @@ test("a policy synced from another org stops applying when the connected org has
     JSON.stringify({ policyDigest: canonicalPolicyHash(OTHER_ORG), token: {} })
   );
 
-  await hook({ hook_event_name: "SessionStart" });
+  const started = JSON.stringify(await hook({ hook_event_name: "SessionStart" }));
+  assert.match(started, /policy from your previous org no longer applies/);
+  assert.doesNotMatch(started, /Policy synced from dashboard/);
   assert.equal(await hook({ hook_event_name: "PreToolUse", ...write }), null);
 
   const state = await loadPolicyState(policyFile);

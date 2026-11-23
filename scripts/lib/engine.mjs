@@ -554,7 +554,12 @@ async function startSession(input, config) {
     try {
       const pulled = await syncActivePolicyFromBackend(config);
       if (pulled.ok && pulled.changed) {
-        syncNote = ` Policy synced from dashboard (v${pulled.version}).`;
+        syncNote =
+          pulled.dropped === "restored"
+            ? " This org has no dashboard policy, so your local policy is back in effect."
+            : pulled.dropped === "dropped"
+              ? " This org has no dashboard policy, so the policy from your previous org no longer applies."
+              : ` Policy synced from dashboard (v${pulled.version}).`;
         debugLog(config, `policy synced from backend: v${pulled.version}`);
       } else if (!pulled.ok) {
         debugLog(config, `policy sync skipped: ${pulled.reason}`);
