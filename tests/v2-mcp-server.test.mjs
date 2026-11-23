@@ -53,7 +53,7 @@ test("a qualified rule matches a plugin MCP call by its server", () => {
   assert.equal(decide(rules, "mcp__plugin_acme_echo__shout"), "block");
 });
 
-test("a call never borrows another server's inventory row", () => {
+test("a call never takes another server's row as its own, and holds when that row is stricter", () => {
   const rules = agent(
     [statement("st-d", { capability: "destructive" }, "block")],
     [
@@ -66,6 +66,22 @@ test("a call never borrows another server's inventory row", () => {
       },
     ]
   );
-  assert.equal(decide(rules, "mcp__echo__shout"), "allow");
+  assert.equal(decide(rules, "mcp__echo__shout"), "hold");
   assert.equal(decide(rules, "mcp__other__shout"), "block");
+});
+
+test("a call on a server with no inventory row is allowed when no other server's row is stricter", () => {
+  const rules = agent(
+    [statement("st-d", { capability: "destructive" }, "block")],
+    [
+      {
+        name: "shout",
+        qualifiedName: "mcp__other__shout",
+        server: "other",
+        schemaHash: null,
+        capabilities: [],
+      },
+    ]
+  );
+  assert.equal(decide(rules, "mcp__echo__shout"), "allow");
 });
