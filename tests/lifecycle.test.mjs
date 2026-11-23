@@ -419,11 +419,20 @@ test("SessionEnd invokes client.revoke when autoRevokeOnEnd is true", async () =
 
   try {
     // regression: #521
-    const ended = handleSessionEnd({ hook_event_name: "SessionEnd", session_id: "sess-trust-4" }, config).then(() => "returned");
-    const hung = new Promise((resolve) => setTimeout(resolve, 5_000, "still waiting on the revoke").unref());
+    const ended = handleSessionEnd(
+      { hook_event_name: "SessionEnd", session_id: "sess-trust-4" },
+      config
+    ).then(() => "returned");
+    const hung = new Promise((resolve) =>
+      setTimeout(resolve, 5_000, "still waiting on the revoke").unref()
+    );
     assert.equal(await Promise.race([ended, hung]), "returned");
     const after = await loadRuntimeState(config.runtimeFile);
-    assert.equal(after.sessions?.["sess-trust-4"], undefined, "SessionEnd returns while the revoke is still in flight");
+    assert.equal(
+      after.sessions?.["sess-trust-4"],
+      undefined,
+      "SessionEnd returns while the revoke is still in flight"
+    );
   } finally {
     releaseRevoke();
     if (originalRevoke) client.revoke = originalRevoke;
