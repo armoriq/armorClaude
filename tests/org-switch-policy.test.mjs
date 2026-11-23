@@ -98,6 +98,40 @@ test("a stale crypto digest is cleared when the new policy cannot be bound", asy
   assert.equal(JSON.parse(await readFile(cryptoFile, "utf8")), null);
 });
 
+test("a synced policy put back after the Monitor stand-in is still dropped", async (t) => {
+  const { hook, dataDir } = await orgWithoutPolicy(t);
+  const policyFile = path.join(dataDir, "policy.json");
+  const standIn = { ...profile("armoriq-monitor-stand-in", []) };
+  await savePolicyState(policyFile, {
+    version: 4,
+    updatedBy: "monitor-restore",
+    policy: OTHER_ORG,
+    history: [
+      { version: 1, updatedBy: "user", policy: LOCAL },
+      synced(2, OTHER_ORG),
+      synced(3, standIn),
+      { version: 4, updatedBy: "monitor-restore", policy: OTHER_ORG },
+    ],
+  });
+
+  await hook({ hook_event_name: "SessionStart" });
+  assert.doesNotMatch(
+    reasonOf(await hook({ hook_event_name: "PreToolUse", ...write })),
+    /deny-write/
+  );
+  assert.equal((await loadPolicyState(policyFile)).policy.metadata.name, "my-rules");
+});
+
+test("dropping a synced policy happens once, not on every session", async (t) => {
+  const { hook, dataDir } = await orgWithoutPolicy(t);
+  const policyFile = path.join(dataDir, "policy.json");
+  await savePolicyState(policyFile, { ...synced(1, OTHER_ORG), history: [synced(1, OTHER_ORG)] });
+
+  await hook({ hook_event_name: "SessionStart" });
+  await hook({ hook_event_name: "SessionStart" });
+  assert.equal((await loadPolicyState(policyFile)).version, 2);
+});
+
 test("local rules the user wrote stay when the connected org has no policy", async (t) => {
   const { hook, dataDir } = await orgWithoutPolicy(t);
   const policyFile = path.join(dataDir, "policy.json");

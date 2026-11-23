@@ -2631,7 +2631,7 @@ async function restoreAfterStandIn(config) {
   );
 }
 
-const SYNCED_FROM_SERVER = "dashboard-sync";
+const SYNCED_FROM_SERVER = new Set(["dashboard-sync", "monitor-restore"]);
 
 const ALLOW_ALL_POLICY = {
   schemaVersion: "armor.policy.v1",
@@ -2642,7 +2642,7 @@ const ALLOW_ALL_POLICY = {
 function serverOwned(history, policy) {
   const hash = canonicalPolicyHash(policy);
   const same = history.filter((e) => e?.policy && canonicalPolicyHash(e.policy) === hash);
-  return same.length > 0 && same.every((e) => e.updatedBy === SYNCED_FROM_SERVER);
+  return same.length > 0 && same.every((e) => SYNCED_FROM_SERVER.has(e.updatedBy));
 }
 
 async function dropServerPolicy(config) {
