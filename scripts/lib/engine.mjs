@@ -1809,27 +1809,25 @@ export async function handleSessionEnd(input, config) {
       } catch {
         intentToken = null;
       }
-      const result = await revokeViaSdk({
+      // Started, not awaited: Claude Code cancels a SessionEnd hook after about 1.5 s, and a revoke
+      // round trip to the backend can take that long. The daemon finishes it after replying.
+      revokeViaSdk({
         getClient: getSdkClient,
         config,
         intentToken,
         reason: "armorclaude:session-ended",
         cascade: false,
-      });
-      appendTrustOp(runtimeState, sessionId, {
-        operation: "Revoke",
-        trustId: result.trustId,
-        reason: "session ended",
-        ok: result.ok,
-      });
-      debugLog(
-        config,
-        `[trust] session-end revoke ${result.ok ? "ok" : "failed"} trustId=${result.trustId || "n/a"}`
-      );
+      })
+        .then((result) =>
+          debugLog(
+            config,
+            `[trust] session-end revoke ${result.ok ? "ok" : "failed"} trustId=${result.trustId || "n/a"}`
+          )
+        )
+        .catch(() => undefined);
     }
   }
 
-  // Remove the session entirely (after the trust op was logged + persisted)
   if (runtimeState.sessions && runtimeState.sessions[sessionId]) {
     delete runtimeState.sessions[sessionId];
   }

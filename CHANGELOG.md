@@ -4,6 +4,10 @@ Changes to the ArmorClaude plugin, newest first. A stable install picks up code 
 
 ## [Unreleased]
 
+## [0.2.23] - 2026-11-24
+
+- fix(session): exiting Claude Code right after a turn with tool calls no longer prints "SessionEnd hook ... failed: Hook cancelled". SessionEnd used to wait for the intent token revoke and the audit upload, and Stop for the audit upload, both round trips to the backend; Claude Code cancels a SessionEnd hook after about 1.5 s. Both now start and the daemon finishes them after replying; audit rows stay in the WAL until an upload succeeds (#521)
+
 ## [0.2.22] - 2026-11-19
 
 - feat(monitor): an org in Monitor, the default until an admin turns Enforce on, runs in the background: nothing is blocked or held and nothing shows in the session; each call writes one audit row with `would_be`, `would_be_code` and `would_be_reason` when Enforce would have stopped it, and a hold files no approval request. The mode comes from `enforcementMode` on the org policy pull; `ARMORIQ_ORG_MODE=enforce` forces Enforce on one machine (#493)
