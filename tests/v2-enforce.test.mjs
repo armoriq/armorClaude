@@ -146,6 +146,42 @@ test("a v2 hold stops the call, files one delegation request without an amount, 
   assert.equal(decisionOf(await hook(write)), "allow");
 });
 
+test("a spent approval is forgotten, so the same held call later files a new request", async (t) => {
+  const planId = randomUUID();
+  let approved = false;
+  let filed = 0;
+  const backend = await startBackend({
+    "GET /policy/bundles/current": () => [200, BUNDLE],
+    "POST /iap/sdk/token": () => tokenReply(planId),
+    "POST /iap/sdk/enforce": () => [
+      200,
+      approved
+        ? { allowed: true, enforcementAction: "allow", reason: "approved_delegation" }
+        : { allowed: false, enforcementAction: "hold", reason: "hold:Write#0" },
+    ],
+    "POST /delegation/request": () => [
+      201,
+      { delegationId: `deleg-${++filed}`, status: "pending" },
+    ],
+  });
+  const { hook } = await startHookSession(t, backend);
+  await hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
+  const write = {
+    hook_event_name: "PreToolUse",
+    tool_name: "Write",
+    tool_input: { file_path: "/workspace/secrets/a.txt", content: "hi" },
+  };
+
+  assert.match(reasonOf(await hook(write)), /Approval request deleg-1 is waiting/);
+  approved = true;
+  assert.equal(decisionOf(await hook(write)), "allow");
+  approved = false;
+  const again = await hook(write);
+  assert.equal(decisionOf(again), "deny", JSON.stringify(again));
+  assert.match(reasonOf(again), /Approval request deleg-2 is waiting/);
+  assert.equal(routed(backend, "POST /delegation/request").length, 2);
+});
+
 test("in Monitor a v2 hold runs the call and files no approval request, even with a plan on the session", async (t) => {
   const planId = randomUUID();
   const backend = await v2Backend(planId, {
