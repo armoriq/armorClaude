@@ -36,7 +36,7 @@ import {
   validateCsrgProofHeaders,
 } from "./intent.mjs";
 import { createIapService, reanchorViaSdk, revokeViaSdk } from "./iap-service.mjs";
-import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
+import { PolicyFileError, computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
 import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
@@ -617,7 +617,16 @@ async function startSession(input, config) {
     }
   }
 
-  const intentLabel = intentMode(config, (await loadPolicyState(config.policyFile)).policy);
+  const policyState = await loadPolicyState(config.policyFile).catch((error) =>
+    policyFileProblem(config, error)
+  );
+  if (policyState instanceof PolicyFileError) {
+    return {
+      systemMessage: policyState.message,
+      ...addPromptContext(policyState.message, "SessionStart"),
+    };
+  }
+  const intentLabel = intentMode(config, policyState.policy);
   const usageNote = usageSyncOffNotice(config);
   return {
     // systemMessage is what Claude Code prints to the person. Context alone
@@ -727,9 +736,19 @@ async function promptSubmit(input, config) {
   return null;
 }
 
+async function policyFileProblem(config, error) {
+  if (!(error instanceof PolicyFileError)) throw error;
+  const { appendDaemonLog } = await import("./daemon-log.mjs");
+  appendDaemonLog(config.dataDir, `[armorclaude] error: ${error.message}`);
+  return error;
+}
+
 export async function handlePreToolUse(input, config) {
   const ctx = {};
-  const output = await decidePreToolUse(input, config, ctx);
+  const output = await decidePreToolUse(input, config, ctx).catch(async (error) => {
+    const problem = await policyFileProblem(config, error);
+    return denyOrAllow(config, "policy_file_invalid", problem.message);
+  });
   const code = output?.[DECISION_CODE];
   const source = policySource(code, ctx);
   const decision = output?.hookSpecificOutput?.permissionDecision;
@@ -1655,8 +1674,11 @@ export async function handlePostToolUse(input, config) {
     } else {
       // Frictionless policies mint no token but must still audit, as an orphan
       // session-scoped row. In enforce mode never fabricate a token context.
-      const policyState = await loadPolicyState(config.policyFile);
-      if (!config.orgMonitor && !isFrictionlessAllowPolicy(policyState.policy)) return null;
+      if (
+        !config.orgMonitor &&
+        !isFrictionlessAllowPolicy((await loadPolicyState(config.policyFile)).policy)
+      )
+        return null;
       dto = {
         session_id: sessionId,
         user_id: config.userId,
