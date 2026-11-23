@@ -56,7 +56,7 @@ import {
   upsertSession,
 } from "./runtime-state.mjs";
 import { sha256Hex } from "./common.mjs";
-import { invokesPolicyAdmin, writesProtectedPath } from "./shell-guard.mjs";
+import { invokesPolicyAdmin, isProtectedPath, writesProtectedPath } from "./shell-guard.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { activeV2PolicyNames, decideV2, resolveV2Hold } from "./v2-decision.mjs";
@@ -927,26 +927,28 @@ async function decidePreToolUse(input, config, ctx = {}) {
   // --- Path guard: block write operations targeting policy/credential files.
   //     Read operations (cat, Read tool) are allowed --- only mutations blocked.
   const PROTECTED_PATHS = [
+    config.dataDir,
     config.policyFile,
-    path.join(config.dataDir, "policy-pending.json"),
-    path.join(config.dataDir, "crypto-policy-state.json"),
-    path.join(config.dataDir, "profiles"),
+    config.runtimeFile,
     path.join(homedir(), ".armoriq", "credentials.json"),
   ];
-  if (["write", "edit"].includes(norm)) {
-    const target = toolInput?.file_path || toolInput?.path || "";
+  const sessionCwd = typeof input.cwd === "string" && input.cwd ? input.cwd : null;
+  if (["write", "edit", "notebookedit"].includes(norm)) {
+    const target = toolInput?.file_path || toolInput?.notebook_path || toolInput?.path || "";
+    const resolved =
+      typeof target === "string" && target && (path.isAbsolute(target) || sessionCwd)
+        ? path.resolve(sessionCwd ?? "/", target)
+        : null;
     if (
       typeof target === "string" &&
-      PROTECTED_PATHS.some(
-        (p) =>
-          path.resolve(target) === path.resolve(p) ||
-          target.includes("armorclaude/policy") ||
-          target.includes("armorclaude/profiles")
-      )
+      target &&
+      ((resolved && isProtectedPath(resolved, PROTECTED_PATHS)) ||
+        target.includes("armorclaude/policy") ||
+        target.includes("armorclaude/profiles"))
     ) {
       return denyPreTool(
         "protected_policy_file",
-        "ArmorClaude: direct modification of policy files is blocked. Use /armorclaude:armor policy commands."
+        "ArmorClaude: direct modification of ArmorClaude policy, state or credential files is blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
@@ -958,11 +960,10 @@ async function decidePreToolUse(input, config, ctx = {}) {
         "ArmorClaude: policy management is human-only. Type /armorclaude:armor policy in the terminal."
       );
     }
-    const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
-    if (writesProtectedPath(cmd, cwd, PROTECTED_PATHS)) {
+    if (writesProtectedPath(cmd, sessionCwd, PROTECTED_PATHS)) {
       return denyPreTool(
         "protected_policy_file",
-        "ArmorClaude: shell write commands targeting policy files are blocked. Use /armorclaude:armor policy commands."
+        "ArmorClaude: shell commands that write, move or delete ArmorClaude policy, state or credential files are blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
