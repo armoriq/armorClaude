@@ -239,12 +239,22 @@ function callInputs(agent, call) {
     );
     base.member = { email: call.userEmail, ...(known && { membershipId: known.membershipId }) };
   }
-  const tools = agent?.tools ?? [];
-  const named = tools.filter((t) => t.name === call.tool || t.qualifiedName === call.tool);
-  const owned = call.mcpServer ? named.filter((t) => t.server === call.mcpServer) : [];
-  const known = owned.length ? owned : named;
+  if (call.mcpServer) base.qualifiedName = `mcp__${call.mcpServer}__${call.tool}`;
+  const known = candidateTools(agent?.tools ?? [], call);
   if (!known.length) return [base];
-  return known.map((t) => ({ ...base, schemaHash: t.schemaHash, capabilities: t.capabilities }));
+  return known.map((t) => ({
+    ...base,
+    schemaHash: t.schemaHash,
+    capabilities: t.capabilities,
+    ...(t.server && t.qualifiedName && { qualifiedName: t.qualifiedName }),
+  }));
+}
+
+function candidateTools(tools, call) {
+  const named = tools.filter((t) => t.name === call.tool || t.qualifiedName === call.tool);
+  if (!call.mcpServer) return named;
+  const owned = named.filter((t) => t.server === call.mcpServer);
+  return owned.length ? owned : named.filter((t) => !t.server);
 }
 
 function block(reason) {
