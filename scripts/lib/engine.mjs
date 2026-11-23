@@ -37,7 +37,7 @@ import {
   validateCsrgProofHeaders,
 } from "./intent.mjs";
 import { createIapService, reanchorViaSdk, revokeViaSdk } from "./iap-service.mjs";
-import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
+import { PolicyFileError, computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
 import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
@@ -59,7 +59,7 @@ import {
   upsertSession,
 } from "./runtime-state.mjs";
 import { sha256Hex } from "./common.mjs";
-import { invokesPolicyAdmin, writesProtectedPath } from "./shell-guard.mjs";
+import { invokesPolicyAdmin, isProtectedPath, writesProtectedPath } from "./shell-guard.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { activeV2PolicyNames, decideV2, resolveV2Hold } from "./v2-decision.mjs";
@@ -620,7 +620,16 @@ async function startSession(input, config) {
     }
   }
 
-  const intentLabel = intentMode(config, (await loadPolicyState(config.policyFile)).policy);
+  const policyState = await loadPolicyState(config.policyFile).catch((error) =>
+    policyFileProblem(config, error)
+  );
+  if (policyState instanceof PolicyFileError) {
+    return {
+      systemMessage: policyState.message,
+      ...addPromptContext(policyState.message, "SessionStart"),
+    };
+  }
+  const intentLabel = intentMode(config, policyState.policy);
   const usageNote = usageSyncOffNotice(config);
   return {
     // systemMessage is what Claude Code prints to the person. Context alone
@@ -730,9 +739,19 @@ async function promptSubmit(input, config) {
   return null;
 }
 
+async function policyFileProblem(config, error) {
+  if (!(error instanceof PolicyFileError)) throw error;
+  const { appendDaemonLog } = await import("./daemon-log.mjs");
+  appendDaemonLog(config.dataDir, `[armorclaude] error: ${error.message}`);
+  return error;
+}
+
 export async function handlePreToolUse(input, config) {
   const ctx = {};
-  const output = await decidePreToolUse(input, config, ctx);
+  const output = await decidePreToolUse(input, config, ctx).catch(async (error) => {
+    const problem = await policyFileProblem(config, error);
+    return denyOrAllow(config, "policy_file_invalid", problem.message);
+  });
   const code = output?.[DECISION_CODE];
   const source = policySource(code, ctx);
   const decision = output?.hookSpecificOutput?.permissionDecision;
@@ -923,26 +942,28 @@ async function decidePreToolUse(input, config, ctx = {}) {
   // --- Path guard: block write operations targeting policy/credential files.
   //     Read operations (cat, Read tool) are allowed --- only mutations blocked.
   const PROTECTED_PATHS = [
+    config.dataDir,
     config.policyFile,
-    path.join(config.dataDir, "policy-pending.json"),
-    path.join(config.dataDir, "crypto-policy-state.json"),
-    path.join(config.dataDir, "profiles"),
+    config.runtimeFile,
     path.join(homedir(), ".armoriq", "credentials.json"),
   ];
-  if (["write", "edit"].includes(norm)) {
-    const target = toolInput?.file_path || toolInput?.path || "";
+  const sessionCwd = typeof input.cwd === "string" && input.cwd ? input.cwd : null;
+  if (["write", "edit", "notebookedit"].includes(norm)) {
+    const target = toolInput?.file_path || toolInput?.notebook_path || toolInput?.path || "";
+    const resolved =
+      typeof target === "string" && target && (path.isAbsolute(target) || sessionCwd)
+        ? path.resolve(sessionCwd ?? "/", target)
+        : null;
     if (
       typeof target === "string" &&
-      PROTECTED_PATHS.some(
-        (p) =>
-          path.resolve(target) === path.resolve(p) ||
-          target.includes("armorclaude/policy") ||
-          target.includes("armorclaude/profiles")
-      )
+      target &&
+      ((resolved && isProtectedPath(resolved, PROTECTED_PATHS)) ||
+        target.includes("armorclaude/policy") ||
+        target.includes("armorclaude/profiles"))
     ) {
       return denyPreTool(
         "protected_policy_file",
-        "ArmorClaude: direct modification of policy files is blocked. Use /armorclaude:armor policy commands."
+        "ArmorClaude: direct modification of ArmorClaude policy, state or credential files is blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
@@ -954,11 +975,10 @@ async function decidePreToolUse(input, config, ctx = {}) {
         "ArmorClaude: policy management is human-only. Type /armorclaude:armor policy in the terminal."
       );
     }
-    const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
-    if (writesProtectedPath(cmd, cwd, PROTECTED_PATHS)) {
+    if (writesProtectedPath(cmd, sessionCwd, PROTECTED_PATHS)) {
       return denyPreTool(
         "protected_policy_file",
-        "ArmorClaude: shell write commands targeting policy files are blocked. Use /armorclaude:armor policy commands."
+        "ArmorClaude: shell commands that write, move or delete ArmorClaude policy, state or credential files are blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
@@ -1680,8 +1700,11 @@ export async function handlePostToolUse(input, config) {
     } else {
       // Frictionless policies mint no token but must still audit, as an orphan
       // session-scoped row. In enforce mode never fabricate a token context.
-      const policyState = await loadPolicyState(config.policyFile);
-      if (!config.orgMonitor && !isFrictionlessAllowPolicy(policyState.policy)) return null;
+      if (
+        !config.orgMonitor &&
+        !isFrictionlessAllowPolicy((await loadPolicyState(config.policyFile)).policy)
+      )
+        return null;
       dto = {
         session_id: sessionId,
         user_id: config.userId,
