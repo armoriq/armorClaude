@@ -403,6 +403,8 @@ test("SessionEnd invokes client.revoke when autoRevokeOnEnd is true", async () =
   await saveRuntimeState(config.runtimeFile, priorState);
 
   const calls = [];
+  let releaseRevoke;
+  const revokeAnswered = new Promise((resolve) => (releaseRevoke = resolve));
   const intentMod = await import("../scripts/lib/intent.mjs");
   // Pre-warm the SDK client cache by calling getSdkClient once and replacing
   // its revoke implementation. Since getSdkClient caches by a config-derived
@@ -411,12 +413,19 @@ test("SessionEnd invokes client.revoke when autoRevokeOnEnd is true", async () =
   const originalRevoke = client.revoke;
   client.revoke = async (token, reason) => {
     calls.push({ tokenId: token?.tokenId || token?.token_id, reason });
+    await revokeAnswered;
     return { trustId: "tr_e2e_revoke" };
   };
 
   try {
-    await handleSessionEnd({ hook_event_name: "SessionEnd", session_id: "sess-trust-4" }, config);
+    // regression: #521
+    const ended = handleSessionEnd({ hook_event_name: "SessionEnd", session_id: "sess-trust-4" }, config).then(() => "returned");
+    const hung = new Promise((resolve) => setTimeout(resolve, 5_000, "still waiting on the revoke").unref());
+    assert.equal(await Promise.race([ended, hung]), "returned");
+    const after = await loadRuntimeState(config.runtimeFile);
+    assert.equal(after.sessions?.["sess-trust-4"], undefined, "SessionEnd returns while the revoke is still in flight");
   } finally {
+    releaseRevoke();
     if (originalRevoke) client.revoke = originalRevoke;
     else delete client.revoke;
   }

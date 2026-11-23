@@ -94,7 +94,9 @@ function plugin(t) {
     });
   const stop = (backend, sessionId) =>
     hook(backend, { session_id: sessionId, hook_event_name: "Stop" });
-  return { dataDir, login, bash, stop };
+  const end = (backend, sessionId) =>
+    hook(backend, { session_id: sessionId, hook_event_name: "SessionEnd", reason: "prompt_input_exit" });
+  return { dataDir, login, bash, stop, end };
 }
 
 const owners = (backend) => backend.shipped.map(([key, row]) => [row.user_id, key]).sort();
@@ -178,4 +180,19 @@ test("the old shared WAL is deleted at start with a daemon.log line and never sh
   );
   assert.equal(existsSync(path.join(auditDir, "current.jsonl")), false);
   assert.match(readFileSync(daemonLogPath(dataDir), "utf8"), /deleted audit\/current\.jsonl/);
+});
+
+// regression: #521
+test("Stop and SessionEnd return before a slow upload lands, and the row still ships", async (t) => {
+  const slow = await startBackend(t, { delayMs: 3_000 });
+  const { login, bash, stop, end } = plugin(t);
+
+  login(slow, A);
+  await bash(slow, "session-exit");
+  await stop(slow, "session-exit");
+  await end(slow, "session-exit");
+  assert.equal(slow.shipped.length, 0);
+
+  await waitFor(() => slow.shipped.length === 1, 15_000, "the row after the slow upload");
+  assert.deepEqual(owners(slow), [[A.userId, A.apiKey]]);
 });

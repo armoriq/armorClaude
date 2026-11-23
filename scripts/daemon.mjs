@@ -244,13 +244,14 @@ async function dispatchHook(event, input, cfg) {
       return handlePostToolUseFailure(input, cfg);
     case "Stop": {
       const out = await handleStop(input, cfg);
-      // Flush audits on turn end so each turn's row count lands together.
-      await flushAudit("stop");
+      // Started, not awaited: SessionEnd waits on this session's lock, and Claude Code cancels a
+      // SessionEnd hook after about 1.5 s. Rows stay in the WAL until an upload succeeds.
+      flushAudit("stop").catch(() => undefined);
       return out;
     }
     case "SessionEnd": {
       const out = await handleSessionEnd(input, cfg);
-      await flushAudit("session_end");
+      flushAudit("session_end").catch(() => undefined);
       return out;
     }
     default:
