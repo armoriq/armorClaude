@@ -195,6 +195,10 @@ function exchange(sock, payload) {
   });
 }
 
+export class DaemonHandlerError extends Error {
+  name = "DaemonHandlerError";
+}
+
 // Throws if the daemon is unreachable; the caller falls back to in-process dispatch.
 export async function dispatchViaDaemon({ event, input, config }) {
   const socketPath = daemonSocketPath(config.dataDir);
@@ -217,6 +221,7 @@ export async function dispatchViaDaemon({ event, input, config }) {
         `[armorclaude] daemon dispatch event=${event} reqId=${reqId} connect=${tConnected - t0}ms total=${tDone - t0}ms\n`
       );
     }
+    if (typeof reply?.handlerError === "string") throw new DaemonHandlerError(reply.handlerError);
     if (reply?.error) throw new Error(`daemon error: ${reply.error}`);
     return reply?.output ?? null;
   } finally {
