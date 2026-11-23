@@ -95,7 +95,11 @@ function plugin(t) {
   const stop = (backend, sessionId) =>
     hook(backend, { session_id: sessionId, hook_event_name: "Stop" });
   const end = (backend, sessionId) =>
-    hook(backend, { session_id: sessionId, hook_event_name: "SessionEnd", reason: "prompt_input_exit" });
+    hook(backend, {
+      session_id: sessionId,
+      hook_event_name: "SessionEnd",
+      reason: "prompt_input_exit",
+    });
   return { dataDir, login, bash, stop, end };
 }
 
