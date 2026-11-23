@@ -117,8 +117,6 @@ function shouldDeny(config) {
   return config.mode === "enforce";
 }
 
-// An all-permit policy disables the intent gate entirely: no plan, no token,
-// no drift blocking. Any deny or require_approval statement keeps enforcement.
 function isFrictionlessAllowPolicy(policy) {
   try {
     const ir = normalizePolicyIr(policy);
@@ -141,7 +139,7 @@ async function captureNotice(config) {
     ? `ArmorIQ ${names.length > 1 ? "policies" : "policy"} ${names.map((n) => `"${n}"`).join(", ")}`
     : "Your organization's ArmorIQ policies";
   return (
-    `${recorded} ${which} still decide each call: a call may be blocked, or held until ` +
+    `${recorded} ${which} still ${names?.length === 1 ? "decides" : "decide"} each call: a call may be blocked, or held until ` +
     "another member approves it. Retry a held call with the same arguments after it is approved."
   );
 }
@@ -708,10 +706,13 @@ async function promptSubmit(input, config) {
   const mode = intentMode(config, policyState.policy);
   const parts = [];
   if (config.planningEnabled && mode !== "optional") {
+    const capture = mode === "capture";
     parts.push(
-      `ArmorClaude intent ${mode === "capture" ? "capture" : "enforcement"} is active. ` +
-        "Before using any tool, " +
-        "declare your plan in this exact JSON shape:\n\n" +
+      (capture
+        ? "ArmorClaude intent capture is active. Declare your plan in this exact JSON " +
+          "shape so your tool calls are recorded against it:\n\n"
+        : "ArmorClaude intent enforcement is active. Before using any tool, " +
+          "declare your plan in this exact JSON shape:\n\n") +
         INTENT_PLAN_FORMAT +
         "\n\n" +
         "How to submit:\n" +
@@ -720,12 +721,16 @@ async function promptSubmit(input, config) {
         "- Otherwise: call the register_intent_plan tool (provided by the " +
         "armorclaude-policy MCP server; it may appear namespaced, e.g. " +
         "mcp__armorclaude-policy__register_intent_plan) with the JSON as the " +
-        "argument BEFORE any other tool call.\n" +
+        (capture
+          ? "argument, as your first tool call.\n"
+          : "argument BEFORE any other tool call.\n") +
         "If that tool is not in your tool list, the ArmorClaude policy MCP " +
         "server is not connected: do not fabricate the call, and tell the " +
         "user to verify it with `claude mcp list` (expect armorclaude-policy " +
-        "Connected) before relying on enforcement.\n" +
-        (mode === "capture"
+        (capture
+          ? "Connected) so tool calls are recorded.\n"
+          : "Connected) before relying on enforcement.\n") +
+        (capture
           ? await captureNotice(config)
           : "Tool calls without a registered plan will be blocked.")
     );
@@ -1672,8 +1677,6 @@ export async function handlePostToolUse(input, config) {
         duration_ms: _computeToolDuration(input),
       };
     } else {
-      // Frictionless policies mint no token but must still audit, as an orphan
-      // session-scoped row. In enforce mode never fabricate a token context.
       if (
         !config.orgMonitor &&
         !isFrictionlessAllowPolicy((await loadPolicyState(config.policyFile)).policy)
