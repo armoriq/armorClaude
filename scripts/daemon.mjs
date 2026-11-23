@@ -128,20 +128,13 @@ const sessionLocks = new Map();
 function withSessionLock(sessionId, fn) {
   if (!sessionId) return fn(); // no lock needed if there's no session
   const prev = sessionLocks.get(sessionId) || Promise.resolve();
-  const next = prev
-    .then(() => fn())
-    .catch((err) => {
-      process.stderr.write(
-        `[armorclaude-daemon] session ${sessionId} handler failed: ${err?.message ?? err}\n`
-      );
-      return null;
-    });
+  const result = prev.then(() => fn());
+  const next = result.catch(() => null);
   sessionLocks.set(sessionId, next);
-  // Drop the lock entry once it settles so the map doesn't grow forever.
   next.finally(() => {
     if (sessionLocks.get(sessionId) === next) sessionLocks.delete(sessionId);
   });
-  return next;
+  return result;
 }
 
 const AUDIT_FLUSH_INTERVAL_MS = 5_000;
@@ -358,14 +351,25 @@ async function handleLine(rawLine, socket) {
       const sessionId = typeof input.session_id === "string" ? input.session_id : "";
       const effectiveConfig = effectiveConfigFor(msg.configEnv);
       trackLogin(effectiveConfig);
-      const output = await withSessionLock(sessionId, async () =>
-        sessionOutput(
-          event,
-          input,
-          effectiveConfig,
-          await dispatchHook(event, input, effectiveConfig)
-        )
-      );
+      let output;
+      try {
+        output = await withSessionLock(sessionId, async () =>
+          sessionOutput(
+            event,
+            input,
+            effectiveConfig,
+            await dispatchHook(event, input, effectiveConfig)
+          )
+        );
+      } catch (err) {
+        const message = err?.message ?? String(err);
+        appendDaemonLog(
+          config.dataDir,
+          `[armorclaude-daemon] ${event} handler failed session=${sessionId} at=${new Date().toISOString()}: ${err?.stack ?? message}`
+        );
+        socket.write(JSON.stringify({ reqId, handlerError: message }) + "\n");
+        return;
+      }
       await journalHook(event, input, output, effectiveConfig);
       socket.write(JSON.stringify({ reqId, output }) + "\n");
       syncUsageAfter(event, effectiveConfig, input);

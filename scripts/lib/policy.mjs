@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { isPlainObject } from "./common.mjs";
-import { readJson, writeJson } from "./fs-store.mjs";
+import { writeJson } from "./fs-store.mjs";
 import {
   POLICY_IR_VERSION,
   canonicalPolicyHash,
@@ -49,12 +50,36 @@ function normalizePolicy(policyLike) {
   return policy;
 }
 
+export class PolicyFileError extends Error {
+  name = "PolicyFileError";
+  constructor(policyFilePath, problem) {
+    super(
+      `ArmorClaude: the policy file ${policyFilePath} ${problem}. ` +
+        "Every tool call is blocked until it is fixed or removed."
+    );
+  }
+}
+
+async function readPolicyFile(policyFilePath) {
+  let raw;
+  try {
+    raw = await readFile(policyFilePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw new PolicyFileError(policyFilePath, `could not be read (${error?.code ?? error})`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new PolicyFileError(policyFilePath, `is not valid JSON (${error.message})`);
+  }
+  if (!isPlainObject(parsed))
+    throw new PolicyFileError(policyFilePath, "is not valid JSON (not an object)");
+  return parsed;
+}
+
 export async function loadPolicyState(policyFilePath) {
-  // New user / no policy yet → default to ALL-ALLOW so onboarding is frictionless
-  // (tools just work). Users tighten it via /armor or a template. This is a
-  // deliberate permissive default: ArmorClaude should never block someone who
-  // hasn't configured a policy. (Previously this was default-deny, which blocked
-  // every tool for a fresh install.)
   const initial = {
     version: 0,
     updatedAt: new Date().toISOString(),
@@ -65,8 +90,7 @@ export async function loadPolicyState(policyFilePath) {
     }),
     history: [],
   };
-  const raw = await readJson(policyFilePath, initial);
-  const state = isPlainObject(raw) ? raw : initial;
+  const state = (await readPolicyFile(policyFilePath)) ?? initial;
   return {
     version: Number.isFinite(state.version) ? state.version : 0,
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : new Date().toISOString(),

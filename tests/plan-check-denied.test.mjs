@@ -125,3 +125,94 @@ test("in monitor mode a denied tool runs and the would-be denial is logged", asy
   const log = readFileSync(path.join(dataDir, "daemon.log"), "utf8");
   assert.match(log, /monitor: ArmorIQ plan check denied Bash \(Bash: block:forbid-shell#0\)/);
 });
+
+async function registeredSession(t, { planCheck, policy = POLICY, env }) {
+  const backend = await startBackend();
+  const session = await startHookSession(t, backend, env);
+  await savePolicyState(path.join(session.dataDir, "policy.json"), { version: 1, policy });
+  const plan = {
+    goal: "read the docs",
+    steps: [
+      { action: "Read", mcp: "claude-code" },
+      { action: "WebFetch", mcp: "claude-code" },
+      { action: "Edit", mcp: "claude-code" },
+    ],
+  };
+  const planId = randomUUID();
+  const token = {
+    tokenId: "intent-ref",
+    planHash: "plan-hash",
+    planId,
+    signature: "sig",
+    issuedAt: 1,
+    expiresAt: 4_102_444_800,
+    policy: {},
+    compositeIdentity: "",
+    stepProofs: [],
+    totalSteps: plan.steps.length,
+    rawToken: { plan, plan_id: planId, token: {}, plan_hash: "plan-hash" },
+    planCheck,
+  };
+  await writeFile(
+    path.join(session.dataDir, `pending-plan.${session.sessionId}.json`),
+    JSON.stringify({
+      sessionId: session.sessionId,
+      plan,
+      tokenRaw: JSON.stringify(token),
+      allowedActions: ["read", "webfetch", "edit"],
+      expiresAt: 4_102_444_800,
+      policyHash: computePolicyHash(policy),
+      intentPolicyCompilerVersion: "sdk-csrg-policy-v1",
+      registeredAt: Date.now(),
+    })
+  );
+  const pre = (tool_name, tool_input) =>
+    session.hook({ hook_event_name: "PreToolUse", tool_name, tool_input });
+  return { ...session, pre };
+}
+
+const READ_DENIED = check(
+  true,
+  ["Read", "WebFetch"],
+  ["Read: block:no-reads#0", "WebFetch: block:no-fetch#0"]
+);
+
+test("in enforce mode a Read or WebFetch the plan check denies is denied, before and after the plan is consumed (#394)", async (t) => {
+  const { pre } = await registeredSession(t, { planCheck: READ_DENIED });
+  const first = await pre("Read", { file_path: "/tmp/a.txt" });
+  assert.equal(denied(first), true, JSON.stringify(first));
+  assert.match(reasonOf(first), /plan check denied Read \(Read: block:no-reads#0\)/);
+  const fetch = await pre("WebFetch", { url: "https://example.com", prompt: "x" });
+  assert.equal(denied(fetch), true, JSON.stringify(fetch));
+  assert.match(reasonOf(fetch), /plan check denied WebFetch/);
+  await pre("Edit", { file_path: "/tmp/a.txt", old_string: "a", new_string: "b" });
+  const later = await pre("Read", { file_path: "/tmp/a.txt" });
+  assert.equal(denied(later), true, JSON.stringify(later));
+  assert.match(reasonOf(later), /plan check denied Read/);
+  assert.equal(denied(await pre("Glob", { pattern: "*" })), false);
+});
+
+test("a read-only tool the plan check does not name still runs (#394)", async (t) => {
+  const { pre } = await registeredSession(t, {
+    planCheck: check(true, ["Bash"], ["Bash: block:forbid-shell#0"]),
+  });
+  assert.equal(denied(await pre("Read", { file_path: "/tmp/a.txt" })), false);
+  await pre("Edit", { file_path: "/tmp/a.txt", old_string: "a", new_string: "b" });
+  assert.equal(denied(await pre("Read", { file_path: "/tmp/a.txt" })), false);
+});
+
+test("under the All Allow template the plan check does not block read-only tools (#394)", async (t) => {
+  const { pre } = await registeredSession(t, { policy: ALLOW_ALL, planCheck: READ_DENIED });
+  assert.doesNotMatch(reasonOf(await pre("Read", { file_path: "/tmp/a.txt" })), /plan check/);
+});
+
+test("in monitor mode a Read the plan check denies runs and the would-be denial is logged (#394)", async (t) => {
+  const { pre, dataDir } = await registeredSession(t, {
+    env: { ARMORIQ_ENV: "staging" },
+    planCheck: READ_DENIED,
+  });
+  const output = await pre("Read", { file_path: "/tmp/a.txt" });
+  assert.equal(denied(output), false, JSON.stringify(output));
+  const log = readFileSync(path.join(dataDir, "daemon.log"), "utf8");
+  assert.match(log, /monitor: ArmorIQ plan check denied Read \(Read: block:no-reads#0\)/);
+});

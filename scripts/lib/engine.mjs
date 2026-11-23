@@ -30,13 +30,14 @@ import {
   getSdkClient,
   getSessionTokenUsedStepIndices,
   parseCsrgProofHeaders,
+  planCheckDenial,
   recordSessionTokenUsedStepIndices,
   requestIntent,
   resolveCsrgProofsFromToken,
   validateCsrgProofHeaders,
 } from "./intent.mjs";
 import { createIapService, reanchorViaSdk, revokeViaSdk } from "./iap-service.mjs";
-import { computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
+import { PolicyFileError, computePolicyHash, evaluatePolicy, loadPolicyState } from "./policy.mjs";
 import { normalizePolicyIr } from "./policy-ir.mjs";
 import { INTENT_PLAN_FORMAT, INTENT_PLAN_ZOD, normalizeIntentPlan } from "./intent-schema.mjs";
 import { extractPlanJsonBlock, parsePlanFile, resolvePlanFilePath } from "./planner.mjs";
@@ -50,13 +51,15 @@ import {
   appendTrustOp,
   getSession,
   loadRuntimeState,
+  planCheckFile,
   saveRuntimeState,
   setActiveSessionId,
+  tokenPlanCheck,
   upsertDiscoveredTool,
   upsertSession,
 } from "./runtime-state.mjs";
 import { sha256Hex } from "./common.mjs";
-import { invokesPolicyAdmin, writesProtectedPath } from "./shell-guard.mjs";
+import { invokesPolicyAdmin, isProtectedPath, writesProtectedPath } from "./shell-guard.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import { activeV2PolicyNames, decideV2, resolveV2Hold } from "./v2-decision.mjs";
@@ -117,8 +120,6 @@ function shouldDeny(config) {
   return config.mode === "enforce";
 }
 
-// An all-permit policy disables the intent gate entirely: no plan, no token,
-// no drift blocking. Any deny or require_approval statement keeps enforcement.
 function isFrictionlessAllowPolicy(policy) {
   try {
     const ir = normalizePolicyIr(policy);
@@ -141,7 +142,7 @@ async function captureNotice(config) {
     ? `ArmorIQ ${names.length > 1 ? "policies" : "policy"} ${names.map((n) => `"${n}"`).join(", ")}`
     : "Your organization's ArmorIQ policies";
   return (
-    `${recorded} ${which} still decide each call: a call may be blocked, or held until ` +
+    `${recorded} ${which} still ${names?.length === 1 ? "decides" : "decide"} each call: a call may be blocked, or held until ` +
     "another member approves it. Retry a held call with the same arguments after it is approved."
   );
 }
@@ -622,7 +623,16 @@ async function startSession(input, config) {
     }
   }
 
-  const intentLabel = intentMode(config, (await loadPolicyState(config.policyFile)).policy);
+  const policyState = await loadPolicyState(config.policyFile).catch((error) =>
+    policyFileProblem(config, error)
+  );
+  if (policyState instanceof PolicyFileError) {
+    return {
+      systemMessage: policyState.message,
+      ...addPromptContext(policyState.message, "SessionStart"),
+    };
+  }
+  const intentLabel = intentMode(config, policyState.policy);
   const usageNote = usageSyncOffNotice(config);
   return {
     // systemMessage is what Claude Code prints to the person. Context alone
@@ -704,10 +714,13 @@ async function promptSubmit(input, config) {
   const mode = intentMode(config, policyState.policy);
   const parts = [];
   if (config.planningEnabled && mode !== "optional") {
+    const capture = mode === "capture";
     parts.push(
-      `ArmorClaude intent ${mode === "capture" ? "capture" : "enforcement"} is active. ` +
-        "Before using any tool, " +
-        "declare your plan in this exact JSON shape:\n\n" +
+      (capture
+        ? "ArmorClaude intent capture is active. Declare your plan in this exact JSON " +
+          "shape so your tool calls are recorded against it:\n\n"
+        : "ArmorClaude intent enforcement is active. Before using any tool, " +
+          "declare your plan in this exact JSON shape:\n\n") +
         INTENT_PLAN_FORMAT +
         "\n\n" +
         "How to submit:\n" +
@@ -716,12 +729,16 @@ async function promptSubmit(input, config) {
         "- Otherwise: call the register_intent_plan tool (provided by the " +
         "armorclaude-policy MCP server; it may appear namespaced, e.g. " +
         "mcp__armorclaude-policy__register_intent_plan) with the JSON as the " +
-        "argument BEFORE any other tool call.\n" +
+        (capture
+          ? "argument, as your first tool call.\n"
+          : "argument BEFORE any other tool call.\n") +
         "If that tool is not in your tool list, the ArmorClaude policy MCP " +
         "server is not connected: do not fabricate the call, and tell the " +
         "user to verify it with `claude mcp list` (expect armorclaude-policy " +
-        "Connected) before relying on enforcement.\n" +
-        (mode === "capture"
+        (capture
+          ? "Connected) so tool calls are recorded.\n"
+          : "Connected) before relying on enforcement.\n") +
+        (capture
           ? await captureNotice(config)
           : "Tool calls without a registered plan will be blocked.")
     );
@@ -732,9 +749,19 @@ async function promptSubmit(input, config) {
   return null;
 }
 
+async function policyFileProblem(config, error) {
+  if (!(error instanceof PolicyFileError)) throw error;
+  const { appendDaemonLog } = await import("./daemon-log.mjs");
+  appendDaemonLog(config.dataDir, `[armorclaude] error: ${error.message}`);
+  return error;
+}
+
 export async function handlePreToolUse(input, config) {
   const ctx = {};
-  const output = await decidePreToolUse(input, config, ctx);
+  const output = await decidePreToolUse(input, config, ctx).catch(async (error) => {
+    const problem = await policyFileProblem(config, error);
+    return denyOrAllow(config, "policy_file_invalid", problem.message);
+  });
   const code = output?.[DECISION_CODE];
   const source = policySource(code, ctx);
   const decision = output?.hookSpecificOutput?.permissionDecision;
@@ -859,6 +886,23 @@ async function auditBlocked(input, config, code, source, v2) {
   }
 }
 
+async function sessionPlanCheck(config, sessionId) {
+  const file = planCheckFile(config.runtimeFile, sessionId);
+  if (!file) return null;
+  for (const pendingPath of [
+    path.join(config.dataDir, `pending-plan.${sessionId}.json`),
+    path.join(config.dataDir, "pending-plan.json"),
+  ]) {
+    const pending = await readJson(pendingPath, null);
+    if (pending && (pending.tokenRaw || pending.plan)) {
+      return pending.intentPolicyCompilerVersion === INTENT_POLICY_COMPILER_VERSION
+        ? tokenPlanCheck(pending.tokenRaw)
+        : null;
+    }
+  }
+  return readJson(file, null);
+}
+
 async function decidePreToolUse(input, config, ctx = {}) {
   // Record start timestamp BEFORE any deny/early-return so even denied calls
   // have timing data available for PostToolUse/PostToolUseFailure.
@@ -908,26 +952,28 @@ async function decidePreToolUse(input, config, ctx = {}) {
   // --- Path guard: block write operations targeting policy/credential files.
   //     Read operations (cat, Read tool) are allowed --- only mutations blocked.
   const PROTECTED_PATHS = [
+    config.dataDir,
     config.policyFile,
-    path.join(config.dataDir, "policy-pending.json"),
-    path.join(config.dataDir, "crypto-policy-state.json"),
-    path.join(config.dataDir, "profiles"),
+    config.runtimeFile,
     path.join(homedir(), ".armoriq", "credentials.json"),
   ];
-  if (["write", "edit"].includes(norm)) {
-    const target = toolInput?.file_path || toolInput?.path || "";
+  const sessionCwd = typeof input.cwd === "string" && input.cwd ? input.cwd : null;
+  if (["write", "edit", "notebookedit"].includes(norm)) {
+    const target = toolInput?.file_path || toolInput?.notebook_path || toolInput?.path || "";
+    const resolved =
+      typeof target === "string" && target && (path.isAbsolute(target) || sessionCwd)
+        ? path.resolve(sessionCwd ?? "/", target)
+        : null;
     if (
       typeof target === "string" &&
-      PROTECTED_PATHS.some(
-        (p) =>
-          path.resolve(target) === path.resolve(p) ||
-          target.includes("armorclaude/policy") ||
-          target.includes("armorclaude/profiles")
-      )
+      target &&
+      ((resolved && isProtectedPath(resolved, PROTECTED_PATHS)) ||
+        target.includes("armorclaude/policy") ||
+        target.includes("armorclaude/profiles"))
     ) {
       return denyPreTool(
         "protected_policy_file",
-        "ArmorClaude: direct modification of policy files is blocked. Use /armorclaude:armor policy commands."
+        "ArmorClaude: direct modification of ArmorClaude policy, state or credential files is blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
@@ -939,11 +985,10 @@ async function decidePreToolUse(input, config, ctx = {}) {
         "ArmorClaude: policy management is human-only. Type /armorclaude:armor policy in the terminal."
       );
     }
-    const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
-    if (writesProtectedPath(cmd, cwd, PROTECTED_PATHS)) {
+    if (writesProtectedPath(cmd, sessionCwd, PROTECTED_PATHS)) {
       return denyPreTool(
         "protected_policy_file",
-        "ArmorClaude: shell write commands targeting policy files are blocked. Use /armorclaude:armor policy commands."
+        "ArmorClaude: shell commands that write, move or delete ArmorClaude policy, state or credential files are blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
@@ -994,8 +1039,13 @@ async function decidePreToolUse(input, config, ctx = {}) {
     );
     ctx.v1 = safePolicyDecision;
     const safePolicyOutput = preToolPolicyOutput(safePolicyDecision, toolName);
-    if (safePolicyOutput) return safePolicyOutput;
-    return null;
+    const policyDecision = safePolicyOutput?.hookSpecificOutput?.permissionDecision;
+    if (policyDecision === "deny" || isFrictionlessAllowPolicy(safePolicyState.policy))
+      return safePolicyOutput;
+    const denial = planCheckDenial(await sessionPlanCheck(config, sessionId), toolName);
+    const blocked =
+      denial && (await tokenBlocked(config, { planCheckDenied: true, blockReason: denial }));
+    return blocked || safePolicyOutput;
   }
 
   // --- Load runtime state (reused for MCP gate, plan consumption, and rest of handler) ---
@@ -1658,10 +1708,11 @@ export async function handlePostToolUse(input, config) {
         duration_ms: _computeToolDuration(input),
       };
     } else {
-      // Frictionless policies mint no token but must still audit, as an orphan
-      // session-scoped row. In enforce mode never fabricate a token context.
-      const policyState = await loadPolicyState(config.policyFile);
-      if (!config.orgMonitor && !isFrictionlessAllowPolicy(policyState.policy)) return null;
+      if (
+        !config.orgMonitor &&
+        !isFrictionlessAllowPolicy((await loadPolicyState(config.policyFile)).policy)
+      )
+        return null;
       dto = {
         session_id: sessionId,
         user_id: config.userId,

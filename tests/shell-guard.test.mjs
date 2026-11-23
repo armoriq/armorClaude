@@ -1,5 +1,6 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import os from "node:os";
 import { loadConfig } from "../scripts/lib/config.mjs";
 import { handlePreToolUse, handleSessionStart } from "../scripts/lib/engine.mjs";
@@ -20,19 +21,15 @@ after(() => {
   process.env.HOME = savedHome;
 });
 
-async function decision(command) {
+async function toolDecision(tool_name, tool_input) {
   const out = await handlePreToolUse(
-    {
-      hook_event_name: "PreToolUse",
-      session_id: "guard",
-      tool_name: "Bash",
-      tool_input: { command },
-      cwd: workDir,
-    },
+    { hook_event_name: "PreToolUse", session_id: "guard", tool_name, tool_input, cwd: workDir },
     config
   );
   return out?.hookSpecificOutput?.permissionDecision ?? "allow";
 }
+
+const decision = (command) => toolDecision("Bash", { command });
 
 const data = () => config.dataDir;
 
@@ -46,6 +43,13 @@ const ALLOWED = [
   () => "ls ~/.armoriq 2>&1 | head",
   () => 'echo "a > b" && cat ~/.armoriq/credentials.json',
   () => "cp ~/.armoriq/credentials.json ./backup/",
+  () => "cp notes.txt ~/",
+  () => "mv notes.txt ~",
+  () => "rm -rf ~/projects/old node_modules",
+  () => "chmod 755 ~",
+  () => "cp ~/.armoriq/cred* /tmp/",
+  () => "rm -f ./build/*.o",
+  () => 'for f in *.log; do rm "$f"; done',
 ];
 
 const DENIED = [
@@ -78,7 +82,45 @@ const DENIED = [
   () => "echo x>~/.armoriq/credentials.json",
   () => "cd -P ~/.armoriq && rm credentials.json",
   () => "pushd ~/.armoriq && rm credentials.json",
+  () => "rm -rf ~/.armoriq",
+  () => "rm -rf /",
+  () => "cd / && rm -rf *",
+  () => "rm -rf ~/.armoriq/",
+  () => "rm -rf $HOME/.armoriq",
+  () => "cd ~ && rm -rf .armoriq",
+  () => "mv ~/.armoriq /tmp/x",
+  () => "chmod -R 777 ~/.armoriq",
+  () => `rm -rf ${data()}`,
+  () => `mv ${data()} /tmp/x`,
+  () => "rm -rf ~/.arm*",
+  () => "rm ~/.armoriq/*",
+  () => "mv ~/.armoriq/cred* /tmp/",
+  () => "cp /tmp/cred* ~/.armoriq/",
+  () => "cp /tmp/evil.json ~/.armoriq/cred*",
+  () => "f=credentials; rm ~/.armoriq/$f.json",
+  () => "rm ~/.armoriq/$(echo credentials).json",
+  () => `echo {} > ${data()}/runtime.json`,
+  () => `cp /tmp/forged.json ${data()}/runtime.json`,
+  () => `echo '{"mode":"shadow"}' > ${data()}/org-mode.json`,
 ];
+
+for (const [tool, input] of [
+  ["Write", () => ({ file_path: `${data()}/runtime.json`, content: "{}" })],
+  ["Edit", () => ({ file_path: `${data()}/runtime.json`, old_string: "a", new_string: "b" })],
+  ["Write", () => ({ file_path: `${data()}/org-mode.json`, content: '{"mode":"shadow"}' })],
+  ["Write", () => ({ file_path: `${data()}/pending-plan.guard.json`, content: "{}" })],
+]) {
+  test(`the guard denies ${tool} to ArmorClaude state (#84): ${input().file_path}`, async () => {
+    assert.equal(await toolDecision(tool, input()), "deny");
+  });
+}
+
+test("the guard lets Write through outside ArmorClaude state", async () => {
+  assert.equal(
+    await toolDecision("Write", { file_path: `${workDir}/runtime.json`, content: "{}" }),
+    "allow"
+  );
+});
 
 const ADMIN_ALLOWED = [
   "grep -n savePolicyState scripts/lib/policy.mjs",
@@ -128,4 +170,24 @@ test("the monitor banner says tool calls are not checked against a plan", async 
   const context = out.hookSpecificOutput.additionalContext;
   assert.match(context, /tool calls are not checked against a plan/);
   assert.doesNotMatch(context, /not blocked/);
+});
+
+test("without a session cwd, relative paths are not resolved against the daemon's own cwd", async () => {
+  const dataDir = realpathSync(config.dataDir);
+  const saved = process.cwd();
+  process.chdir(dataDir);
+  try {
+    for (const [tool_name, tool_input] of [
+      ["Write", { file_path: "notes.txt", content: "hi" }],
+      ["Bash", { command: "rm -f notes.txt" }],
+    ]) {
+      const out = await handlePreToolUse(
+        { hook_event_name: "PreToolUse", session_id: "guard", tool_name, tool_input },
+        { ...config, dataDir }
+      );
+      assert.notEqual(out?.hookSpecificOutput?.permissionDecision, "deny", tool_name);
+    }
+  } finally {
+    process.chdir(saved);
+  }
 });
