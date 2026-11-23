@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { rm } from "node:fs/promises";
+import path from "node:path";
 import { nowEpochSeconds } from "./common.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 
@@ -65,8 +68,49 @@ export function pruneSessions(runtimeState) {
   }
 }
 
+const SESSION_ID = /^[\w-]{1,128}$/;
+
+export const planCheckFile = (runtimeFilePath, sessionId) =>
+  SESSION_ID.test(sessionId ?? "")
+    ? path.join(path.dirname(runtimeFilePath), `plan-check.${sessionId}.json`)
+    : null;
+
+export function tokenPlanCheck(tokenRaw) {
+  try {
+    const planCheck = JSON.parse(tokenRaw)?.planCheck;
+    return Array.isArray(planCheck?.deniedTools) && planCheck.deniedTools.length
+      ? {
+          deniedTools: planCheck.deniedTools,
+          deniedReasons: Array.isArray(planCheck.deniedReasons) ? planCheck.deniedReasons : [],
+        }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function syncPlanChecks(runtimeFilePath, runtimeState, prunedIds) {
+  for (const sessionId of prunedIds) {
+    const file = planCheckFile(runtimeFilePath, sessionId);
+    if (file) await rm(file, { force: true });
+  }
+  for (const [sessionId, session] of Object.entries(runtimeState.sessions)) {
+    const token = typeof session.intentTokenRaw === "string" ? session.intentTokenRaw : "";
+    const synced = token ? createHash("sha256").update(token).digest("hex").slice(0, 16) : "";
+    const file = planCheckFile(runtimeFilePath, sessionId);
+    if (!file || (session.planCheckSynced ?? "") === synced) continue;
+    const planCheck = token ? tokenPlanCheck(token) : null;
+    if (planCheck) await writeJson(file, planCheck);
+    else await rm(file, { force: true });
+    session.planCheckSynced = synced;
+  }
+}
+
 export async function saveRuntimeState(runtimeFilePath, runtimeState) {
+  const before = Object.keys(runtimeState.sessions);
   pruneSessions(runtimeState);
+  const pruned = before.filter((id) => !Object.hasOwn(runtimeState.sessions, id));
+  await syncPlanChecks(runtimeFilePath, runtimeState, pruned);
   await writeJson(runtimeFilePath, runtimeState);
 }
 
