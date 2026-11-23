@@ -1,6 +1,6 @@
 import { loadConfig } from "./lib/config.mjs";
 import { denyPreTool } from "./lib/hook-output.mjs";
-import { dispatchViaDaemon } from "./lib/daemon-client.mjs";
+import { DaemonHandlerError, dispatchViaDaemon } from "./lib/daemon-client.mjs";
 import { appendDaemonLog } from "./lib/daemon-log.mjs";
 import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
 import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
@@ -55,10 +55,13 @@ async function dispatchInDaemon(event, input, config) {
     if (output) emitJson(output);
     return true;
   } catch (err) {
+    if (err instanceof DaemonHandlerError) throw err;
     logDaemonFallback(event, err, config);
     return false;
   }
 }
+
+let hookEvent = "";
 
 async function main() {
   const config = loadConfig();
@@ -77,6 +80,7 @@ async function main() {
     return;
   }
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
+  hookEvent = event;
   debugLog(config, `hook=${event}`);
   await trackUsageSession(event, input, config);
 
@@ -116,7 +120,10 @@ main().catch((error) => {
   if (debug) {
     process.stderr.write(`[armorclaude] error=${message}\n`);
   }
-  if (mode === "enforce") {
-    emitJson(denyPreTool("internal_error", `ArmorClaude internal error: ${message}`));
+  if (mode !== "enforce") return;
+  if (hookEvent && hookEvent !== "PreToolUse") {
+    emitJson({ systemMessage: `ArmorClaude internal error in ${hookEvent}: ${message}` });
+    return;
   }
+  emitJson(denyPreTool("internal_error", `ArmorClaude internal error: ${message}`));
 });
