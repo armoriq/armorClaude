@@ -445,6 +445,37 @@ test("in capture mode the prompt directive names the v2 policies that still bloc
   assert.doesNotMatch(directive, /blocks none/);
 });
 
+test("in capture mode the directive asks for the plan without enforcement wording", async (t) => {
+  const directive = await capturePrompt(
+    t,
+    slugBundle([entry("agent-1", "args-and-holds", POLICY_DOCUMENT, "agent")])
+  );
+  assert.match(directive, /ArmorClaude intent capture is active/);
+  assert.match(directive, /as your first tool call/);
+  assert.match(directive, /ArmorIQ policy "args-and-holds" still decides each call/);
+  assert.doesNotMatch(directive, /BEFORE any other tool call|relying on enforcement|enforcement/);
+});
+
+test("in enforcement mode the directive keeps the mandatory wording", async (t) => {
+  const backend = await v2Backend(randomUUID());
+  const { hook, dataDir } = await startHookSession(t, backend);
+  await savePolicyState(path.join(dataDir, "policy.json"), {
+    version: 1,
+    updatedBy: "user",
+    policy: {
+      schemaVersion: "armor.policy.v1",
+      defaults: { decision: "allow" },
+      statements: [{ id: "no-glob", effect: "forbid", action: { type: "tool", eq: "Glob" } }],
+    },
+  });
+  const prompt = await hook({ hook_event_name: "UserPromptSubmit", prompt: "write hello.txt" });
+  const directive = prompt?.hookSpecificOutput?.additionalContext ?? "";
+  assert.match(directive, /ArmorClaude intent enforcement is active. Before using any tool/);
+  assert.match(directive, /BEFORE any other tool call/);
+  assert.match(directive, /before relying on enforcement/);
+  assert.match(directive, /Tool calls without a registered plan will be blocked/);
+});
+
 test("in capture mode with no active v2 policy the directive says nothing is blocked", async (t) => {
   const directive = await capturePrompt(t, { orgId: "org-test", agents: [] });
   assert.match(directive, /The current policy blocks none of them/);
