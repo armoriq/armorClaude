@@ -108,6 +108,17 @@ test("an org in Monitor with notes runs every call and tells the user what Enfor
   );
 });
 
+// regression: #13
+test("an org in Monitor still blocks writes to ArmorClaude's own state", async (t) => {
+  const { hook, dataDir } = await orgSession(t, { enforcementMode: "shadow" });
+  const out = await hook({
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command: `rm ${path.join(dataDir, "org-mode.json")}` },
+  });
+  assert.equal(out?.hookSpecificOutput?.permissionDecision, "deny", JSON.stringify(out));
+});
+
 test("an org that says Enforce blocks the call", async (t) => {
   const { hook } = await orgSession(t, { enforcementMode: "enforce" });
   const out = await hook({
