@@ -90,6 +90,20 @@ export async function waitFor(predicate, ms, what) {
   }
 }
 
+export async function withTimeout(promise, what, ms = 10_000) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function startBackend(routes = {}) {
   const requests = [];
   const auditRows = [];
@@ -112,6 +126,7 @@ export async function startBackend(routes = {}) {
         const request = requests.at(-1);
         if (request.route === waiter.route && waiter.matches(request.body)) {
           waiters.delete(waiter);
+          clearTimeout(waiter.timer);
           waiter.resolve(request.body);
         }
       }
@@ -131,19 +146,37 @@ export async function startBackend(routes = {}) {
       res.end(JSON.stringify(reply));
     });
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await withTimeout(
+    new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    }),
+    "test backend listen"
+  );
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     requests,
     auditRows,
-    waitForRequest: (route, matches = () => true) => {
+    waitForRequest: (route, matches = () => true, what = "matching request", ms = 10_000) => {
       const received = requests.find((request) => request.route === route && matches(request.body));
       return received
         ? Promise.resolve(received.body)
-        : new Promise((resolve) => waiters.add({ route, matches, resolve }));
+        : new Promise((resolve, reject) => {
+            const waiter = { route, matches, resolve, reject };
+            waiter.timer = setTimeout(() => {
+              waiters.delete(waiter);
+              reject(new Error(`timed out waiting for ${route}: ${what}`));
+            }, ms);
+            waiters.add(waiter);
+          });
     },
     close: () =>
       new Promise((resolve) => {
+        for (const waiter of waiters) {
+          clearTimeout(waiter.timer);
+          waiter.reject(new Error(`backend closed waiting for ${waiter.route}`));
+        }
+        waiters.clear();
         server.closeAllConnections();
         server.close(resolve);
       }),
@@ -187,9 +220,14 @@ async function startClaudeParent(t, env) {
   const request = (type, params = {}) =>
     new Promise((resolve, reject) => {
       const id = ++nextId;
-      pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`timed out waiting for Claude test parent: ${type}`));
+      }, 10_000);
+      pending.set(id, { resolve, reject, timer });
       parent.send({ id, type, ...params }, (error) => {
         if (!error) return;
+        clearTimeout(timer);
         pending.delete(id);
         reject(error);
       });
@@ -205,12 +243,16 @@ async function startClaudeParent(t, env) {
     if (type === "mcp-close") return transport.onclose?.();
     const waiter = pending.get(id);
     if (!waiter) return;
+    clearTimeout(waiter.timer);
     pending.delete(id);
     if (error) waiter.reject(new Error(error));
     else waiter.resolve(result);
   });
   const fail = (error) => {
-    for (const waiter of pending.values()) waiter.reject(error);
+    for (const waiter of pending.values()) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
     pending.clear();
     transport.onclose?.();
   };
@@ -226,7 +268,11 @@ async function startClaudeParent(t, env) {
       if (client) await client.close();
     } finally {
       if (parent.connected) parent.disconnect();
-      await exited;
+      try {
+        await withTimeout(exited, "Claude test parent exit");
+      } finally {
+        if (parent.exitCode === null && parent.signalCode === null) parent.kill("SIGKILL");
+      }
     }
   });
   return {
@@ -279,7 +325,7 @@ export async function startHookSession(t, backend, extraEnv = {}) {
     await exited;
     await backend.close();
   });
-  await ready;
+  await withTimeout(ready, "daemon readiness");
   const sessionId = randomUUID();
   const parent = await startClaudeParent(t, env);
   hookParents.set(env, parent);
@@ -291,7 +337,7 @@ export async function startHookSession(t, backend, extraEnv = {}) {
     hook,
     shutdown: async () => {
       if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill("SIGTERM");
-      await exited;
+      await withTimeout(exited, "daemon shutdown");
     },
   };
 }

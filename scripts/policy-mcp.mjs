@@ -278,16 +278,9 @@ async function run() {
       }
       const config = loadConfig();
       const updatedPlan = normalizeIntentPlan(parsed.data);
-      let runtimeState;
-      let sessionId;
-      let intentToken;
-      try {
-        runtimeState = await loadRuntimeState(config.runtimeFile);
-        sessionId = resolveProcessSession(runtimeState);
-        intentToken = parseToken(runtimeState.sessions[sessionId]?.intentTokenRaw);
-      } catch {
-        if (config.runReportingEnabled) await reportRunCaptureFailure(config);
-      }
+      const runtimeState = await loadRuntimeState(config.runtimeFile);
+      const sessionId = resolveProcessSession(runtimeState);
+      const intentToken = parseToken(runtimeState.sessions[sessionId]?.intentTokenRaw);
       const registration = await registerIntentPlan(config, updatedPlan, {
         reloadConfig: loadConfig,
         forceRevision: true,

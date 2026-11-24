@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import {
   appendFile,
   mkdir,
@@ -46,6 +48,7 @@ import {
   startBackend,
   startHookSession,
   startPolicyMcp,
+  withTimeout,
 } from "./helpers/hook-session.mjs";
 
 const fixture = JSON.parse(await readFile(new URL("./fixtures/runs-v1.json", import.meta.url)));
@@ -134,6 +137,36 @@ test("prompt start persists its identity and first report before any tool", asyn
   ]);
   await s.prompt();
   assert.equal((await s.run(id)).reports.length, 1);
+});
+
+// regression: #0013
+test("a crash while publishing a prompt leaves its durable run recoverable", async (t) => {
+  const s = await session(t);
+  const rename = fsPromises.rename;
+  let publishedRun;
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const fault = t.mock.method(fsPromises, "rename", async (from, to) => {
+    if (to === s.config.runtimeFile) {
+      const pending = JSON.parse(await readFile(from, "utf8"));
+      const id = pending.sessions[s.sessionId].promptId;
+      if (id) {
+        publishedRun = (await loadRunState(s.config)).runs[id];
+        throw new Error("simulated crash before prompt publication");
+      }
+    }
+    return rename(from, to);
+  });
+  syncBuiltinESMExports();
+  await assert.rejects(s.prompt(), /simulated crash/);
+  fault.mock.restore();
+  syncBuiltinESMExports();
+  assert.ok(publishedRun, "the run must be durable before publishing its prompt");
+  assert.equal((await s.state()).sessions[s.sessionId].promptId, null);
+  await handleSessionStart({ session_id: s.sessionId }, s.config);
+  assert.equal((await s.run(publishedRun.run_id)).reports.at(-1).end_reason, "recovered");
 });
 
 // regression: #0013
@@ -252,6 +285,106 @@ test("counted tools append durable receipts without rewriting the growing runs s
   assert.equal((await stat(runStateFile(s.config))).ino, inode);
   await s.stop();
   assert.equal((await s.run(id)).reports.at(-1).tool_calls, 2001);
+});
+
+// regression: #0013
+test("large run journals are retained off the append path and idle handoff parses nothing", async (t) => {
+  const s = await session(t);
+  const id = await s.prompt();
+  const journal = `${runStateFile(s.config)}.tools.jsonl`;
+  const lines = Array.from(
+    { length: 100_000 },
+    (_, n) => JSON.stringify({ runId: id, id: `old-${n % 100}`, gated: false }) + "\n"
+  ).join("");
+  await writeFile(journal, lines);
+  const rename = fsPromises.rename;
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const fault = t.mock.method(fsPromises, "rename", (from, to) => {
+    if (from === journal && to.startsWith(journal + ".archive."))
+      throw new Error("simulated crash after the run snapshot commit");
+    return rename(from, to);
+  });
+  syncBuiltinESMExports();
+  await recordRunTool({ tool_name: "Read", tool_use_id: "old-0" }, s.config, id);
+  fault.mock.restore();
+  syncBuiltinESMExports();
+  assert.equal(JSON.parse(await readFile(runStateFile(s.config), "utf8")).runs[id].tool_calls, 100);
+  const parse = JSON.parse;
+  let parsedReceipts = 0;
+  t.mock.method(JSON, "parse", (...args) => {
+    const value = parse(...args);
+    if (value?.runId || value?.runs) parsedReceipts++;
+    return value;
+  });
+  await recordRunTool({ tool_name: "Read", tool_use_id: "first" }, s.config, id);
+  for (let n = 0; n < 12; n++)
+    await recordRunTool({ tool_name: "Read", tool_use_id: `new-${n}` }, s.config, id);
+  assert.ok(parsedReceipts <= 24, `reparsed ${parsedReceipts} run records`);
+  assert.ok((await stat(journal)).size < 65_536);
+  assert.equal((await s.run(id)).tool_calls, 113);
+  await flushRunReports(s.config);
+  parsedReceipts = 0;
+  await flushRunReports(s.config);
+  await flushRunReports(s.config);
+  assert.equal(parsedReceipts, 0, "idle handoff must reuse unchanged run state");
+  const archives = (await readdir(s.config.dataDir)).filter((name) =>
+    name.startsWith(path.basename(journal) + ".archive.")
+  );
+  assert.ok(archives.length > 0);
+  assert.ok(
+    (
+      await Promise.all(archives.map((name) => readFile(path.join(s.config.dataDir, name), "utf8")))
+    ).some((text) => text.startsWith(lines)),
+    "every folded receipt must remain in an archive"
+  );
+});
+
+// regression: #0013
+test("corrupt run snapshots and journal lines are kept and reported once before capture resumes", async (t) => {
+  for (const damage of ["snapshot", "journal"]) {
+    // regression: #0013
+    await t.test(damage, async (t) => {
+      const s = await session(t);
+      const first = await s.prompt();
+      const file =
+        damage === "snapshot" ? runStateFile(s.config) : `${runStateFile(s.config)}.tools.jsonl`;
+      const damaged =
+        damage === "snapshot"
+          ? "{broken"
+          : [
+              JSON.stringify({ runId: first, id: "before-corruption", gated: false }),
+              '{"broken":',
+              JSON.stringify({ runId: first, id: "after-corruption", gated: true }),
+              "",
+            ].join("\n");
+      await writeFile(file, damaged);
+      await flushRunReports(s.config);
+      await flushRunReports(s.config);
+      if (damage === "journal") assert.equal((await s.run(first)).tool_calls, 2);
+      const failures = await readFile(
+        path.join(s.config.dataDir, "audit-capture-failures.jsonl"),
+        "utf8"
+      );
+      assert.equal(failures.trim().split("\n").length, 1);
+      const archived = (await readdir(s.config.dataDir)).filter((name) =>
+        name.startsWith(path.basename(file) + ".corrupt.")
+      );
+      assert.equal(archived.length, 1);
+      assert.equal(await readFile(path.join(s.config.dataDir, archived[0]), "utf8"), damaged);
+      const next = await s.prompt("capture after corruption");
+      assert.notEqual(next, first);
+      await s.tool("Read");
+      await s.stop();
+      assert.equal((await s.run(next)).reports.at(-1).tool_calls, 1);
+      assert.equal(
+        await readFile(path.join(s.config.dataDir, "audit-capture-failures.jsonl"), "utf8"),
+        failures
+      );
+    });
+  }
 });
 
 // regression: #0013
@@ -616,10 +749,10 @@ test("a pending logical registration settles before finalization without changin
   const planId = randomUUID();
   t.mock.method(getSdkClient(s.config), "getIntentToken", async () => {
     entered.resolve();
-    return reply.promise;
+    return withTimeout(reply.promise, "logical registration response");
   });
   const registration = registerIntentPlan(s.config, plan);
-  await entered.promise;
+  await withTimeout(entered.promise, "logical registration request");
   const conflict = await registerIntentPlan(s.config, {
     ...plan,
     metadata: { ...plan.metadata, goal: "another plan" },
@@ -747,6 +880,57 @@ test("MCP validation failures record local rejection for registration and reanch
   );
 });
 
+// regression: #0013
+test("reanchor reports a failed session read with reporting on or off", async (t) => {
+  for (const enabled of [true, false]) {
+    // regression: #0013
+    await t.test(String(enabled), async (t) => {
+      const s = await session(t, { runReportingEnabled: enabled });
+      await s.prompt();
+      const home = await mkdtemp(path.join(os.tmpdir(), "aq-reanchor-read-"));
+      t.after(() => rm(home, { recursive: true, force: true }));
+      const preload = path.join(home, "read-failure.mjs");
+      await writeFile(
+        preload,
+        `
+        import fs from "node:fs/promises";
+        import { syncBuiltinESMExports } from "node:module";
+        const read = fs.readFile;
+        let failed = false;
+        fs.readFile = async (file, ...args) => {
+          if (file === ${JSON.stringify(s.config.runtimeFile)} && !failed) {
+            failed = true;
+            throw Object.assign(new Error("reanchor session read failed"), { code: "EACCES" });
+          }
+          return read(file, ...args);
+        };
+        syncBuiltinESMExports();
+      `
+      );
+      const client = await startPolicyMcp(
+        t,
+        {
+          PATH: process.env.PATH,
+          HOME: home,
+          CLAUDE_PLUGIN_DATA: s.config.dataDir,
+          ARMORIQ_RUN_REPORTING_ENABLED: String(enabled),
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import ${JSON.stringify(preload)}`,
+        },
+        s.sessionId
+      );
+      const reply = await client.callTool({
+        name: "trust_reanchor",
+        arguments: { updatedPlan: { goal: "revised notes", steps: [{ action: "Write" }] } },
+      });
+      assert.equal(reply.isError, true);
+      assert.match(reply.content[0].text, /reanchor session read failed/);
+      await assert.rejects(readFile(path.join(s.config.dataDir, "audit-capture-failures.jsonl")), {
+        code: "ENOENT",
+      });
+    });
+  }
+});
+
 test("the rollout switch and logged out prompts cannot enqueue reports, while monitor prompts can", async (t) => {
   const { flushRunReports } = await import("../scripts/lib/runs.mjs");
   for (const patch of [
@@ -854,10 +1038,15 @@ test("daemon sends the start at prompt submission and final at Stop under the or
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.stderr.on("data", (chunk) => (output += chunk));
-    const code = await new Promise((resolve, reject) => {
-      child.on("error", reject);
-      child.on("exit", resolve);
-    });
+    t.after(() => child.kill("SIGKILL"));
+    const code = await withTimeout(
+      new Promise((resolve, reject) => {
+        child.on("error", reject);
+        child.on("exit", resolve);
+      }),
+      "run reporting child process",
+      30_000
+    );
     assert.equal(code, 0, output);
     return;
   }
@@ -877,7 +1066,7 @@ test("daemon sends the start at prompt submission and final at Stop under the or
       }
       if (reports.length === 1) {
         entered.resolve();
-        await release.promise;
+        await withTimeout(release.promise, "release of the start report request");
       }
       return [
         200,
@@ -893,7 +1082,7 @@ test("daemon sends the start at prompt submission and final at Stop under the or
   });
   const s = await startHookSession(t, backend, { ARMORIQ_RUN_REPORTING_ENABLED: "true" });
   const prompt = s.hook({ hook_event_name: "UserPromptSubmit", prompt: "hello" });
-  await entered.promise;
+  await withTimeout(entered.promise, "start report request");
   await prompt;
   assert.equal(reports.length, 1);
   assert.equal(reports[0].report_seq, 1);
@@ -907,8 +1096,11 @@ test("daemon sends the start at prompt submission and final at Stop under the or
   );
   release.resolve();
   await s.hook({ hook_event_name: "Stop" });
-  await backend.waitForRequest("POST /iap/runs/batch", (body) =>
-    body.reports.some((report) => report.run_id === reports[0].run_id && report.report_seq === 2)
+  await backend.waitForRequest(
+    "POST /iap/runs/batch",
+    (body) =>
+      body.reports.some((report) => report.run_id === reports[0].run_id && report.report_seq === 2),
+    "final report at Stop"
   );
   assert.equal(reports.length, 2);
   assert.equal(reports[1].end_reason, "stop");
@@ -923,8 +1115,10 @@ test("daemon sends the start at prompt submission and final at Stop under the or
     tool_input: {},
   });
   await s.hook({ hook_event_name: "Stop" });
-  await backend.waitForRequest("POST /iap/runs/batch", (body) =>
-    body.reports.some((report) => report.no_plan_reason === "plan_rejected")
+  await backend.waitForRequest(
+    "POST /iap/runs/batch",
+    (body) => body.reports.some((report) => report.no_plan_reason === "plan_rejected"),
+    "final report after plan rejection"
   );
   assert.equal(reports.at(-1).no_plan_reason, "plan_rejected");
   loggingOut = true;
@@ -932,25 +1126,44 @@ test("daemon sends the start at prompt submission and final at Stop under the or
   const originalId = (await loadRuntimeState(path.join(s.dataDir, "runtime.json"))).sessions[
     s.sessionId
   ].promptId;
-  assert.equal(await logoutStart.promise, originalId);
+  assert.equal(
+    await withTimeout(logoutStart.promise, "start report before changing login"),
+    originalId
+  );
   writeLoginProfiles(s.env.HOME, [
     { backend: backend.url, apiKey: "ak_test_otherlogin000000000000000000" },
   ]);
   await s.hook({ hook_event_name: "Stop" });
+  await s.shutdown();
   assert.equal(reports.filter(({ run_id }) => run_id === originalId).length, 1);
   const { runsStatus } = await import("../scripts/lib/audit-wal.mjs");
   const status = await withHome(s.env.HOME, () => runsStatus(s.dataDir));
   assert.equal(status.pending, 1);
   writeLoginProfiles(s.env.HOME, [{ backend: backend.url, apiKey: API_KEY }]);
-  await s.hook({ hook_event_name: "Stop" });
-  await s.shutdown();
+  const resumed = await startHookSession(t, backend, {
+    ARMORIQ_RUN_REPORTING_ENABLED: "true",
+    CLAUDE_PLUGIN_DATA: s.dataDir,
+  });
+  await resumed.hook({ hook_event_name: "SessionStart" });
+  await backend.waitForRequest(
+    "POST /iap/runs/batch",
+    (body) =>
+      body.reports.some(({ run_id, report_seq }) => run_id === originalId && report_seq === 2),
+    "final report after restoring its original login"
+  );
+  await resumed.shutdown();
   const originalReports = reports.filter(({ run_id }) => run_id === originalId);
   assert.deepEqual(
     originalReports.map(({ report_seq }) => report_seq),
     [1, 2]
   );
   assert.equal(originalReports[1].end_reason, "stop");
-  assert.equal((await withHome(s.env.HOME, () => runsStatus(s.dataDir))).pending, 0);
+  for (const request of backend.requests.filter(
+    ({ route, body }) =>
+      route === "POST /iap/runs/batch" && body.reports.some(({ run_id }) => run_id === originalId)
+  ))
+    assert.equal(request.headers["x-api-key"], API_KEY);
+  assert.equal((await withHome(resumed.env.HOME, () => runsStatus(s.dataDir))).pending, 0);
 });
 
 // regression: #0013
@@ -980,8 +1193,10 @@ test("the daemon preserves a denied tool and its audit row when the run file is 
   });
   assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
   await s.hook({ hook_event_name: "Stop" });
-  const captured = await backend.waitForRequest("POST /iap/audit/batch", (body) =>
-    body.rows.some((row) => row.tool === "Write")
+  const captured = await backend.waitForRequest(
+    "POST /iap/audit/batch",
+    (body) => body.rows.some((row) => row.tool === "Write"),
+    "denied Write audit row"
   );
   const row = captured.rows.find((row) => row.tool === "Write");
   assert.equal(row.status, "blocked");
@@ -1002,7 +1217,7 @@ test("Stop and SessionEnd release the daemon session lock while delivery is stal
       const backend = await startBackend({
         "POST /iap/runs/batch": async (body, request) => {
           entered.resolve(request.socket);
-          await release.promise;
+          await withTimeout(release.promise, "release of stalled run delivery");
           return [
             200,
             {
@@ -1017,7 +1232,7 @@ test("Stop and SessionEnd release the daemon session lock while delivery is stal
       });
       const s = await startHookSession(t, backend, { ARMORIQ_RUN_REPORTING_ENABLED: "true" });
       await s.hook({ hook_event_name: "UserPromptSubmit", prompt: "first" });
-      const socket = await entered.promise;
+      const socket = await withTimeout(entered.promise, "stalled run delivery request");
       await s.hook({ hook_event_name });
       assert.equal(socket.destroyed, false, "the hook waited until the delivery request timed out");
       await s.hook({ hook_event_name: "UserPromptSubmit", prompt: "second" });
