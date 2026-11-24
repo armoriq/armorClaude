@@ -3,3 +3,4 @@ dist
 *.md
 tests/fixtures/block-capture-v1.json
 tests/fixtures/client-events-v1.json
+tests/fixtures/runs-v1.json
