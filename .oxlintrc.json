@@ -27,6 +27,14 @@
     "TextEncoder": "readonly"
   },
   "ignorePatterns": ["node_modules/", "dist/"],
+  "overrides": [
+    {
+      "files": ["tests/helpers/outbox-conformance.template.mjs"],
+      "rules": {
+        "no-unsafe-finally": "off"
+      }
+    }
+  ],
   "rules": {
     "constructor-super": "error",
     "for-direction": "error",
