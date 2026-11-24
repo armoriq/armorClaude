@@ -5,13 +5,16 @@ import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { daemonLogPath } from "../scripts/lib/daemon-log.mjs";
-import { savePolicyState } from "../scripts/lib/policy.mjs";
 import {
   startBackend,
   startHookSession,
   startPolicyMcp,
   waitFor,
 } from "./helpers/hook-session.mjs";
+import { captureSession } from "./helpers/audit-capture.mjs";
+import { handlePreToolUse } from "../scripts/lib/engine.mjs";
+import { computePolicyHash, loadPolicyState, savePolicyState } from "../scripts/lib/policy.mjs";
+import { retirePlan, updateRuntimeState } from "../scripts/lib/runtime-state.mjs";
 
 const POLICY_DOCUMENT = JSON.parse(
   readFileSync(new URL("./fixtures/v2-agent-policy.json", import.meta.url), "utf8")
@@ -474,10 +477,11 @@ test("a hold read from the product-slug bundle is enforced as the agent the inte
   const { env, sessionId, hook } = await startHookSession(t, backend);
   await hook({ hook_event_name: "UserPromptSubmit", prompt: "write notes" });
   const client = await startPolicyMcp(t, env, sessionId);
-  await client.callTool({
+  const result = await client.callTool({
     name: "register_intent_plan",
     arguments: { goal: "write notes", steps: [{ action: "Bash" }, { action: "Write" }] },
   });
+  assert.notEqual(result.isError, true, result.content[0].text);
   await bash(hook, "ls");
 
   const held = await hook(heldWrite);
@@ -551,3 +555,86 @@ test("in capture mode with no active v2 policy the directive says nothing is blo
   const directive = await capturePrompt(t, { orgId: "org-test", agents: [] });
   assert.match(directive, /The current policy blocks none of them/);
 });
+
+for (const [acknowledged, httpError, retired] of [
+  [false, false],
+  [true, false],
+  [true, true],
+  [true, false, true],
+]) {
+  // regression: #0010
+  test(`enforce ownership ${acknowledged ? "with" : "without"} audit_id${httpError ? " on HTTP error" : ""}${retired ? " after plan retirement" : ""} carries action and prompt headers`, async (t) => {
+    const s = await captureSession(t);
+    const planId = s.state.tokenPlanId;
+    s.state.plan = { goal: "write notes", steps: [{ action: "Write" }] };
+    s.state.intentTokenRaw = JSON.stringify({
+      planId,
+      jwtToken: "jwt-test",
+      rawToken: { plan: s.state.plan },
+    });
+    s.state.intentPolicyCompilerVersion = "sdk-csrg-policy-v1";
+    s.state.policyHash = computePolicyHash((await loadPolicyState(s.config.policyFile)).policy);
+    await s.save();
+    const requests = [];
+    let held = true;
+    t.mock.method(globalThis, "fetch", async (url, init) => {
+      if (String(url).includes("/policy/bundles/current"))
+        return new Response(JSON.stringify(BUNDLE));
+      requests.push({ url: String(url), ...init });
+      if (String(url).endsWith("/iap/sdk/enforce")) {
+        if (retired)
+          await updateRuntimeState(s.config.runtimeFile, (state) => {
+            state.sessions["session-1"].promptGeneration += 1;
+            retirePlan(state.sessions["session-1"]);
+          });
+        return new Response(
+          JSON.stringify({
+            allowed: false,
+            enforcementAction: held && !retired ? "hold" : "block",
+            reason: held ? "hold:Write#0" : "denied",
+            ...(acknowledged ? { audit_id: "stored-row" } : {}),
+          }),
+          { status: httpError ? 403 : 200 }
+        );
+      }
+      return new Response(JSON.stringify({ delegationId: "deleg-1" }));
+    });
+    const call = {
+      session_id: "session-1",
+      tool_use_id: "tool-call-1",
+      tool_name: "Write",
+      tool_input: { file_path: "/workspace/secrets/a.txt", content: "hi" },
+    };
+    assert.equal(decisionOf(await handlePreToolUse(call, s.config)), "deny");
+    if (retired) {
+      assert.deepEqual(await s.rows(), []);
+      assert.equal(requests.filter((r) => r.url.endsWith("/iap/sdk/enforce")).length, 1);
+      return;
+    }
+    held = false;
+    assert.equal(decisionOf(await handlePreToolUse(call, s.config)), "deny");
+    const enforces = requests.filter((r) => r.url.endsWith("/iap/sdk/enforce"));
+    assert.equal(enforces.length, 2);
+    for (const request of enforces) {
+      assert.equal(request.headers["X-ArmorIQ-Action-Id"], "176f57b7-4cd2-54e6-88f1-369f22f5ab91");
+      assert.equal(request.headers["X-ArmorIQ-Prompt-Id"], "prompt-original");
+    }
+    const rows = await s.rows();
+    if (acknowledged) assert.deepEqual(rows, []);
+    else {
+      assert.equal(new Set(rows.map((r) => r.client_row_id)).size, 1);
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0].status, "held");
+      assert.equal(rows[0].decision_code, "approval_required");
+      assert.equal(rows[1].status, "blocked");
+      assert.equal(rows[1].decision_code, "policy_deny");
+      assert.equal(rows[0].client_row_id, enforces[0].headers["X-ArmorIQ-Action-Id"]);
+    }
+    const local = await handlePreToolUse(
+      { ...call, tool_name: "Read", tool_input: { file_path: "/workspace/.env" } },
+      s.config
+    );
+    assert.equal(decisionOf(local), "deny");
+    assert.equal((await s.rows()).at(-1).decision_code, "policy_deny");
+  });
+}
