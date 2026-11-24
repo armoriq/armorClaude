@@ -5,7 +5,7 @@ ArmorIQ intent-based security enforcement plugin for Claude Code and Claude Cowo
 ## How It Works
 
 ```
-User Prompt ──► UserPromptSubmit hook ──► Intent plan captured ──► Signed token
+User Prompt ──► Prompt identity ──► register_intent_plan ──► Signed token
                                                                         │
 Tool Call ──► PreToolUse hook ──► Policy check ──► Intent verification ──┘
                                       │                    │
@@ -14,10 +14,10 @@ Tool Call ──► PreToolUse hook ──► Policy check ──► Intent veri
 Tool Result ──► PostToolUse hook ──► Audit log sent to IAP
 ```
 
-1. **Before the agent acts**: Intercepts prompts, captures a structured plan (from Claude's built-in plan mode or an LLM fallback call), and sends it to ArmorIQ IAP for a signed intent token.
+1. **Before the agent acts**: Gives each root prompt an identity. Before the first tool that needs a plan, Claude calls `register_intent_plan` with a structured plan. ArmorIQ confirms the plan and returns a signed intent token. Chat only prompts create no plan.
 2. **On every tool call**: Checks the tool against the approved plan, verifies the token hasn't expired, evaluates local policy rules (allow/deny by tool name, data classification like PCI/PII), and optionally verifies CSRG cryptographic proofs. Blocks execution if any check fails.
 3. **After tool execution**: Sends audit logs to ArmorIQ IAP for compliance tracking.
-4. **Fail-closed**: If planning fails, identity is missing, or the token is invalid — all tool calls are blocked by default.
+4. **Enforcement**: An enforcing policy blocks tools that need a plan until registration is confirmed. Billing refusals keep the plan and policy checks local and show an upgrade notice. A policy that allows every tool continues to allow them.
 
 ### Workspace mode: Quiet, Show in chat, Block
 
@@ -140,7 +140,7 @@ armorClaude/
 │   └── lib/
 │       ├── engine.mjs            # Main handlers for all hook events
 │       ├── config.mjs            # Configuration (env vars + userConfig)
-│       ├── planner.mjs           # Plan parsing (plan file + JSON block)
+│       ├── plan-request.mjs      # Canonical plan hashes and stable request ids
 │       ├── intent.mjs            # Intent token verification & CSRG proofs
 │       ├── iap-service.mjs       # IAP backend (verify-step, audit, CSRG)
 │       ├── crypto-policy.mjs     # Merkle tree policy binding (CSRG)
@@ -187,7 +187,7 @@ Whether calls are blocked comes from your login and the workspace mode above, no
 | `ARMORCLAUDE_VERIFY_STEP_URL` | `<backend>/iap/verify-step` | IAP verify endpoint |
 | `ARMORCLAUDE_BACKEND_ENDPOINT` | production or localhost | IAP backend URL |
 | `ARMORCLAUDE_IAP_ENDPOINT` | production or localhost | CSRG service URL |
-| `ARMORCLAUDE_VALIDITY_SECONDS` | `60` | Intent token TTL |
+| `ARMORIQ_INTENT_VALIDITY_SECONDS` | `3600` | Token validity in seconds, from 180 to 3600. Invalid values stop startup. |
 
 **Plan Directive:**
 | Variable | Default | Description |
@@ -224,22 +224,20 @@ Whether calls are blocked comes from your login and the workspace mode above, no
 | Event | Handler | Purpose |
 |-------|---------|---------|
 | `SessionStart` | Initialize session, prune stale sessions | Lifecycle setup |
-| `UserPromptSubmit` | Policy commands, intent capture, LLM planning | Pre-processing |
-| `PreToolUse` | Policy check, intent verification, CSRG proofs, ExitPlanMode capture | **Enforcement** |
+| `UserPromptSubmit` | Policy commands, prompt identity and plan directive | Pre-processing |
+| `PreToolUse` | Policy check, intent verification, CSRG proofs, expired token guard | **Enforcement** |
 | `PostToolUse` | Audit logging (success) | Compliance |
 | `PostToolUseFailure` | Audit logging (failure) | Compliance |
-| `Stop` | Token expiry check | Turn cleanup |
+| `Stop` | Close the prompt and stop its refreshes | Turn cleanup |
 | `SessionEnd` | Remove session state | Lifecycle cleanup |
 
 ## Plan Generation
 
-ArmorClaude supports two plan generation strategies:
+The `UserPromptSubmit` directive asks Claude to call `register_intent_plan` before the first tool that needs a plan. Claude writes the plan in the tool arguments using its current turn. Only this tool and `trust_reanchor` create plans. Plan mode files and ordinary tool calls create none.
 
-### 1. Claude's Built-in Plan Mode (primary)
-When Claude operates in plan mode, it writes a plan file and calls `ExitPlanMode`. ArmorClaude intercepts `ExitPlanMode` via the `PreToolUse` hook, parses the plan file, and sends it to ArmorIQ for intent token generation.
+The first registration in a prompt is `new`. A changed plan is a `revision`. Repeating a confirmed plan with a usable token sends no request. Retries reuse the saved request id, and a reply says registered only after backend confirmation. Prompt text stays on the machine.
 
-### 2. MCP Tool (when plan mode is off)
-A directive injected via `UserPromptSubmit` instructs Claude to call `register_intent_plan` as its first tool call. Claude produces the plan as the tool's arguments — using its own LLM in the same turn, with no separate API key or extra LLM call. The MCP tool handler sends the plan to ArmorIQ for a signed intent token.
+The daemon checks open prompts every 15 seconds and refreshes tokens near expiry. Refreshes keep the counted plan id. They stop at `Stop` or after 30 minutes without activity. When process lookup is unavailable, including on Windows, session routing falls back to the active root session pointer.
 
 ## Policy Commands
 

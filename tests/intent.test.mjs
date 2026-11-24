@@ -14,6 +14,7 @@ import {
 } from "../scripts/lib/intent.mjs";
 import { createIapService } from "../scripts/lib/iap-service.mjs";
 import { computePolicyHash, loadPolicyState } from "../scripts/lib/policy.mjs";
+import { startPrompt } from "../scripts/lib/runtime-state.mjs";
 
 function buildConfig(tmpDir, overrides = {}) {
   return {
@@ -231,11 +232,15 @@ test("requestIntent compiles ArmorClaude IR to SDK/CSRG policy shape", async () 
   const originalCapture = client.capturePlan;
   const originalIssue = client.getIntentToken;
   let capturedPolicy;
-  client.capturePlan = (_llm, _prompt, plan, metadata) => ({ plan, metadata });
+  client.capturePlan = (_llm, prompt, plan, metadata) => {
+    assert.equal(prompt, "");
+    return { plan, metadata };
+  };
   client.getIntentToken = async (capture, policy, validitySeconds) => {
     capturedPolicy = policy;
     return {
       tokenId: "tok-policy",
+      planId: "plan-policy",
       planHash: "hash-policy",
       issuedAt: Date.now() / 1000,
       expiresAt: Date.now() / 1000 + validitySeconds,
@@ -247,6 +252,7 @@ test("requestIntent compiles ArmorClaude IR to SDK/CSRG policy shape", async () 
   };
 
   try {
+    await startPrompt({ session_id: "sdk-policy", prompt: "list db tables" }, config);
     await requestIntent(config, {
       prompt: "list db tables",
       plan: { steps: [{ action: "Bash" }] },

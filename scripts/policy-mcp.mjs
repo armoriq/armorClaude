@@ -10,7 +10,8 @@ import {
   resolveProcessSession,
   appendTrustOp,
   saveRuntimeState,
-  getActiveSessionId,
+  syncSessionAuth,
+  updateRuntimeState,
 } from "./lib/runtime-state.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
 import { loadPolicyState } from "./lib/policy.mjs";
@@ -143,34 +144,17 @@ async function run() {
 
   async function resolveActiveSession() {
     const config = loadConfig();
+    await updateRuntimeState(config.runtimeFile, (state) =>
+      syncSessionAuth(state, config, resolveProcessSession(state))
+    );
     const runtimeState = await loadRuntimeState(config.runtimeFile);
     const sessions = runtimeState.sessions || {};
-
-    // Claude Code does not expose session_id to MCP servers. Without the
-    // active-session pointer, concurrent windows would route trust ops against
-    // the most recently updated window's token instead of this one.
-    const activeSid = process.env.CLAUDE_CODE_SESSION_ID || getActiveSessionId(runtimeState);
-    if (activeSid && sessions[activeSid]) {
-      return {
-        config,
-        runtimeState,
-        sessionId: activeSid,
-        session: sessions[activeSid],
-      };
-    }
-
-    // Fallback: pick the most-recently-updated session. Only reached when
-    // the env var is missing (single-window dev) or points at a session
-    // that's been GC'd from runtime.json.
-    let chosen = null;
-    let chosenId = null;
-    for (const [sid, s] of Object.entries(sessions)) {
-      if (!chosen || (s.updatedAt || 0) > (chosen.updatedAt || 0)) {
-        chosen = s;
-        chosenId = sid;
-      }
-    }
-    return { config, runtimeState, sessionId: chosenId, session: chosen };
+    const sessionId = resolveProcessSession(runtimeState);
+    if (!sessionId)
+      throw new Error(
+        "Session identity unavailable. No root prompt is owned by this Claude Code process."
+      );
+    return { config, runtimeState, sessionId, session: sessions[sessionId] };
   }
 
   function parseToken(raw) {
@@ -224,6 +208,9 @@ async function run() {
         reason: args.reason,
         ok: result.ok,
       });
+      await updateRuntimeState(config.runtimeFile, (state) =>
+        syncSessionAuth(state, loadConfig(), resolveProcessSession(state))
+      );
       await saveRuntimeState(config.runtimeFile, runtimeState);
       if (!result.ok) {
         return toTextResult(`Revoke failed: ${result.error || "unknown error"}`);
@@ -285,6 +272,9 @@ async function run() {
         reason: args.reason,
         ok: result.ok,
       });
+      await updateRuntimeState(config.runtimeFile, (state) =>
+        syncSessionAuth(state, loadConfig(), resolveProcessSession(state))
+      );
       await saveRuntimeState(config.runtimeFile, runtimeState);
       if (!result.ok) {
         process.stderr.write("[armorclaude] reanchor failed after the revision was registered.\n");
@@ -344,6 +334,9 @@ async function run() {
         reason: `delegate to ${args.targetAgent || args.delegatePublicKey.slice(0, 16)}…`,
         ok: result.ok,
       });
+      await updateRuntimeState(config.runtimeFile, (state) =>
+        syncSessionAuth(state, loadConfig(), resolveProcessSession(state))
+      );
       await saveRuntimeState(config.runtimeFile, runtimeState);
       if (!result.ok) {
         return toTextResult(`Delegate failed: ${result.error || "unknown error"}`);

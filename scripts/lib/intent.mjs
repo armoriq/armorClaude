@@ -75,26 +75,6 @@ export function getSdkClient(config) {
   return client;
 }
 
-function buildFallbackPlan(payload) {
-  const goal = typeof payload.prompt === "string" ? payload.prompt : "ArmorClaude intent";
-  const plan = { steps: [], metadata: { goal, source: "claude-code" } };
-  if (typeof payload.toolName === "string" && payload.toolName.trim()) {
-    plan.steps.push({
-      action: payload.toolName.trim(),
-      mcp: payload.mcpName || "claude-code",
-      arguments: isPlainObject(payload.toolInput) ? payload.toolInput : {},
-    });
-  }
-  return plan;
-}
-
-function legacyResolvePlan(payload) {
-  if (isPlainObject(payload.plan)) {
-    return payload.plan;
-  }
-  return buildFallbackPlan(payload);
-}
-
 function resolvePlan(payload) {
   if (isPlainObject(payload.plan)) {
     return payload.plan;
@@ -557,7 +537,7 @@ export function validateCsrgProofHeaders(proofs, required) {
   return null;
 }
 
-export async function submitPlanRequest(config, payload) {
+export async function requestIntent(config, payload) {
   if (!config.apiKey || config.signedOut || config.mode === "monitor") {
     return { skipped: true };
   }
@@ -1045,7 +1025,7 @@ export async function registerIntentPlan(
     if (prepared.reply) return prepared.reply;
     const { loadPolicyState, computePolicyHash } = await import("./policy.mjs");
     const policyState = await loadPolicyState(config.policyFile);
-    const result = await submitPlanRequest(config, {
+    const result = await requestIntent(config, {
       plan,
       session_id: prepared.sessionId,
       generations: prepared.generations,
@@ -1105,36 +1085,6 @@ async function writePendingPlan(config, sessionId, session, result) {
     intentPolicyCompilerVersion: INTENT_POLICY_COMPILER_VERSION,
     registeredAt: Date.now(),
   });
-}
-
-export async function requestIntent(config, payload) {
-  if (!config.apiKey) {
-    return { skipped: true };
-  }
-  const client = getSdkClient(config);
-  const plan = legacyResolvePlan({ ...payload, mcpName: config.mcpName });
-  const metadata = {
-    source: "claude-code",
-    session_id: payload.session_id,
-    policy_hash: payload.policy_hash,
-    ...payload.metadata,
-  };
-  const capture = client.capturePlan(config.llmId, payload.prompt || "", plan, metadata);
-  const sdkPolicy = payload.policy
-    ? compilePolicyForSdkIntent(payload.policy, payload.policy_hash)
-    : undefined;
-  const token = await client.getIntentToken(capture, sdkPolicy, payload.validitySeconds, {
-    contextId: payload.session_id,
-  });
-  const tokenRaw = JSON.stringify(token);
-  const parsedFromToken = extractPlanFromIntentToken(tokenRaw);
-  return {
-    skipped: false,
-    source: "armoriq-sdk",
-    tokenRaw,
-    plan: parsedFromToken?.plan || plan,
-    expiresAt: Number.isFinite(token.expiresAt) ? token.expiresAt : parsedFromToken?.expiresAt,
-  };
 }
 
 export function getSessionTokenUsedStepIndices(session, intentTokenRaw) {
