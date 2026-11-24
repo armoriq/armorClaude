@@ -23,6 +23,7 @@ import { ensurePrivateDirSync, PRIVATE_FILE_MODE } from "./fs-store.mjs";
 import { sdkModule } from "./sdk.mjs";
 import { CLIENT_EVENTS, clientEvent } from "./client-events.mjs";
 import sizeLimits from "./audit-size-limits.json" with { type: "json" };
+import { RUNS_CONTRACT } from "./runs.mjs";
 
 export const LOGIN_TAG = /^[0-9a-f]{16}$/;
 const ROW_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -241,10 +242,11 @@ export function createAuditWal(opts) {
   const stream = opts.stream ?? "audit";
   if (!CLIENT_EVENTS.queues.includes(stream)) throw new Error("Invalid outbox stream");
   const health = stream === "health";
+  const runs = stream === "runs";
   const idField = health ? "event_id" : "client_row_id";
-  const batchField = health ? "events" : "rows";
-  const identity = (row) => row[idField];
-  const settledField = "eventsSettled";
+  const batchField = health ? "events" : runs ? "reports" : "rows";
+  const identity = (row) => (runs ? JSON.stringify([row.run_id, row.report_seq]) : row[idField]);
+  const settledField = runs ? "reportsSettled" : "eventsSettled";
   const dir = path.join(opts.dataDir, stream, opts.login);
   const legacyOffsetPath = path.join(dir, "shipped.offset");
   const offsetPath = path.join(dir, "outbox-state.json");
@@ -257,6 +259,10 @@ export function createAuditWal(opts) {
   };
   const limits = validateLimits({ ...AUDIT_SIZE_LIMITS, ...opts.sizeLimits });
   if (health) limits.maxBatchRows = Math.min(limits.maxBatchRows, CLIENT_EVENTS.maxBatchEvents);
+  if (runs) {
+    limits.maxBatchRows = Math.min(limits.maxBatchRows, RUNS_CONTRACT.limits.maxBatchReports);
+    limits.maxBatchBytes = Math.min(limits.maxBatchBytes, RUNS_CONTRACT.limits.maxBatchBytes);
+  }
   const clock = opts.clock ?? { now: () => Date.now(), random: () => Math.random() };
   const timing = {
     baseMs: 1000,
@@ -398,7 +404,7 @@ export function createAuditWal(opts) {
       state.offset = Math.max(state.offset, merged.shift()[1]);
     }
     state.settled = merged;
-    if (health && entry.row) rememberSettled(state, entry.row, writeReceipt);
+    if ((health || runs) && entry.row) rememberSettled(state, entry.row, writeReceipt);
     delete state.attempts[entry.id];
     delete state.identities[entry.id];
   }
@@ -428,7 +434,7 @@ export function createAuditWal(opts) {
       const dead = JSON.parse(buffer.subarray(pos, end).toString("utf8"));
       if (dead.entry?.active === state.active)
         settle(state, { ...dead.entry, row: dead.row }, writeReceipt);
-      else if (health && dead.row) rememberSettled(state, dead.row, writeReceipt);
+      else if ((health || runs) && dead.row) rememberSettled(state, dead.row, writeReceipt);
       if (dead.reason !== "malformed")
         stageHealth(
           state,
@@ -592,7 +598,7 @@ export function createAuditWal(opts) {
     }
     return transaction((state) => {
       if (
-        health &&
+        (health || runs) &&
         ((state[settledField] ?? []).includes(identity(row)) ||
           existsSync(receiptPath(identity(row))) ||
           entries(state).some((entry) => identity(entry.row) === identity(row)))
@@ -653,7 +659,9 @@ export function createAuditWal(opts) {
           !result ||
           !ids.has(identity(result)) ||
           results.has(identity(result)) ||
-          !CLIENT_EVENTS.outcomes.includes(result.outcome) ||
+          !(
+            runs ? ["accepted", "stale", "duplicate", "rejected"] : CLIENT_EVENTS.outcomes
+          ).includes(result.outcome) ||
           (result.error !== undefined && typeof result.error !== "string")
         )
           return null;
@@ -661,7 +669,7 @@ export function createAuditWal(opts) {
       }
       return new Map(batch.map((entry) => [entry.id, results.get(identity(entry.row))]));
     }
-    if (health || !Array.isArray(body.failures)) return null;
+    if (health || runs || !Array.isArray(body.failures)) return null;
     for (const failure of body.failures) {
       if (
         !failure ||
@@ -730,6 +738,7 @@ export function createAuditWal(opts) {
       state.lease = { generation, expiresAt: clock.now() + timing.lockTtlMs };
       for (const entry of pending) {
         if (
+          runs ||
           entry.malformed ||
           (typeof entry.row[idField] === "string" && ROW_ID.test(entry.row[idField]))
         )
@@ -829,7 +838,9 @@ export function createAuditWal(opts) {
             result?.error ||
             networkError ||
             (result ? result.outcome : `HTTP ${reply?.status ?? 0}: unreadable or missing outcome`);
-          const ack = ["accepted", "duplicate"].includes(result?.outcome);
+          const ack = (
+            runs ? ["accepted", "duplicate", "stale"] : ["accepted", "duplicate"]
+          ).includes(result?.outcome);
           const dead =
             result?.outcome === "rejected" ||
             attempts >= 10 ||
@@ -1187,7 +1198,7 @@ export async function recordAuthenticationSuccess(config) {
   if (!config?.dataDir || !config.backendEndpoint || !config.apiKey || config.signedOut) return;
   const keyId = loginTag(config.backendEndpoint, config.apiKey);
   const binding = { backend: config.backendEndpoint, keyId };
-  for (const stream of ["audit", "health"]) {
+  for (const stream of ["audit", "health", ...(config.runReportingEnabled ? ["runs"] : [])]) {
     try {
       const statePath = path.join(config.dataDir, stream, keyId, "outbox-state.json");
       if (!existsSync(statePath) || !JSON.parse(readFileSync(statePath, "utf8")).paused) continue;
@@ -1201,6 +1212,21 @@ export async function recordAuthenticationSuccess(config) {
       process.stderr.write(`[armorclaude] ${stream} authentication pause could not be cleared.\n`);
     }
   }
+}
+
+export async function runsStatus(dataDir, resolveLogin = () => null) {
+  const root = path.join(dataDir, "runs");
+  const total = { pending: 0, paused: false, deadLetters: 0, undeliverable: 0 };
+  if (!existsSync(root)) return total;
+  for (const login of readdirSync(root).filter((name) => LOGIN_TAG.test(name))) {
+    const status = await createAuditWal({ dataDir, login, stream: "runs" }).status(resolveLogin);
+    total.pending += status.pending;
+    total.paused ||= status.paused;
+    total.deadLetters += status.deadLetters;
+    total.undeliverable += status.undeliverable;
+    if (status.held) total.holds = [...new Set([...(total.holds ?? []), status.held])];
+  }
+  return total;
 }
 
 export function auditLoginConfig(binding, base = {}) {

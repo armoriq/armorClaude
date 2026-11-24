@@ -444,7 +444,7 @@ describe("health outbox conformance", () => {
   });
 });
 
-for (const stream of ["audit", "health"]) {
+for (const stream of ["audit", "health", "runs"]) {
   describe(`${stream} transient and authentication recovery`, () => {
     const row = () =>
       stream === "audit"
@@ -630,3 +630,98 @@ for (const stream of ["audit", "health"]) {
     });
   });
 }
+
+describe("runs outbox conformance", () => {
+  const report = (run_id = "prompt-1", report_seq = 1) => ({
+    run_id,
+    report_seq,
+    session_id: "session-1",
+    started_at: "2026-11-15T00:00:00.000Z",
+    tool_calls: 0,
+    gated_tool_calls: 0,
+    plan_ids: [],
+  });
+  const replies = (rows, outcome) => ({
+    status: 200,
+    body: { results: rows.map(({ run_id, report_seq }) => ({ run_id, report_seq, outcome })) },
+  });
+
+  it("settles start and final reports independently by run and sequence, including stale replies", async () => {
+    const store = await healthStore();
+    const runs = store.open("runs");
+    await runs.appendLine(report());
+    await runs.appendLine(report("prompt-1", 2));
+    await runs.appendLine(report("prompt-2"));
+    await runs.drain(
+      async ({ rows }) => ({
+        status: 200,
+        body: {
+          results: rows.slice(0, 2).map(({ run_id, report_seq }, i) => ({
+            run_id,
+            report_seq,
+            outcome: i ? "stale" : "duplicate",
+          })),
+        },
+      }),
+      store
+    );
+    assert.deepEqual(
+      (await runs.readPending()).map(({ row }) => row),
+      [report("prompt-2")]
+    );
+    store.advance(1);
+    await runs.drain(async ({ rows }) => replies(rows, "rejected"), store);
+    assert.equal((await runs.readDeadLetters()).length, 1);
+    assert.deepEqual(await runs.readPending(), []);
+  });
+
+  it("deduplicates durable handoffs across restart without mixing streams", async () => {
+    const store = await healthStore();
+    await store.open("runs").appendLine(report());
+    await store.open("runs").appendLine(report());
+    const restarted = store.open("runs");
+    assert.equal((await restarted.readPending()).length, 1);
+    await store.open("audit").appendLine({ client_row_id: randomUUID() });
+    await restarted.drain(async ({ rows }) => replies(rows, "accepted"), store);
+    await restarted.appendLine(report());
+    assert.deepEqual(await restarted.readPending(), []);
+    assert.equal((await store.open("audit").readPending()).length, 1);
+  });
+
+  it("pauses on logout, another login and a 404 without consuming attempts", async () => {
+    const store = await healthStore();
+    const runs = store.open("runs");
+    await runs.appendLine(report());
+    await runs.drain(() => assert.fail("logged out send"));
+    await runs.drain(() => assert.fail("another login send"), {
+      resolveLogin: () => ({ ...store.binding, keyId: "bbbbbbbbbbbbbbbb" }),
+    });
+    await runs.drain(async () => ({ status: 404, body: {} }), store);
+    assert.equal((await store.open("runs").status(store.resolveLogin)).paused, true);
+    assert.equal((await runs.readPending())[0].attempts, 0);
+    await runs.drain(() => assert.fail("probe before its time"), store);
+    store.advance(30_000);
+    await runs.drain(async ({ rows }) => replies(rows, "accepted"), store);
+    assert.equal((await runs.status(store.resolveLogin)).paused, false);
+    assert.deepEqual(await runs.readPending(), []);
+  });
+
+  it("caps reports at 200 and retries malformed or missing composite outcomes", async () => {
+    const store = await healthStore();
+    const runs = store.open("runs");
+    for (let n = 0; n < 201; n++) await runs.appendLine(report(`prompt-${n}`));
+    const sizes = [];
+    await runs.drain(async ({ rows }) => {
+      sizes.push(rows.length);
+      return {
+        status: 200,
+        body: { results: [{ run_id: rows[0].run_id, report_seq: 99, outcome: "accepted" }] },
+      };
+    }, store);
+    assert.deepEqual(sizes, [200, 1]);
+    assert.equal((await runs.readPending()).length, 201);
+    store.advance(1);
+    await runs.drain(async ({ rows }) => replies(rows, "accepted"), store);
+    assert.deepEqual(await runs.readPending(), []);
+  });
+});

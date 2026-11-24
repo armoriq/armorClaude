@@ -74,6 +74,7 @@ export const REQUEST_CONFIG_KEYS = [
   "observabilityProduct",
   "usageSyncEnabled",
   "auditEnabled",
+  "runReportingEnabled",
   "csrgVerifyEnabled",
   "cryptoPolicyEnabled",
   "signedOut",
@@ -207,6 +208,7 @@ export function loadConfig(env = process.env) {
     apiKey: effectiveApiKey,
     orgId,
     auditEnabled: Boolean(effectiveApiKey),
+    runReportingEnabled: parseBoolean(env.ARMORIQ_RUN_REPORTING_ENABLED, false),
     defaultTemplate,
 
     ...loginEnforcement(effectiveApiKey, localMock, orgMonitorFor(dataDir, env)),
