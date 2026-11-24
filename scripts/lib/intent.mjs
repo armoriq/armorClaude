@@ -13,6 +13,7 @@ import { compilePolicyForSdkIntent } from "./policy-compiler.mjs";
 import { writeJson } from "./fs-store.mjs";
 import { idempotencyKey, planHash } from "./plan-request.mjs";
 import { isBillingError } from "./hook-output.mjs";
+import { recordAuthenticationSuccess } from "./audit-wal.mjs";
 import {
   authFingerprint,
   resolveProcessSession,
@@ -60,9 +61,17 @@ export function getSdkClient(config) {
   });
   // The SDK wraps issuance errors without status or headers, which retry classification needs.
   client.httpClient.interceptors.response.use(
-    (response) => {
+    async (response) => {
       const attempt = sdkAttempt.getStore();
       if (attempt) attempt.response = response;
+      if (
+        response.status >= 200 &&
+        response.status < 300 &&
+        response.config?.url &&
+        new URL(response.config.url, response.config.baseURL).origin ===
+          new URL(config.backendEndpoint).origin
+      )
+        await recordAuthenticationSuccess(config);
       return response;
     },
     (error) => {

@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tempHome } from "./helpers/login-profile.mjs";
-import { createAuditWal } from "../scripts/lib/audit-wal.mjs";
+import { createOutbox } from "../scripts/lib/audit-wal.mjs";
 import { handleSessionStart } from "../scripts/lib/engine.mjs";
 import {
   appendPrivateFileSync,
@@ -107,24 +107,28 @@ test("runtime.json holding the prompt is owner-only", async () => {
 });
 
 const LOGIN = "0123456789abcdef";
+const BINDING = { backend: "https://a.invalid", keyId: LOGIN };
+const deliver = (wal) =>
+  wal.drain(async () => ({ status: 200, body: { failures: [] } }), { resolveLogin: () => BINDING });
 
 test("the audit WAL holding tool inputs and outputs is owner-only", async () => {
   const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
-  const wal = createAuditWal({ dataDir, login: LOGIN });
+  const wal = createOutbox({ dataDir, login: LOGIN, binding: BINDING });
   await wal.appendLine({ tool: "Bash", input: { command: "ls" }, output: { stdout: "a\nb\n" } });
   const audit = path.join(dataDir, "audit", LOGIN);
-  const current = path.join(audit, "current.jsonl");
+  const current = wal._paths.currentPath;
   assert.match(await readFile(current, "utf8"), /"stdout":"a\\nb\\n"/);
   assert.equal(await modeOf(current), 0o600);
   assert.equal(await modeOf(audit), 0o700);
-  assert.equal(await modeOf(path.join(audit, "archive")), 0o700);
+  assert.equal(await modeOf(wal._paths.archiveDir), 0o700);
 
-  const { endOffset } = await wal.readBatch();
-  await wal.advanceOffset(endOffset);
-  assert.equal(await modeOf(path.join(audit, "shipped.offset")), 0o600);
+  await deliver(wal);
+  assert.equal(await modeOf(wal._paths.offsetPath), 0o600);
+  assert.equal(existsSync(path.join(audit, "shipped.offset")), false);
 });
 
-test("the audit WAL tightens a 0644 log, offset and archive left in 0755 dirs", async () => {
+// regression: #0010
+test("the audit WAL tightens its own files while preserving released files and their modes", async () => {
   const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
   const audit = await openDir(path.join(await openDir(path.join(dataDir, "audit")), LOGIN));
   const archive = await openDir(path.join(audit, "archive"));
@@ -135,20 +139,28 @@ test("the audit WAL tightens a 0644 log, offset and archive left in 0755 dirs", 
   await openFile(offset, "0");
   await openFile(segment, `${JSON.stringify({ tool: "Read" })}\n`);
 
-  const wal = createAuditWal({ dataDir, login: LOGIN });
+  const wal = createOutbox({ dataDir, login: LOGIN, binding: BINDING });
   await wal.appendLine({ tool: "Write" });
-  for (const file of [current, offset, segment]) assert.equal(await modeOf(file), 0o600, file);
-  for (const dir of [dataDir, audit, archive]) assert.equal(await modeOf(dir), 0o700, dir);
-  assert.equal((await readFile(current, "utf8")).trim().split("\n").length, 2);
+  for (const file of [wal._paths.currentPath, wal._paths.offsetPath]) await chmod(file, 0o644);
+  await wal.appendLine({ tool: "Read" });
+  for (const file of [wal._paths.currentPath, wal._paths.offsetPath])
+    assert.equal(await modeOf(file), 0o600, file);
+  for (const file of [current, offset, segment]) assert.equal(await modeOf(file), 0o644, file);
+  for (const dir of [dataDir, audit, wal._paths.archiveDir])
+    assert.equal(await modeOf(dir), 0o700, dir);
+  assert.equal(await modeOf(archive), 0o755);
+  assert.equal((await readFile(current, "utf8")).trim().split("\n").length, 1);
+  assert.equal(await readFile(offset, "utf8"), "0");
+  assert.equal((await wal.readPending()).length, 3);
+  assert.equal((await wal.status(() => BINDING)).olderVersion, 1);
 });
 
 test("a rotated audit segment stays owner-only", async () => {
   const dataDir = await openDir(path.join(await tmpRoot(), "armorclaude"));
-  const wal = createAuditWal({ dataDir, login: LOGIN, rotateBytes: 1 });
+  const wal = createOutbox({ dataDir, login: LOGIN, binding: BINDING, rotateBytes: 1 });
   await wal.appendLine({ tool: "Bash" });
-  const { endOffset } = await wal.readBatch();
-  await wal.advanceOffset(endOffset);
-  const archive = path.join(dataDir, "audit", LOGIN, "archive");
+  await deliver(wal);
+  const archive = wal._paths.archiveDir;
   const segments = await readdir(archive);
   assert.equal(segments.length, 1);
   assert.equal(await modeOf(path.join(archive, segments[0])), 0o600);

@@ -2,6 +2,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isPlainObject } from "./common.mjs";
 import { loginCommand } from "./config.mjs";
+import { auditLoginConfig, auditStatus } from "./audit-wal.mjs";
 import { readJson, writeJson } from "./fs-store.mjs";
 import { saveOrgMode } from "./org-mode.mjs";
 import { loadPolicyState, savePolicyState } from "./policy.mjs";
@@ -1780,6 +1781,7 @@ function parseCommand(prompt) {
   const lower = rest.toLowerCase();
 
   if (!rest || lower === "help") return { cmd: "help" };
+  if (lower === "status") return { cmd: "status" };
   if (["yes", "y", "approve", "ok"].includes(lower)) {
     return { cmd: "confirm", proposalId: "", saveAs: "" };
   }
@@ -1988,6 +1990,7 @@ function helpText() {
     "ArmorClaude Policy Commands:",
     "",
     "  /armorclaude:armor                              — show this help",
+    "  /armorclaude:armor status                       Show local audit delivery counts",
     "  /armorclaude:armor policy list                  — show current rules",
     "  /armorclaude:armor policy view                  — show active policy JSON",
     "  /armorclaude:armor policy default <allow|deny|hold> — stage unmatched-tool default",
@@ -2030,6 +2033,18 @@ export async function handleArmorPolicyCommand(prompt, config) {
   if (!parsed) return null;
 
   switch (parsed.cmd) {
+    case "status": {
+      const status = await auditStatus(config.dataDir, (binding) =>
+        auditLoginConfig(binding, config) ? binding : null
+      );
+      return [
+        "ArmorClaude audit delivery",
+        `Undeliverable: ${status.undeliverable}`,
+        `Written by an older version and not sent by this version: ${status.olderVersion}`,
+        `Dead letters: ${status.deadLetters}`,
+        `Capture failures: ${status.captureFailures}`,
+      ].join("\n");
+    }
     case "help":
       return helpText();
 

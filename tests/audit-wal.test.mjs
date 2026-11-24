@@ -9,7 +9,14 @@ import { once } from "node:events";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
-import { OUTBOX_SIZE_LIMITS, createAuditWal, createOutbox } from "../scripts/lib/audit-wal.mjs";
+import {
+  OUTBOX_SIZE_LIMITS,
+  auditStatus,
+  createAuditWal,
+  createOutbox,
+  recordCaptureFailure,
+} from "../scripts/lib/audit-wal.mjs";
+import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.mjs";
 
 const defaultBinding = { backend: "https://a.invalid", keyId: "0123456789abcdef" };
 const dirs = [];
@@ -609,6 +616,30 @@ test("an accepted tenth delivery whose acknowledgement failed is recovered witho
   });
   assert.deepEqual(await recovered.readPending(), []);
   assert.deepEqual(await recovered.readDeadLetters(), []);
+});
+
+test("local status counts pending rows without a login, dead letters and capture failures after restart", async () => {
+  const { dir, wal } = await fixture();
+  await wal.appendLine({ client_row_id: "pending", tool: "Read" });
+  await wal.appendLine({ client_row_id: "oversize", metadata: "x".repeat(300_000) });
+  await recordCaptureFailure(dir, "internal_error");
+  const shipped = JSON.stringify({ tool: "Already shipped" }) + "\n";
+  await writeFile(
+    path.join(dir, "audit", "current.jsonl"),
+    shipped + JSON.stringify({ tool: "Unbound pending" }) + "\n"
+  );
+  await writeFile(path.join(dir, "audit", "shipped.offset"), String(Buffer.byteLength(shipped)));
+  assert.deepEqual(await auditStatus(dir), {
+    undeliverable: 2,
+    olderVersion: 1,
+    deadLetters: 1,
+    captureFailures: 1,
+  });
+  const output = await handleArmorPolicyCommand("/armor status", { dataDir: dir });
+  assert.match(output, /Undeliverable: 2/);
+  assert.match(output, /Written by an older version and not sent by this version: 1/);
+  assert.match(output, /Dead letters: 1/);
+  assert.match(output, /Capture failures: 1/);
 });
 
 test("readPending returns rows in enqueue order even when disk order is scrambled", async () => {

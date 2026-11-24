@@ -3,12 +3,19 @@
 // or simultaneous hooks lose each other's read-modify-write updates.
 
 import { createServer } from "node:net";
-import { readFileSync, readdirSync, rmSync, unlinkSync, existsSync, chmodSync } from "node:fs";
+import { readFileSync, readdirSync, unlinkSync, existsSync, chmodSync } from "node:fs";
 import path from "node:path";
 import { REQUEST_CONFIG_KEYS, loadConfig, loginEnforcement } from "./lib/config.mjs";
 import { daemonSocketPath, prepareDaemonSocketDir } from "./lib/daemon-socket.mjs";
 import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
-import { LOGIN_TAG, createAuditWal, loginTag } from "./lib/audit-wal.mjs";
+import {
+  OUTBOX_SIZE_LIMITS,
+  LOGIN_TAG,
+  auditLoginConfig,
+  createOutbox,
+  loginTag,
+} from "./lib/audit-wal.mjs";
+import { buildAuthHeaders, postJson } from "./lib/common.mjs";
 import { ensurePrivateDirSync, writePrivateFileSync } from "./lib/fs-store.mjs";
 import { appendDaemonLog, capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
 import {
@@ -34,7 +41,7 @@ import { sessionOutput } from "./lib/relogin.mjs";
 import { startIntentRefreshLoop } from "./lib/intent.mjs";
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-const MAX_LINE_BYTES = 256 * 1024; // 256 KB per JSON message
+const MAX_LINE_BYTES = OUTBOX_SIZE_LIMITS.maxRowBytes + 16 * 1024; // Include the socket envelope around a fitted row.
 
 let config = loadConfig();
 ensurePrivateDirSync(config.dataDir);
@@ -114,10 +121,10 @@ function effectiveConfigFor(configEnv) {
     merged.csrgEndpoint = config.csrgEndpoint || configEnv.backendEndpoint;
   }
   if (config.debug) {
-    const before = config.apiKey ? config.apiKey.slice(0, 12) : "(unset)";
-    const after = merged.apiKey ? merged.apiKey.slice(0, 12) : "(unset)";
+    const before = config.apiKey ? loginTag(config.backendEndpoint, config.apiKey) : "(unset)";
+    const after = merged.apiKey ? loginTag(merged.backendEndpoint, merged.apiKey) : "(unset)";
     process.stderr.write(
-      `[daemon] per-request config overlay: apiKey ${before} -> ${after} obsEnabled=${merged.observabilityEnabled}\n`
+      `[daemon] per-request config overlay: key id ${before} -> ${after} obsEnabled=${merged.observabilityEnabled}\n`
     );
   }
   return merged;
@@ -140,79 +147,111 @@ function withSessionLock(sessionId, fn) {
 }
 
 const AUDIT_FLUSH_INTERVAL_MS = 5_000;
-const AUDIT_FLUSH_THRESHOLD = 100;
 const auditRoot = path.join(config.dataDir, "audit");
 const logins = new Map();
-let auditFlush = null;
 
-function loginWal(tag) {
-  if (!logins.has(tag))
-    logins.set(tag, { cfg: null, wal: createAuditWal({ dataDir: config.dataDir, login: tag }) });
+function loginWal(tag, binding) {
+  if (!logins.has(tag) || (binding && !logins.get(tag).binding))
+    logins.set(tag, {
+      binding,
+      wal: createOutbox({ dataDir: config.dataDir, login: tag, binding }),
+    });
   return logins.get(tag);
 }
 
-function trackLogin(cfg) {
-  if (cfg.auditEnabled && cfg.apiKey) loginWal(loginTag(cfg.backendEndpoint, cfg.apiKey)).cfg = cfg;
+async function trackLogin(cfg) {
+  if (!cfg.auditEnabled || !cfg.apiKey || cfg.signedOut) return;
+  const tag = loginTag(cfg.backendEndpoint, cfg.apiKey);
+  const entry = loginWal(tag, { backend: cfg.backendEndpoint, keyId: tag });
+  await restoreAuditLogin(entry, cfg);
+}
+
+async function restoreAuditLogin(entry, cfg) {
+  const revision = cfg.loggedInAt || "";
+  if (entry.revision === revision) return;
+  await entry.wal.restoreLogin(revision);
+  entry.revision = revision;
 }
 
 function adoptAuditDir() {
   if (!existsSync(auditRoot)) return;
   for (const name of readdirSync(auditRoot)) {
     if (LOGIN_TAG.test(name)) loginWal(name);
-    else {
-      rmSync(path.join(auditRoot, name), { recursive: true, force: true });
-      appendDaemonLog(
-        config.dataDir,
-        `[armorclaude-daemon] deleted audit/${name}: rows not tagged with a login at=${new Date().toISOString()}`
-      );
-    }
   }
 }
 
-function flushAudit(reason) {
-  auditFlush ??= shipAudit(reason).finally(() => (auditFlush = null));
-  return auditFlush;
-}
-
-async function shipAudit(reason) {
-  const { createIapService } = await import("./lib/iap-service.mjs");
-  for (const entry of logins.values()) {
-    if (entry.cfg) await shipLogin(entry, createIapService(entry.cfg), reason);
-    await entry.wal.pruneArchive().catch(() => undefined);
-  }
-}
-
-async function shipLogin({ wal }, iap, reason) {
-  for (;;) {
-    const { rows, endOffset } = await wal.readBatch(AUDIT_FLUSH_THRESHOLD);
-    if (rows.length === 0) return;
-    try {
-      await iap.createAuditLogBatch(rows);
-    } catch (err) {
-      if (config.debug)
+async function flushAudit(reason) {
+  adoptAuditDir();
+  await Promise.all(
+    [...logins.values()].map(async (entry) => {
+      entry.flush ??= shipLogin(entry).finally(() => {
+        entry.flush = null;
+      });
+      try {
+        await entry.flush;
+      } catch (error) {
         process.stderr.write(
-          `[daemon] audit WAL flush failed reason=${reason} err=${err?.message ?? err}\n`
+          `[daemon] audit WAL flush failed reason=${reason}: ${error.message}\n`
         );
-      return;
-    }
-    await wal.advanceOffset(endOffset);
+      }
+    })
+  );
+}
+
+async function shipLogin(entry) {
+  const binding =
+    entry.binding || (await entry.wal.readPending()).find(({ login }) => login)?.login;
+  if (!binding) return;
+  const cfg = auditLoginConfig(binding, loadConfig());
+  if (!cfg) return;
+  if (!entry.binding) {
+    entry.binding = binding;
+    entry.wal = createOutbox({ dataDir: config.dataDir, login: binding.keyId, binding });
   }
+  await restoreAuditLogin(entry, cfg);
+  await entry.wal.drain(
+    async ({ rows }) => {
+      const current = auditLoginConfig(binding, loadConfig());
+      if (!current) return { status: 401, body: {} };
+      const response = await postJson(
+        `${binding.backend}/iap/audit/batch`,
+        { rows },
+        buildAuthHeaders(current),
+        current.timeoutMs || 8000
+      );
+      return { status: response.status, body: response.data, headers: response.headers };
+    },
+    {
+      resolveLogin: () => (auditLoginConfig(binding, loadConfig()) ? binding : null),
+      probe: async () => {
+        const current = auditLoginConfig(binding, loadConfig());
+        if (!current) return { status: 401 };
+        return postJson(
+          `${binding.backend}/iap/validate-key`,
+          {},
+          buildAuthHeaders(current),
+          current.timeoutMs || 8000
+        );
+      },
+    }
+  );
+  await entry.wal.pruneArchive();
 }
 
 adoptAuditDir();
-trackLogin(config);
+await trackLogin(config);
 
-async function enqueueAudit(dto, login) {
-  if (!dto || typeof dto !== "object" || !LOGIN_TAG.test(login ?? "")) return;
-  const { wal } = loginWal(login);
-  try {
-    await wal.appendLine(dto);
-    if ((await wal.pendingBytes()) > 100_000) flushAudit("threshold");
-  } catch (err) {
-    process.stderr.write(
-      `[armorclaude-daemon] audit row rejected: ${err?.message ?? err} tool=${dto.tool} at=${new Date().toISOString()}\n`
-    );
-  }
+async function enqueueAudit(dto, login, binding, fallback) {
+  if (
+    !dto ||
+    typeof dto !== "object" ||
+    !LOGIN_TAG.test(login ?? "") ||
+    (binding && binding.keyId !== login)
+  )
+    throw new Error("Invalid audit capture envelope");
+  const { wal } = loginWal(login, binding);
+  await wal.appendLine(dto, { fallback });
+  return wal;
 }
 
 const auditTimer = setInterval(() => {
@@ -332,15 +371,21 @@ async function handleLine(rawLine, socket) {
       return;
     }
     case "audit_enqueue": {
-      // Fire-and-forget at the *protocol* level (no reply), but we await
-      // the WAL write so the disk record is durable before the daemon
-      // moves on. Without the await a crash between read and write loses
-      // the audit row even though the WAL exists for exactly this reason.
+      // Replying before fsync would let a hook exit with its only audit row still in memory.
       try {
-        await enqueueAudit(msg.dto, msg.login);
+        const wal = await enqueueAudit(msg.dto, msg.login, msg.binding, msg.fallback);
+        socket.write(JSON.stringify({ reqId, ok: true, durable: true }) + "\n");
+        void wal
+          .pendingBytes()
+          .then((size) => {
+            if (size > OUTBOX_SIZE_LIMITS.maxBatchBytes) return flushAudit("threshold");
+          })
+          .catch((error) => {
+            process.stderr.write(`[daemon] audit threshold check failed: ${error.message}\n`);
+          });
       } catch (err) {
-        if (config.debug)
-          process.stderr.write(`[daemon] enqueueAudit failed: ${err?.message ?? err}\n`);
+        socket.write(JSON.stringify({ reqId, ok: false, error: "Audit capture failed" }) + "\n");
+        process.stderr.write(`[daemon] enqueueAudit failed: ${err?.message ?? err}\n`);
       }
       return;
     }
@@ -354,7 +399,7 @@ async function handleLine(rawLine, socket) {
       const input = msg.input ?? {};
       const sessionId = typeof input.session_id === "string" ? input.session_id : "";
       const effectiveConfig = effectiveConfigFor(msg.configEnv);
-      trackLogin(effectiveConfig);
+      await trackLogin(effectiveConfig);
       let output;
       try {
         output = await withSessionLock(sessionId, async () =>
@@ -423,15 +468,15 @@ async function stopAndExit(code) {
 process.on("SIGTERM", () => shutdown(0));
 process.on("SIGINT", () => shutdown(0));
 // SIGHUP re-reads the login profile without restarting the daemon.
-process.on("SIGHUP", () => {
+process.on("SIGHUP", async () => {
   try {
     const fresh = loadConfig();
-    const before = config.apiKey ? config.apiKey.slice(0, 16) : "(unset)";
-    const after = fresh.apiKey ? fresh.apiKey.slice(0, 16) : "(unset)";
+    const before = config.apiKey ? loginTag(config.backendEndpoint, config.apiKey) : "(unset)";
+    const after = fresh.apiKey ? loginTag(fresh.backendEndpoint, fresh.apiKey) : "(unset)";
     config = fresh;
-    trackLogin(fresh);
+    await trackLogin(fresh);
     process.stderr.write(
-      `[armorclaude-daemon] SIGHUP: config reloaded. apiKey prefix: ${before} -> ${after}\n`
+      `[armorclaude-daemon] SIGHUP: config reloaded. key id: ${before} -> ${after}\n`
     );
   } catch (err) {
     process.stderr.write(`[armorclaude-daemon] SIGHUP reload failed: ${err?.message ?? err}\n`);

@@ -138,7 +138,12 @@ test("a login after the daemon started puts the new user on audit rows", async (
       tool_use_id: "toolu_1",
     });
 
-    const wal = path.join(dataDir, "audit", loginTag(STAGING, LOGIN.apiKey), "current.jsonl");
+    const wal = path.join(
+      dataDir,
+      "audit",
+      loginTag(STAGING, LOGIN.apiKey),
+      "outbox-current.jsonl"
+    );
     await waitFor(
       () => existsSync(wal) && readFileSync(wal, "utf8").endsWith("\n"),
       5_000,
