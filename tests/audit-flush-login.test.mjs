@@ -33,13 +33,25 @@ const deferred = () => {
 
 async function startBackend(t, { refuse = new Set(), gate } = {}) {
   const shipped = [];
+  const health = [];
   const entered = deferred();
   const server = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
+    const key = req.headers["x-api-key"].split(",")[0].trim();
+    if (req.url === "/iap/client-events") {
+      if (refuse.has(key)) return res.writeHead(401).end("{}");
+      const { events } = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      health.push(...events.map((event) => [key, event]));
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(
+        JSON.stringify({
+          results: events.map(({ event_id }) => ({ event_id, outcome: "duplicate" })),
+        })
+      );
+    }
     if (req.url !== "/iap/audit/batch") return res.writeHead(404).end("{}");
     entered.resolve();
-    const key = req.headers["x-api-key"].split(",")[0].trim();
     if (refuse.has(key)) return res.writeHead(401).end("{}");
     if (gate) await gate.promise;
     const { rows } = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -54,7 +66,7 @@ async function startBackend(t, { refuse = new Set(), gate } = {}) {
     server.closeAllConnections();
     return new Promise((resolve) => server.close(resolve));
   });
-  return { url: `http://127.0.0.1:${server.address().port}`, shipped, refuse, entered };
+  return { url: `http://127.0.0.1:${server.address().port}`, shipped, health, refuse, entered };
 }
 
 function plugin(t) {
@@ -167,6 +179,35 @@ test("delivery resolves the exact saved credential and never a cached replacemen
   );
   assert.deepEqual(await wal.readPending(), []);
   assert.ok(!readFileSync(wal._paths.offsetPath, "utf8").includes(A.apiKey));
+});
+
+test("the daemon adopts a health spool on disk and sends its events only with the original login", async (t) => {
+  const backend = await startBackend(t);
+  const { dataDir, login, stop } = plugin(t);
+  const tag = loginTag(backend.url, A.apiKey);
+  const health = createAuditWal({
+    dataDir,
+    login: tag,
+    binding: { backend: backend.url, keyId: tag },
+    stream: "health",
+  });
+  const event = {
+    event_id: randomUUID(),
+    type: "plan_request_failed",
+    queue: "health",
+    count: 1,
+    reason_code: "server_error",
+    occurred_at: new Date().toISOString(),
+  };
+  await health.appendLine(event);
+  login(backend, B);
+  await stop(backend, "session-b");
+  assert.deepEqual(backend.health, []);
+  assert.equal((await health.readPending()).length, 1);
+  login(backend, A);
+  await stop(backend, "session-a");
+  assert.deepEqual(backend.health, [[A.apiKey, event]]);
+  assert.deepEqual(await health.readPending(), []);
 });
 
 test("each audit row ships with the key of the login that wrote it, across a login switch (#361)", async (t) => {

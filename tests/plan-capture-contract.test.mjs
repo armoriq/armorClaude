@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import * as intent from "../scripts/lib/intent.mjs";
+import { createAuditWal, loginTag } from "../scripts/lib/audit-wal.mjs";
 import { loadConfig } from "../scripts/lib/config.mjs";
 import { dispatchViaDaemon } from "../scripts/lib/daemon-client.mjs";
 import { handlePreToolUse } from "../scripts/lib/engine.mjs";
@@ -66,6 +67,37 @@ async function session(t, patch = {}) {
     state: async () => (await loadRuntimeState(config.runtimeFile)).sessions[sessionId],
   };
 }
+
+async function healthEvents(config) {
+  const wal = createAuditWal({
+    dataDir: config.dataDir,
+    login: loginTag(config.backendEndpoint, config.apiKey),
+    stream: "health",
+  });
+  return (await wal.readPending()).map(({ row }) => row);
+}
+
+// regression: #0012
+test("a failed health append preserves the backend refusal and settles the registration", async (t) => {
+  for (const [status, data, headers, unconfirmed] of [
+    [422, { message: "org_required" }, {}, false],
+    [503, { message: "save unavailable" }, { "retry-after": "60" }, true],
+    [200, { success: true }, {}, true],
+  ]) {
+    await t.test(String(status), async (t) => {
+      const s = await session(t);
+      await writeFile(path.join(s.config.dataDir, "health"), "storage unavailable");
+      wire(t, async () => [status, data, headers]);
+      const result = await intent.registerIntentPlan(s.config, plan);
+      assert.equal(result.isError, true);
+      assert.doesNotMatch(result.content[0].text, /ENOTDIR|EEXIST|storage|directory/);
+      if (status !== 200) assert.match(result.content[0].text, new RegExp(data.message));
+      const pending = (await s.state()).pendingRequest;
+      assert.equal(pending?.unconfirmed ?? false, unconfirmed);
+      if (!unconfirmed) assert.equal(pending, null);
+    });
+  }
+});
 
 for (const [group, symbol, input] of [
   ["canonicalJson", "canonicalJson", "input"],
@@ -217,6 +249,11 @@ test("confirmed refusals are errors and never register a local token", async (t)
       assert.equal((await s.state()).countedPlanId, null);
       assert.equal((await s.state()).pendingRequest, null);
       assert.equal((await s.state()).intentTokenRaw ?? "", "");
+      const events = await healthEvents(s.config);
+      assert.equal(events.length, 1);
+      assert.equal(events[0].type, "plan_request_failed");
+      assert.equal(events[0].reason_code, "rejected");
+      assert.equal(events[0].count, 1);
     });
   }
 });
@@ -255,6 +292,42 @@ test("retryable responses honour both Retry-After forms and reuse the saved wire
       assert.notEqual(result.isError, true);
       assert.deepEqual(requests[1].body, requests[0].body);
       assert.deepEqual(requests[1].headers, requests[0].headers);
+      assert.deepEqual(await healthEvents(s.config), []);
+    });
+  }
+});
+
+test("exhausted logical requests report once after all attempts with the final reason", async (t) => {
+  for (const [status, error, code, expected] of [
+    [503, "plan_not_saved", null, "server_error"],
+    [409, "request_in_progress", null, "request_in_progress"],
+    [0, "socket timeout", "ETIMEDOUT", "timeout"],
+  ]) {
+    await t.test(expected, async (t) => {
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+      const s = await session(t);
+      const waiting = Promise.withResolvers();
+      const fakeTimeout = globalThis.setTimeout;
+      t.mock.method(globalThis, "setTimeout", (...args) => {
+        const timer = fakeTimeout(...args);
+        waiting.resolve();
+        return timer;
+      });
+      const requests = wire(t, async (_, attempt) => {
+        if (attempt === 2) t.mock.timers.tick(40_000);
+        if (code) throw Object.assign(new Error(error), { code });
+        return [status, { error }, { "retry-after": "1" }];
+      });
+      const registering = intent.registerIntentPlan(s.config, plan);
+      await waiting.promise;
+      assert.deepEqual(await healthEvents(s.config), []);
+      t.mock.timers.tick(1000);
+      assert.equal((await registering).isError, true);
+      assert.equal(requests.length, 2);
+      const events = await healthEvents(s.config);
+      assert.equal(events.length, 1);
+      assert.equal(events[0].reason_code, expected);
+      assert.equal(events[0].count, 1);
     });
   }
 });
@@ -282,12 +355,16 @@ test("an uncertain request is retried with its descriptor after the handler is r
     metadata: { goal: "different" },
   });
   assert.match(changed.content[0].text, /resend the identical pending plan/);
+  const events = await healthEvents(s.config);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].reason_code, "network");
   t.mock.timers.tick(1000);
   const next = await intent.registerIntentPlan(s.config, plan);
   assert.notEqual(next.isError, true);
   assert.deepEqual(requests[1].body, saved.body);
   assert.deepEqual(requests[1].headers, requests[0].headers);
   assert.equal((await s.state()).countedPlanId, firstId);
+  assert.deepEqual(await healthEvents(s.config), events);
 });
 
 test("a handler rerun preserves a Retry-After beyond the first deadline", async (t) => {
@@ -299,10 +376,14 @@ test("a handler rerun preserves a Retry-After beyond the first deadline", async 
   assert.equal((await intent.registerIntentPlan(s.config, plan)).isError, true);
   assert.equal((await intent.registerIntentPlan(s.config, plan)).isError, true);
   assert.equal(requests.length, 1);
+  const events = await healthEvents(s.config);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].reason_code, "rate_limited");
   t.mock.timers.tick(60_000);
   assert.notEqual((await intent.registerIntentPlan(s.config, plan)).isError, true);
   assert.equal(requests.length, 2);
   assert.deepEqual(requests[1].headers, requests[0].headers);
+  assert.deepEqual(await healthEvents(s.config), events);
 });
 
 test("a daemon fallback shares the in flight descriptor and its logical deadline", async (t) => {
@@ -353,6 +434,7 @@ test("late prompt and auth responses cannot install a registration", async (t) =
       );
       assert.equal((await s.state()).countedPlanId, null);
       assert.equal((await s.state()).intentTokenRaw, "");
+      assert.deepEqual(await healthEvents(s.config), []);
     });
   }
 });

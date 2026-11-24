@@ -13,7 +13,9 @@ import { compilePolicyForSdkIntent } from "./policy-compiler.mjs";
 import { writeJson } from "./fs-store.mjs";
 import { idempotencyKey, planHash } from "./plan-request.mjs";
 import { isBillingError } from "./hook-output.mjs";
-import { recordAuthenticationSuccess } from "./audit-wal.mjs";
+import { createAuditWal, loginTag, recordAuthenticationSuccess } from "./audit-wal.mjs";
+import { clientEvent } from "./client-events.mjs";
+import { createAuditEnvelope } from "./audit-capture.mjs";
 import {
   authFingerprint,
   resolveProcessSession,
@@ -595,7 +597,7 @@ function planRequestBody(config, payload, plan) {
 }
 
 async function preparePlanRequest(config, payload) {
-  return updateRuntimeState(config.runtimeFile, (state) => {
+  const descriptor = await updateRuntimeState(config.runtimeFile, (state) => {
     syncSessionAuth(state, config, payload.session_id);
     const session = state.sessions[payload.session_id];
     if (!session?.promptId) return null;
@@ -643,6 +645,7 @@ async function preparePlanRequest(config, payload) {
     };
     return session.pendingRequest;
   });
+  return descriptor;
 }
 
 function requestIsCurrent(session, descriptor) {
@@ -679,7 +682,39 @@ function retryDelay(response, attempt) {
   return Math.min(1000 * 2 ** attempt, 4000);
 }
 
+async function recordPlanRequestFailure(config, descriptor, reason, unconfirmed = false) {
+  descriptor.lastReasonCode = reason;
+  await updateRuntimeState(config.runtimeFile, (state) => {
+    const session = state.sessions[descriptor.body.context_id];
+    if (requestIsCurrent(session, descriptor)) {
+      if (unconfirmed) session.pendingRequest.unconfirmed = true;
+      else session.pendingRequest = null;
+    }
+  });
+  const tag = loginTag(config.backendEndpoint, config.apiKey);
+  const event = clientEvent("plan_request_failed", "health", 1, reason, Date.now(), {
+    event_id: createAuditEnvelope({
+      root_session_id: "plan_request_failed",
+      tool_use_id: descriptor.key,
+    }).decisionId,
+  });
+  try {
+    await createAuditWal({
+      dataDir: config.dataDir,
+      login: tag,
+      binding: { backend: config.backendEndpoint, keyId: tag },
+      stream: "health",
+    }).appendLine(event);
+  } catch {
+    process.stderr.write("[armorclaude] plan request health event could not be stored.\n");
+  }
+}
+
 async function sendPlanRequest(config, descriptor, reloadConfig = () => config) {
+  return sendPreparedPlanRequest(config, descriptor, reloadConfig);
+}
+
+async function sendPreparedPlanRequest(config, descriptor, reloadConfig) {
   const { body, headers } = descriptor;
   const client = Object.assign(Object.create(getSdkClient(config)), {
     userId: body.user_id,
@@ -689,6 +724,7 @@ async function sendPlanRequest(config, descriptor, reloadConfig = () => config) 
   });
   const capture = client.capturePlan(config.llmId, "", body.plan);
   let reason = descriptor.lastReason || "request deadline exceeded";
+  let reasonCode = descriptor.lastReasonCode || "timeout";
   for (let attempt = 0; ; attempt += 1) {
     const current = await updateRuntimeState(config.runtimeFile, (state) => {
       syncSessionAuth(state, reloadConfig(), body.context_id);
@@ -716,6 +752,7 @@ async function sendPlanRequest(config, descriptor, reloadConfig = () => config) 
       );
       if (!token.planId || !Number.isFinite(token.expiresAt)) {
         reason = "invalid backend response";
+        reasonCode = "rejected";
         break;
       }
       if (!token.kind && !warnedLegacyBackend) {
@@ -799,8 +836,22 @@ async function sendPlanRequest(config, descriptor, reloadConfig = () => config) 
         if (!installed) throw registrationError("plan retired before registration completed");
         return { skipped: true, billing: true, plan: body.plan };
       }
-      if (status < 400 && response?.data?.success)
+      reasonCode =
+        status === 429
+          ? "rate_limited"
+          : status >= 500
+            ? "server_error"
+            : status === 409 && response?.data?.error === "request_in_progress"
+              ? "request_in_progress"
+              : !response && networkError
+                ? /TIMEOUT|ETIMEDOUT|ECONNABORTED/.test(networkError.code ?? "")
+                  ? "timeout"
+                  : "network"
+                : "rejected";
+      if (status < 400 && response?.data?.success) {
+        await recordPlanRequestFailure(config, descriptor, reasonCode, true);
         throw registrationError(requestReason(config, undefined, error), true);
+      }
       const retryable =
         status === 429 ||
         (status >= 500 && status <= 599) ||
@@ -817,30 +868,26 @@ async function sendPlanRequest(config, descriptor, reloadConfig = () => config) 
             "ERR_NETWORK",
           ].includes(networkError?.code));
       if (!retryable) {
-        await updateRuntimeState(config.runtimeFile, (state) => {
-          const session = state.sessions[body.context_id];
-          if (requestIsCurrent(session, descriptor)) session.pendingRequest = null;
-        });
+        await recordPlanRequestFailure(config, descriptor, reasonCode);
         throw registrationError(reason);
       }
       const delay = retryDelay(response, attempt);
       descriptor.retryAt = Date.now() + delay;
       descriptor.lastReason = reason;
+      descriptor.lastReasonCode = reasonCode;
       await updateRuntimeState(config.runtimeFile, (state) => {
         const session = state.sessions[body.context_id];
         if (requestIsCurrent(session, descriptor)) {
           session.pendingRequest.retryAt = descriptor.retryAt;
           session.pendingRequest.lastReason = reason;
+          session.pendingRequest.lastReasonCode = reasonCode;
         }
       });
       if (descriptor.retryAt >= descriptor.deadlineAt) break;
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
-  await updateRuntimeState(config.runtimeFile, (state) => {
-    const session = state.sessions[body.context_id];
-    if (requestIsCurrent(session, descriptor)) session.pendingRequest.unconfirmed = true;
-  });
+  await recordPlanRequestFailure(config, descriptor, reasonCode, true);
   throw registrationError(reason, true);
 }
 

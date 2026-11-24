@@ -2,3 +2,4 @@ node_modules
 dist
 *.md
 tests/fixtures/block-capture-v1.json
+tests/fixtures/client-events-v1.json
