@@ -1,21 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import path from "node:path";
 import { z } from "zod";
 import { loadConfig } from "./lib/config.mjs";
-import { ensurePrivateDir, writeJson } from "./lib/fs-store.mjs";
-import { extractAllowedActions, getSdkClient, requestIntent } from "./lib/intent.mjs";
+import { ensurePrivateDir } from "./lib/fs-store.mjs";
+import { getSdkClient, registerIntentPlan } from "./lib/intent.mjs";
 import { delegateSubtreeViaSdk, reanchorViaSdk, revokeViaSdk } from "./lib/iap-service.mjs";
 import {
   loadRuntimeState,
+  resolveProcessSession,
   appendTrustOp,
   saveRuntimeState,
   getActiveSessionId,
 } from "./lib/runtime-state.mjs";
 import { INTENT_PLAN_ZOD, PLAN_STEP_SCHEMA, normalizeIntentPlan } from "./lib/intent-schema.mjs";
-import { computePolicyHash, loadPolicyState } from "./lib/policy.mjs";
-
-const INTENT_POLICY_COMPILER_VERSION = "sdk-csrg-policy-v1";
+import { loadPolicyState } from "./lib/policy.mjs";
 
 function toTextResult(text, extra = {}) {
   return {
@@ -104,8 +102,8 @@ async function run() {
       title: "Register Intent Plan",
       description:
         "Declare the tools you intend to use for this task. " +
-        "Required by ArmorClaude before any other tool call. " +
-        "Without a registered plan, all tool calls will be blocked.",
+        "Register before the first tool that needs a plan. " +
+        "Chat only prompts need no plan.",
       // Accept the canonical {goal, steps} shape AND the string-serialized
       // variants Claude sometimes emits (steps as a JSON string, or the
       // whole plan wrapped in a `plan` field). The handler below coerces
@@ -127,73 +125,15 @@ async function run() {
       },
     },
     async (args) => {
-      // Claude sometimes serializes complex tool arguments as JSON strings
-      // (e.g. steps: "[{...}]" instead of steps: [{...}]). Tolerate both.
       const coerced = coercePlanArgs(args);
       const parsed = INTENT_PLAN_ZOD.safeParse(coerced);
       if (!parsed.success) {
-        return toTextResult(`Plan rejected: ${parsed.error.message}`);
+        return { ...toTextResult(`Plan not registered: ${parsed.error.message}.`), isError: true };
       }
 
       const config = loadConfig();
-      const plan = normalizeIntentPlan(parsed.data);
-
-      // Resolve the ACTIVE Claude Code session id. Claude Code does not expose
-      // session_id to MCP servers (no env var, no .mcp.json interpolation), so
-      // read the pointer the engine stamps into runtime.json on every hook.
-      // Honor CLAUDE_CODE_SESSION_ID first in case a future Claude Code sets it.
-      let sessionId = process.env.CLAUDE_CODE_SESSION_ID || "";
-      if (!sessionId) {
-        try {
-          const rs = await loadRuntimeState(config.runtimeFile);
-          sessionId = getActiveSessionId(rs);
-        } catch {
-          /* runtime file unreadable — fall back to session-less pending file */
-        }
-      }
-
-      // Send to ArmorIQ for signed intent token (if SDK/endpoint configured)
-      let intentResult = { skipped: true };
-      let policyHash = "";
-      if (config.apiKey) {
-        try {
-          const policyState = await loadPolicyState(config.policyFile);
-          policyHash = computePolicyHash(policyState.policy);
-          intentResult = await requestIntent(config, {
-            prompt: parsed.data.goal,
-            plan,
-            session_id: sessionId || "mcp",
-            policy_hash: policyHash,
-            policy: policyState.policy,
-            validitySeconds: config.validitySeconds,
-            metadata: { source: "claude-code", planning: "claude-registered" },
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          process.stderr.write(`[armorclaude] intent capture in register_intent_plan: ${msg}\n`);
-        }
-      }
-
-      const pendingFile = sessionId ? `pending-plan.${sessionId}.json` : "pending-plan.json";
-      const pendingPath = path.join(config.dataDir, pendingFile);
-      await writeJson(pendingPath, {
-        sessionId: sessionId || undefined,
-        plan: intentResult.plan || plan,
-        tokenRaw: intentResult.tokenRaw || "",
-        allowedActions: Array.from(extractAllowedActions(intentResult.plan || plan)),
-        expiresAt: intentResult.expiresAt,
-        policyHash,
-        intentPolicyCompilerVersion: INTENT_POLICY_COMPILER_VERSION,
-        registeredAt: Date.now(),
-      });
-
-      const tokenInfo = intentResult.tokenRaw
-        ? `Token valid ${config.validitySeconds}s.`
-        : "No ArmorIQ backend configured — plan stored locally.";
-
-      return toTextResult(`Intent registered: ${plan.steps.length} steps. ${tokenInfo}`, {
-        steps: plan.steps.length,
-        goal: parsed.data.goal,
+      return registerIntentPlan(config, normalizeIntentPlan(parsed.data), {
+        reloadConfig: loadConfig,
       });
     }
   );
@@ -317,17 +257,19 @@ async function run() {
     async (args) => {
       const parsed = INTENT_PLAN_ZOD.safeParse(args.updatedPlan);
       if (!parsed.success) {
-        return toTextResult(`Plan rejected: ${parsed.error.message}`);
+        return { ...toTextResult(`Plan not registered: ${parsed.error.message}.`), isError: true };
       }
       const updatedPlan = normalizeIntentPlan(parsed.data);
-      const { config, runtimeState, sessionId, session } = await resolveActiveSession();
-      if (!session) {
-        return toTextResult("No active session — nothing to reanchor.");
-      }
-      const intentToken = parseToken(session.intentTokenRaw);
-      if (!intentToken) {
-        return toTextResult("No intent token in session state.");
-      }
+      const config = loadConfig();
+      const runtimeState = await loadRuntimeState(config.runtimeFile);
+      const sessionId = resolveProcessSession(runtimeState);
+      const intentToken = parseToken(runtimeState.sessions[sessionId]?.intentTokenRaw);
+      const registration = await registerIntentPlan(config, updatedPlan, {
+        reloadConfig: loadConfig,
+        forceRevision: true,
+      });
+      if (registration.isError || !intentToken || !config.apiKey || config.mode === "monitor")
+        return registration;
       const result = await reanchorViaSdk({
         getClient: getSdkClient,
         config,
@@ -345,12 +287,9 @@ async function run() {
       });
       await saveRuntimeState(config.runtimeFile, runtimeState);
       if (!result.ok) {
-        return toTextResult(`Reanchor failed: ${result.error || "unknown error"}`);
+        process.stderr.write("[armorclaude] reanchor failed after the revision was registered.\n");
       }
-      return toTextResult(
-        `ReAnchor recorded. trustId=${result.trustId || "n/a"} delta(${(result.fromHash || "").slice(0, 12)} → ${(result.toHash || "").slice(0, 12)})`,
-        { trustId: result.trustId, fromHash: result.fromHash, toHash: result.toHash }
-      );
+      return registration;
     }
   );
 

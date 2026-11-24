@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { startBackend, startHookSession } from "./helpers/hook-session.mjs";
+import { startBackend, startHookSession, startPolicyMcp } from "./helpers/hook-session.mjs";
 
 test("the intent token request carries the Claude session id as its context", async (t) => {
   const backend = await startBackend({
@@ -17,9 +17,15 @@ test("the intent token request carries the Claude session id as its context", as
       },
     ],
   });
-  const { sessionId, hook } = await startHookSession(t, backend);
+  const { env, sessionId, hook } = await startHookSession(t, backend);
   await hook({ hook_event_name: "SessionStart", source: "startup" });
   await hook({ hook_event_name: "UserPromptSubmit", prompt: "list the files" });
+  const client = await startPolicyMcp(t, env, sessionId);
+  const result = await client.callTool({
+    name: "register_intent_plan",
+    arguments: { goal: "list files", steps: [{ action: "Bash" }] },
+  });
+  assert.notEqual(result.isError, true, result.content[0].text);
   await hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
   const requests = backend.requests.filter((r) => r.route === "POST /iap/sdk/token");
   assert.equal(requests.length, 1);

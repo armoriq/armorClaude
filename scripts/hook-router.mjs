@@ -5,6 +5,8 @@ import { appendDaemonLog } from "./lib/daemon-log.mjs";
 import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
 import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
 import { sessionOutput } from "./lib/relogin.mjs";
+import { claudeCodeProcessId, recordHookActivity } from "./lib/runtime-state.mjs";
+import { recordsPreToolActivity } from "./lib/hook-activity.mjs";
 
 async function readStdin() {
   const chunks = [];
@@ -82,6 +84,13 @@ async function main() {
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
   hookEvent = event;
   debugLog(config, `hook=${event}`);
+  if (Object.hasOwn(HANDLERS, event) && (event !== "PreToolUse" || recordsPreToolActivity(input))) {
+    await recordHookActivity(
+      input,
+      config,
+      event === "SessionStart" || event === "UserPromptSubmit" ? claudeCodeProcessId() : undefined
+    );
+  }
   await trackUsageSession(event, input, config);
 
   if (config.daemonEnabled && (await dispatchInDaemon(event, input, config))) return;
