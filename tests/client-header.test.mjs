@@ -39,7 +39,6 @@ function pluginDataDir(name) {
 
 for (const [dataDirName, product] of [
   ["armorclaude-dev-armoriq", "armorclaude-dev"],
-  ["armorclaude-armoriq", "armorclaude"],
   ["armorclaude", "armorclaude"],
 ]) {
   test(`every backend call from a ${dataDirName} install names ${product}/<plugin version>`, async (t) => {

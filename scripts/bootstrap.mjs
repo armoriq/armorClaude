@@ -13,6 +13,15 @@ const packageFiles = [
   path.join(pluginRoot, "node_modules", "@modelcontextprotocol", "sdk", "package.json"),
 ];
 
+function blocksToolCall() {
+  if (process.argv[2] !== "router") return false;
+  try {
+    return JSON.parse(readFileSync(0, "utf8")).hook_event_name === "PreToolUse";
+  } catch {
+    return false;
+  }
+}
+
 function installedOk() {
   if (!existsSync(installedMarker)) return false;
   if (!packageFiles.every(existsSync)) return false;
@@ -43,9 +52,13 @@ if (!installedOk()) {
   if (result.status !== 0) {
     const detail = result.error ? ": " + result.error.message : "";
     process.stderr.write(
-      "[armorclaude] npm install failed (exit " + result.status + ")" + detail + "\n"
+      "[armorclaude] npm install failed (exit " +
+        result.status +
+        ")" +
+        detail +
+        "\nArmorClaude is blocking tool calls until its dependencies install. Check the network connection and try again.\n"
     );
-    process.exit(1);
+    process.exit(blocksToolCall() ? 2 : 1);
   }
   try {
     const pkg = JSON.parse(readFileSync(path.join(pluginRoot, "package.json"), "utf8"));

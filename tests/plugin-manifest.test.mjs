@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -62,3 +65,35 @@ test("dev variant stays discoverable from the published catalog", async () => {
     "dev variant must not pin a version, so Claude Code versions it by dev's commit"
   );
 });
+
+for (const [event, status] of [
+  ["PreToolUse", 2],
+  ["UserPromptSubmit", 1],
+  ["Stop", 1],
+]) {
+  // regression: #13
+  test(`a first run that cannot install its dependencies exits ${status} on ${event}`, () => {
+    const scratch = mkdtempSync(path.join(os.tmpdir(), "armorclaude-bootstrap-"));
+    const root = path.join(scratch, "plugin");
+    mkdirSync(path.join(root, "scripts"), { recursive: true });
+    for (const file of ["package.json", "package-lock.json", "scripts/bootstrap.mjs"])
+      copyFileSync(path.join(repoRoot, file), path.join(root, file));
+    const run = spawnSync(
+      process.execPath,
+      [path.join(root, "scripts", "bootstrap.mjs"), "router"],
+      {
+        cwd: scratch,
+        encoding: "utf8",
+        input: JSON.stringify({ hook_event_name: event, session_id: "s" }),
+        env: {
+          PATH: process.env.PATH,
+          HOME: scratch,
+          npm_config_offline: "true",
+          npm_config_cache: path.join(scratch, "npm-cache"),
+        },
+      }
+    );
+    assert.equal(run.status, status, run.stderr);
+    assert.match(run.stderr, /ArmorClaude is blocking tool calls until its dependencies install/);
+  });
+}

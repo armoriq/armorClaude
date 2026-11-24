@@ -97,6 +97,23 @@ test("only the armorclaude profile for the backend armorClaude calls is used", (
   assert.equal(withHome(codexOnly, () => loadConfig({})).apiKey, "");
 });
 
+for (const [plugin, env, backend] of [
+  ["armorclaude-armoriq", {}, PRODUCTION],
+  ["armorclaude-armoriq", { ARMORIQ_ENV: "local" }, PRODUCTION],
+  ["armorclaude-armoriq", { ARMORIQ_LOCAL_MOCK: "1" }, PRODUCTION],
+  ["armorclaude-dev-armoriq", {}, "http://localhost:8000"],
+]) {
+  // regression: #13
+  test(`the ${plugin} plugin with a local-mode file and ${JSON.stringify(env)} calls ${backend}`, () => {
+    const home = tempHome();
+    mkdirSync(path.join(home, ".armoriq"), { recursive: true });
+    writeFileSync(path.join(home, ".armoriq", "local-mode"), "");
+    const dataDir = path.join(tempHome(), plugin);
+    const config = withHome(home, () => loadConfig({ CLAUDE_PLUGIN_DATA: dataDir, ...env }));
+    assert.equal(config.backendEndpoint, backend);
+  });
+}
+
 test("armorclaude and armorcodex profiles in one file both load, and loading changes nothing", () => {
   const home = copyGoldenCredentials(tempHome());
   const file = path.join(home, ".armoriq", "credentials.json");

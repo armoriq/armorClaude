@@ -10,6 +10,7 @@ import { sdkModule } from "./sdk.mjs";
 
 const PRODUCT = "armorclaude";
 const DEV_PLUGIN_DATA = `${PRODUCT}-dev-armoriq`;
+const PROD_PLUGIN_DATA = `${PRODUCT}-armoriq`;
 const STAGING_BACKEND = "https://staging-api.armoriq.ai";
 // The dev installer signs in to staging with the armoriq-dev CLI from @armoriq/sdk-dev.
 const DEV_CLI = "armoriq-dev";
@@ -119,18 +120,17 @@ export function loadConfig(env = process.env) {
   const runtimeFile = env.ARMORCLAUDE_RUNTIME_FILE?.trim() || path.join(dataDir, "runtime.json");
 
   // ── Endpoints ──
-  // Local mock mode: enabled by env var OR presence of ~/.armoriq/local-mode file.
-  // File-based flag avoids shell env var gymnastics on Windows.
-  // Delete ~/.armoriq/local-mode to restore production mode.
   const localModeFile = path.join(homedir(), ".armoriq", "local-mode");
   const requestedEnv =
     normalizeArmoriqEnv(env.ARMORIQ_ENV) ||
     (path.basename(dataDir) === DEV_PLUGIN_DATA ? "staging" : "production");
+  const productionPlugin = path.basename(dataDir) === PROD_PLUGIN_DATA;
   const localMock =
-    parseBoolean(env.ARMORIQ_LOCAL_MOCK, false) ||
-    existsSync(localModeFile) ||
-    requestedEnv === "local";
-  const activeEnv = localMock ? "local" : requestedEnv;
+    !productionPlugin &&
+    (parseBoolean(env.ARMORIQ_LOCAL_MOCK, false) ||
+      existsSync(localModeFile) ||
+      requestedEnv === "local");
+  const activeEnv = localMock ? "local" : requestedEnv === "local" ? "production" : requestedEnv;
   const backendEndpoint =
     activeEnv === "local"
       ? env.ARMORIQ_BACKEND_URL?.trim() || "http://localhost:8000"
