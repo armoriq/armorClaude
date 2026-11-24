@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { startBackend, startHookSession, waitFor } from "./helpers/hook-session.mjs";
+import { startBackend, startHookSession } from "./helpers/hook-session.mjs";
+import { captureSession } from "./helpers/audit-capture.mjs";
+import { emitAudit } from "../scripts/lib/audit-capture.mjs";
+import { OUTBOX_SIZE_LIMITS, createOutbox, loginTag } from "../scripts/lib/audit-wal.mjs";
 
-const WAL_LINE_CAP = 4000;
+const WAL_LINE_CAP = OUTBOX_SIZE_LIMITS.maxRowBytes;
 const PLAN_ID = randomUUID();
 const PLAN = {
   goal: "inspect the repo",
@@ -67,7 +69,8 @@ test("PostToolUse rows link the plan by id instead of carrying the intent token,
     });
   }
 
-  await waitFor(() => backend.auditRows.length === 3, 15_000, "three audit rows at the backend");
+  await hook({ hook_event_name: "Stop" });
+  assert.equal(backend.auditRows.length, 3);
   assert.deepEqual(
     backend.auditRows.map((r) => [r.tool, r.step_index]),
     [
@@ -85,56 +88,97 @@ test("PostToolUse rows link the plan by id instead of carrying the intent token,
   }
 });
 
-test("a row over the WAL cap ships with its larger field cut down and marked with the original size (#295)", async (t) => {
-  const { backend, hook } = await startSession(t);
-  const big = "x".repeat(2000);
-
-  await hook({
-    hook_event_name: "PostToolUse",
-    tool_name: "Bash",
-    tool_input: { command: "cat big.log" },
-    tool_response: { stdout: big, stderr: big },
+test("capture over the shared row cap replaces input before output without previews (#295)", async (t) => {
+  const { config } = await captureSession(t);
+  const big = "x".repeat(WAL_LINE_CAP);
+  const common = { plan_id: PLAN_ID, status: "success", executed_at: new Date().toISOString() };
+  await emitAudit({
+    config,
+    dto: {
+      ...common,
+      client_row_id: randomUUID(),
+      tool: "Bash",
+      action: "Bash",
+      input: { command: "cat big.log" },
+      output: { stdout: big, stderr: big },
+    },
   });
-  await hook({
-    hook_event_name: "PostToolUse",
-    tool_name: "Write",
-    tool_input: { file_path: "a.txt", content: big, extra: big },
-    tool_response: { filePath: "a.txt", content: big },
+  await emitAudit({
+    config,
+    dto: {
+      ...common,
+      client_row_id: randomUUID(),
+      tool: "Write",
+      action: "Write",
+      input: { file_path: "a.txt", content: big },
+      output: { filePath: "a.txt", content: "keep" },
+    },
   });
-
-  await waitFor(() => backend.auditRows.length === 2, 15_000, "two audit rows at the backend");
-  const [bash, write] = backend.auditRows;
-  for (const row of backend.auditRows) {
+  const wal = createOutbox({
+    dataDir: config.dataDir,
+    login: loginTag(config.backendEndpoint, config.apiKey),
+    binding: {
+      backend: config.backendEndpoint,
+      keyId: loginTag(config.backendEndpoint, config.apiKey),
+    },
+  });
+  const shipped = [];
+  await wal.drain(
+    async ({ rows }) => {
+      shipped.push(...rows);
+      return { status: 200, body: { failures: [] } };
+    },
+    {
+      resolveLogin: () => ({
+        backend: config.backendEndpoint,
+        keyId: loginTag(config.backendEndpoint, config.apiKey),
+      }),
+    }
+  );
+  assert.equal(shipped.length, 2);
+  const [bash, write] = shipped;
+  for (const row of shipped) {
     assert.equal(row.plan_id, PLAN_ID);
     assert.ok(Buffer.byteLength(JSON.stringify(row)) <= WAL_LINE_CAP, row.tool);
   }
-  assert.deepEqual(bash.input, { command: "cat big.log" });
-  assert.equal(bash.output.truncated, true);
-  assert.ok(bash.output.originalBytes > 4000);
-  assert.ok(bash.output.preview.startsWith('{"stdout":"xxx'));
-  assert.equal(write.input.truncated, true);
-  assert.ok(write.input.originalBytes > 4000);
-  assert.deepEqual(write.output, { filePath: "a.txt", content: big });
+  assert.deepEqual(bash.input, { truncated: true });
+  assert.deepEqual(bash.output, { truncated: true });
+  assert.deepEqual(write.input, { truncated: true });
+  assert.deepEqual(write.output, { filePath: "a.txt", content: "keep" });
 });
 
-test("a row that cannot fit the WAL cap is logged to daemon.log instead of vanishing (#295)", async (t) => {
-  const { backend, dataDir, hook } = await startSession(t);
-
-  await hook({
-    hook_event_name: "PostToolUseFailure",
-    tool_name: "Bash",
-    tool_input: { command: "make" },
-    error: "e".repeat(10_000),
+test("capture that cannot fit the shared cap keeps a counted dead letter and allows healthy rows (#295)", async (t) => {
+  const { config, rows } = await captureSession(t);
+  const dto = {
+    client_row_id: randomUUID(),
+    tool: "Bash",
+    action: "Bash",
+    input: { command: "make" },
+    status: "failed",
+    error_message: "e".repeat(WAL_LINE_CAP + 1),
+    executed_at: new Date().toISOString(),
+  };
+  await emitAudit({ config, dto });
+  await emitAudit({
+    config,
+    dto: {
+      client_row_id: randomUUID(),
+      tool: "Read",
+      action: "Read",
+      input: { file_path: "package.json" },
+    },
   });
-  await hook({
-    hook_event_name: "PostToolUse",
-    tool_name: "Read",
-    tool_input: { file_path: "package.json" },
-    tool_response: { ok: true },
+  assert.deepEqual(
+    (await rows()).map(({ tool }) => tool),
+    ["Read"]
+  );
+  const wal = createOutbox({
+    dataDir: config.dataDir,
+    login: loginTag(config.backendEndpoint, config.apiKey),
   });
-
-  await waitFor(() => backend.auditRows.length === 1, 15_000, "the Read row at the backend");
-  assert.equal(backend.auditRows[0].tool, "Read");
-  const log = readFileSync(path.join(dataDir, "daemon.log"), "utf8");
-  assert.match(log, /audit row rejected: Bash row is \d+ bytes after truncation, cap is 4000/);
+  const [dead] = await wal.readDeadLetters();
+  assert.deepEqual(dead.row, { ...dto, capability: "shell" });
+  assert.equal(dead.reason, "oversize");
+  assert.equal(dead.attempts, 0);
+  assert.equal((await wal.status()).deadLetters, 1);
 });

@@ -5,8 +5,25 @@ import { appendDaemonLog } from "./lib/daemon-log.mjs";
 import { ensurePrivateDirSync } from "./lib/fs-store.mjs";
 import { launchLiveUsage, trackUsageSession } from "./lib/usage-sync-launch.mjs";
 import { sessionOutput } from "./lib/relogin.mjs";
-import { claudeCodeProcessId, recordHookActivity } from "./lib/runtime-state.mjs";
+import {
+  claudeCodeProcessId,
+  recordHookActivity,
+  loadRuntimeState,
+  getSession,
+} from "./lib/runtime-state.mjs";
 import { recordsPreToolActivity } from "./lib/hook-activity.mjs";
+import {
+  createAuditEnvelope,
+  snapshotAuditContext,
+  captureFallback,
+} from "./lib/audit-capture.mjs";
+import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
+import path from "node:path";
+import { claudeConfigDir } from "./lib/claude-paths.mjs";
+import { recordCaptureFailure } from "./lib/audit-wal.mjs";
+
+const hookContext = {};
 
 async function readStdin() {
   const chunks = [];
@@ -51,22 +68,9 @@ function logDaemonFallback(event, err, config) {
   }
 }
 
-async function dispatchInDaemon(event, input, config) {
-  try {
-    const output = await dispatchViaDaemon({ event, input, config });
-    if (output) emitJson(output);
-    return true;
-  } catch (err) {
-    if (err instanceof DaemonHandlerError) throw err;
-    logDaemonFallback(event, err, config);
-    return false;
-  }
-}
-
-let hookEvent = "";
-
 async function main() {
   const config = loadConfig();
+  hookContext.config = config;
   ensurePrivateDirSync(config.dataDir);
   const rawInput = await readStdin();
   if (!rawInput.trim()) {
@@ -77,12 +81,22 @@ async function main() {
     input = JSON.parse(rawInput);
   } catch {
     if (config.mode === "enforce" && !config.orgMonitor) {
+      const input = { armorAudit: createAuditEnvelope() };
+      hookContext.input = input;
+      try {
+        await captureFallback(input, config, "invalid_payload", input.armorAudit);
+      } catch (error) {
+        debugLog(config, `audit capture failed: ${error.message}`);
+      }
       emitJson(denyPreTool("invalid_payload", "ArmorClaude hook payload invalid JSON"));
     }
     return;
   }
+  hookContext.input = input;
+  if (input && typeof input === "object") {
+    input.armorAudit = createAuditEnvelope(input);
+  }
   const event = typeof input.hook_event_name === "string" ? input.hook_event_name : "";
-  hookEvent = event;
   debugLog(config, `hook=${event}`);
   if (Object.hasOwn(HANDLERS, event) && (event !== "PreToolUse" || recordsPreToolActivity(input))) {
     await recordHookActivity(
@@ -93,7 +107,28 @@ async function main() {
   }
   await trackUsageSession(event, input, config);
 
-  if (config.daemonEnabled && (await dispatchInDaemon(event, input, config))) return;
+  const output = await dispatchHook(event, input, config);
+  if (output) emitJson(output);
+}
+
+export async function dispatchHook(event, input, config, dispatch = dispatchViaDaemon) {
+  let runtimeState;
+  if (["PreToolUse", "PostToolUse", "PostToolUseFailure"].includes(event)) {
+    input.armorAudit ??= createAuditEnvelope(input);
+    if (!input.armorAudit.contextCaptured) {
+      runtimeState = await loadRuntimeState(config.runtimeFile);
+      const session = getSession(runtimeState, input.session_id) || {};
+      input.armorAudit = snapshotAuditContext(input.armorAudit, session);
+    }
+  }
+  if (config.daemonEnabled) {
+    try {
+      return await dispatch({ event, input, config });
+    } catch (err) {
+      if (err instanceof DaemonHandlerError) throw err;
+      logDaemonFallback(event, err, config);
+    }
+  }
 
   if (!Object.hasOwn(HANDLERS, event)) {
     debugLog(config, `unhandled hook event: ${event}`);
@@ -102,24 +137,28 @@ async function main() {
   const engine = await import("./lib/engine.mjs");
   const { observeHook, obsFlush } = await import("./lib/observability.mjs");
   const handler = engine[HANDLERS[event]];
-  const output = await sessionOutput(event, input, config, await handler(input, config));
+  const output = await sessionOutput(
+    event,
+    input,
+    config,
+    await handler(input, config, config.daemonEnabled ? undefined : runtimeState)
+  );
 
-  if (output) {
-    emitJson(output);
-  }
   if (event === "Stop") launchLiveUsage(config, input);
 
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   await observeHook(event, input, output, config);
   await obsFlush(sessionId, config);
+  return output;
 }
 
-main().catch((error) => {
+async function failedHook(error) {
   const message = error instanceof Error ? error.message : String(error);
   let mode = "enforce";
   let debug = false;
+  let config = hookContext.config;
   try {
-    const config = loadConfig();
+    config ??= loadConfig();
     mode = config.orgMonitor ? "monitor" : config.mode;
     debug = config.debug;
   } catch {
@@ -129,10 +168,35 @@ main().catch((error) => {
   if (debug) {
     process.stderr.write(`[armorclaude] error=${message}\n`);
   }
-  if (mode !== "enforce") return;
-  if (hookEvent && hookEvent !== "PreToolUse") {
-    emitJson({ systemMessage: `ArmorClaude internal error in ${hookEvent}: ${message}` });
-    return;
+  if (mode === "enforce") {
+    const input =
+      hookContext.input && typeof hookContext.input === "object" ? hookContext.input : {};
+    const dataDir =
+      config?.dataDir ||
+      process.env.CLAUDE_PLUGIN_DATA?.trim() ||
+      process.env.ARMORCLAUDE_DATA_DIR?.trim() ||
+      path.join(claudeConfigDir(process.env), "armorclaude");
+    if (input.hook_event_name && input.hook_event_name !== "PreToolUse") {
+      await recordCaptureFailure(dataDir, "internal_error");
+      emitJson({
+        systemMessage: `ArmorClaude internal error in ${input.hook_event_name}: ${message}`,
+      });
+      return;
+    }
+    try {
+      await captureFallback(input, config || { dataDir }, "internal_error", input.armorAudit);
+    } catch (captureError) {
+      if (debug)
+        process.stderr.write(`[armorclaude] audit capture failed: ${captureError.message}\n`);
+    }
+    emitJson(denyPreTool("internal_error", `ArmorClaude internal error: ${message}`));
   }
-  emitJson(denyPreTool("internal_error", `ArmorClaude internal error: ${message}`));
-});
+}
+
+export async function runHook() {
+  await main().catch(failedHook);
+}
+
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await runHook();
+}

@@ -59,7 +59,7 @@ const target = process.argv[2];
 if (target === "warm") {
   process.exit(0);
 } else if (target === "router") {
-  await import("./hook-router.mjs");
+  await (await import("./hook-router.mjs")).runHook();
 } else if (target === "mcp") {
   await import("./policy-mcp.mjs");
 } else {
