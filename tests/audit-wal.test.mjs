@@ -336,6 +336,147 @@ test("dead letters and the immutable login binding survive reopening with privat
   );
 });
 
+test("legacy rows keep their original login and acknowledged prefix across migration", async () => {
+  const { dir, wal } = await fixture();
+  const rows = [
+    { tool: "Read", _seq: 1, _enqueuedAt: 1 },
+    { tool: "Bash", _seq: 2, _enqueuedAt: 2 },
+  ];
+  await mkdir(path.join(dir, "audit", "0123456789abcdef"), { recursive: true });
+  await writeFile(
+    path.join(dir, "audit", "0123456789abcdef", "current.jsonl"),
+    rows.map((row) => JSON.stringify(row) + "\n").join("")
+  );
+  await writeFile(
+    wal._paths.legacyOffsetPath,
+    String(Buffer.byteLength(JSON.stringify(rows[0]) + "\n"))
+  );
+  const recovered = createOutbox({ dataDir: dir, login: "0123456789abcdef" });
+  assert.deepEqual(
+    (await recovered.readPending()).map(({ row }) => row),
+    [{ tool: "Bash" }]
+  );
+  await recovered.drain(() => assert.fail("an unbound legacy row was delivered"));
+  assert.equal((await recovered.status()).undeliverable, 1);
+});
+
+// regression: #0010
+test("bound legacy rows persist one UUID before delivery and settle by results after a restart", async () => {
+  const { dir, wal } = await fixture();
+  const binding = { backend: "https://a.invalid", keyId: "0123456789abcdef" };
+  const options = { dataDir: dir, login: binding.keyId, binding };
+  const knownId = randomUUID();
+  const rows = [
+    { tool: "Already shipped", _seq: 1, _enqueuedAt: 1 },
+    ...[undefined, null, "", "invalid", 42].map((client_row_id, index) => ({
+      client_row_id,
+      tool: "Bash",
+      action: "Bash",
+      input: { command: `echo ${index}` },
+      status: "blocked",
+      decision_code: "policy_deny",
+      executed_at: "2026-11-14T12:00:00.000Z",
+      session_id: "captured-session",
+      _seq: index + 2,
+      _enqueuedAt: index + 2,
+    })),
+    { client_row_id: knownId, tool: "Read" },
+  ];
+  await mkdir(path.join(dir, "audit", "0123456789abcdef"), { recursive: true });
+  await writeFile(
+    path.join(dir, "audit", "0123456789abcdef", "current.jsonl"),
+    rows.map((row) => JSON.stringify(row) + "\n").join("")
+  );
+  await writeFile(
+    wal._paths.legacyOffsetPath,
+    JSON.stringify({
+      version: 1,
+      binding,
+      active: "current.jsonl",
+      offset: Buffer.byteLength(JSON.stringify(rows[0]) + "\n"),
+      settled: [],
+      attempts: {},
+      identities: {},
+      dead: [],
+      paused: false,
+      lease: null,
+      revision: null,
+    })
+  );
+  const releasedOffset = await readFile(wal._paths.legacyOffsetPath, "utf8");
+  const releasedPath = path.join(dir, "audit", binding.keyId, "current.jsonl");
+  const releasedStat = await stat(releasedPath);
+  const lateRow = { client_row_id: randomUUID(), tool: "Appended during delivery" };
+  let resolutions = 0;
+  await assert.rejects(
+    () =>
+      createOutbox(options).drain(() => assert.fail("sent before the restart"), {
+        resolveLogin() {
+          if (++resolutions === 2) throw new Error("restart before delivery");
+          return binding;
+        },
+      }),
+    /restart before delivery/
+  );
+  const recovered = createOutbox(options);
+  const assigned = (await recovered.readPending()).map(({ row }) => row);
+  const ids = assigned.map(({ client_row_id }) => client_row_id);
+  for (const id of ids.slice(0, -1))
+    assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(new Set(ids).size, rows.length - 1);
+  assert.equal(ids.at(-1), knownId);
+  assert.deepEqual(
+    assigned,
+    rows.slice(1).map((original, index) => {
+      const row = { ...original, client_row_id: ids[index] };
+      delete row._seq;
+      delete row._enqueuedAt;
+      return row;
+    })
+  );
+  await recovered.drain(
+    async ({ login, rows: outbound }) => {
+      assert.deepEqual(login, binding);
+      assert.deepEqual(outbound, assigned);
+      assert.deepEqual(
+        (await createOutbox(options).readPending()).map(({ row }) => row),
+        assigned
+      );
+      await appendFile(releasedPath, JSON.stringify(lateRow) + "\n");
+      return {
+        status: 200,
+        body: {
+          results: [...outbound].reverse().map(({ client_row_id }) => ({
+            client_row_id,
+            outcome: "accepted",
+          })),
+        },
+      };
+    },
+    { resolveLogin: () => binding }
+  );
+  assert.deepEqual(
+    (await createOutbox(options).readPending()).map(({ row }) => row),
+    [lateRow]
+  );
+  await createOutbox(options).drain(
+    async ({ login, rows: outbound }) => {
+      assert.deepEqual(login, binding);
+      assert.deepEqual(outbound, [lateRow]);
+      return { status: 200, body: { failures: [] } };
+    },
+    { resolveLogin: () => binding }
+  );
+  assert.deepEqual(await createOutbox(options).readPending(), []);
+  assert.equal(await readFile(wal._paths.legacyOffsetPath, "utf8"), releasedOffset);
+  assert.equal((await stat(releasedPath)).ino, releasedStat.ino);
+  assert.equal((await stat(releasedPath)).mode, releasedStat.mode);
+  assert.equal(
+    await readFile(releasedPath, "utf8"),
+    [...rows, lateRow].map((row) => JSON.stringify(row) + "\n").join("")
+  );
+});
+
 test("batch_oversize outcomes split and resend without losing accepted rows", async () => {
   const { dir } = await fixture();
   const binding = { backend: "https://a.invalid", keyId: "key-a" };
@@ -613,6 +754,63 @@ test("rotation keeps every delivered segment", async () => {
 });
 
 // regression: #0010
+test("a released 0.2.19 reader cannot resend new rows or overwrite their dead letters", async () => {
+  const { dir } = await fixture();
+  const login = "0123456789abcdef";
+  const legacyDir = path.join(dir, "audit", login);
+  await mkdir(legacyDir, { recursive: true });
+  const shipped = JSON.stringify({ tool: "Already shipped", _seq: 1, _enqueuedAt: 1 }) + "\n";
+  const legacyPending = JSON.stringify({ tool: "Legacy pending", _seq: 2, _enqueuedAt: 2 }) + "\n";
+  const currentPath = path.join(legacyDir, "current.jsonl");
+  const offsetPath = path.join(legacyDir, "shipped.offset");
+  await writeFile(currentPath, shipped + legacyPending);
+  await writeFile(offsetPath, String(Buffer.byteLength(shipped)));
+  const binding = { backend: "https://a.invalid", keyId: login };
+  const options = { dataDir: dir, login, binding };
+  const wal = createOutbox(options);
+  await wal.appendLine({ client_row_id: randomUUID(), tool: "Rejected" });
+  await wal.appendLine({ client_row_id: randomUUID(), metadata: "x".repeat(300_000) });
+  await wal.drain(
+    async ({ rows }) => ({
+      status: 200,
+      body: {
+        results: rows.map(({ client_row_id }) => ({
+          client_row_id,
+          outcome: "rejected",
+          error: "bad row",
+        })),
+      },
+    }),
+    { resolveLogin: () => binding }
+  );
+  const pending = { client_row_id: randomUUID(), tool: "Pending" };
+  await wal.appendLine(pending);
+  const rawOffset = await readFile(offsetPath, "utf8");
+  assert.ok(/^\d+$/.test(rawOffset), "released cursor must remain a decimal number");
+  // Released armorClaude 0.2.19 (1f91f0c) reads parseInt(offset), then current.jsonl from that byte.
+  const n = Number.parseInt(rawOffset.trim(), 10);
+  const offset = Number.isFinite(n) && n >= 0 ? n : 0;
+  const buffer = await readFile(currentPath);
+  const oldRows = buffer
+    .subarray(offset)
+    .toString("utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map(JSON.parse);
+  assert.deepEqual(oldRows, [{ tool: "Legacy pending", _seq: 2, _enqueuedAt: 2 }]);
+  assert.equal((await wal.status(() => binding)).olderVersion, 1);
+  assert.equal(await readFile(offsetPath, "utf8"), String(Buffer.byteLength(shipped)));
+  await writeFile(offsetPath, String(offset + Buffer.byteLength(buffer.subarray(offset))));
+  const recovered = createOutbox(options);
+  assert.deepEqual(
+    (await recovered.readPending()).map(({ row }) => row),
+    [pending]
+  );
+  assert.equal((await recovered.readDeadLetters()).length, 2);
+  assert.equal(await readFile(currentPath, "utf8"), shipped + legacyPending);
+});
+
+// regression: #0010
 test("a long transport outage never exhausts rows and every captured row is delivered after recovery", async (t) => {
   for (const failure of ["network", "timeout", 503, 429]) {
     await t.test(String(failure), async () => {
@@ -821,4 +1019,104 @@ test("reading the previous bound outbox preserves dead letters and leaves the re
     assert.equal(await readFile(path.join(root, "shipped.offset"), "utf8"), releasedState);
     assert.ok((await stat(wal._paths.offsetPath)).size < 4096);
   }
+});
+
+// regression: #0010
+test("a released drainer keeps every unbound row while the new queue scans, replays and drains alongside it", async (t) => {
+  const { dir } = await fixture();
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+    import { createAuditWal } from ${JSON.stringify(new URL("./helpers/released-audit-wal-0.2.19.mjs", import.meta.url).href)};
+    import { createInterface } from 'node:readline';
+    const wal = createAuditWal(${JSON.stringify({ dataDir: dir, login: defaultBinding.keyId, rotateBytes: 1 })});
+    for await (const line of createInterface({ input: process.stdin })) {
+      const command = JSON.parse(line);
+      let rows = [];
+      if (command.row) await wal.appendLine(command.row);
+      else {
+        const batch = await wal.readBatch();
+        rows = batch.rows;
+        await wal.advanceOffset(batch.endOffset);
+      }
+      process.stdout.write(JSON.stringify(rows) + '\\n');
+    }
+  `,
+    ],
+    { stdio: ["pipe", "pipe", "pipe"] }
+  );
+  const exited = once(child, "exit");
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  });
+  const responses = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  const command = async (value) => {
+    child.stdin.write(JSON.stringify(value) + "\n");
+    const reply = await Promise.race([
+      responses.next(),
+      exited.then(() => {
+        throw new Error("released drainer exited before its reply");
+      }),
+    ]);
+    return JSON.parse(reply.value);
+  };
+  const oldRows = Array.from({ length: 4 }, () => ({ id: randomUUID(), tool: "Released" }));
+  await command({ row: oldRows[0] });
+  let failAck = true;
+  const options = {
+    dataDir: dir,
+    login: defaultBinding.keyId,
+    binding: defaultBinding,
+    beforeCommit(point) {
+      if (point === "ack" && failAck) {
+        failAck = false;
+        throw new Error("crash before receipt");
+      }
+    },
+  };
+  const wal = createOutbox(options);
+  const current = { client_row_id: randomUUID(), tool: "Current" };
+  await wal.appendLine(current);
+  await Promise.all([command({ row: oldRows[1] }), wal.readPending()]);
+  const stored = new Map();
+  const send = async ({ rows }) => {
+    for (const row of rows) stored.set(row.client_row_id, row);
+    return { status: 200, body: { failures: [] } };
+  };
+  await assert.rejects(
+    () =>
+      wal.drain(
+        async (request) => {
+          await command({ row: oldRows[2] });
+          return send(request);
+        },
+        { resolveLogin: () => defaultBinding }
+      ),
+    /crash before receipt/
+  );
+  const recovered = createOutbox(options);
+  await recovered.drain(send, { resolveLogin: () => defaultBinding });
+  const root = path.join(dir, "audit", defaultBinding.keyId);
+  assert.equal(
+    await readFile(path.join(root, "shipped.offset"), "utf8").catch((err) => {
+      assert.equal(err.code, "ENOENT");
+      return null;
+    }),
+    null
+  );
+  assert.equal((await recovered.status(() => defaultBinding)).olderVersion, 3);
+  assert.deepEqual(await command({ drain: true }), oldRows.slice(0, 3));
+  for (const row of oldRows.slice(0, 3)) stored.set(row.id, row);
+  assert.equal((await recovered.status(() => defaultBinding)).olderVersion, 0);
+  await command({ row: oldRows[3] });
+  assert.equal((await recovered.status(() => defaultBinding)).olderVersion, 1);
+  assert.deepEqual(await command({ drain: true }), [oldRows[3]]);
+  stored.set(oldRows[3].id, oldRows[3]);
+  assert.deepEqual([...stored.values()], [current, ...oldRows]);
+  assert.deepEqual(await recovered.readPending(), []);
+  child.stdin.end();
+  assert.equal((await exited)[0], 0);
 });
