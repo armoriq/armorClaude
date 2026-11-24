@@ -6,9 +6,9 @@ import path from "node:path";
 import { startBackend, startHookSession } from "./helpers/hook-session.mjs";
 import { captureSession } from "./helpers/audit-capture.mjs";
 import { emitAudit } from "../scripts/lib/audit-capture.mjs";
-import { OUTBOX_SIZE_LIMITS, createOutbox, loginTag } from "../scripts/lib/audit-wal.mjs";
+import { AUDIT_SIZE_LIMITS, createAuditWal, loginTag } from "../scripts/lib/audit-wal.mjs";
 
-const WAL_LINE_CAP = OUTBOX_SIZE_LIMITS.maxRowBytes;
+const WAL_LINE_CAP = AUDIT_SIZE_LIMITS.maxRowBytes;
 const PLAN_ID = randomUUID();
 const PLAN = {
   goal: "inspect the repo",
@@ -114,7 +114,7 @@ test("capture over the shared row cap replaces input before output without previ
       output: { filePath: "a.txt", content: "keep" },
     },
   });
-  const wal = createOutbox({
+  const wal = createAuditWal({
     dataDir: config.dataDir,
     login: loginTag(config.backendEndpoint, config.apiKey),
     binding: {
@@ -172,7 +172,7 @@ test("capture that cannot fit the shared cap keeps a counted dead letter and all
     (await rows()).map(({ tool }) => tool),
     ["Read"]
   );
-  const wal = createOutbox({
+  const wal = createAuditWal({
     dataDir: config.dataDir,
     login: loginTag(config.backendEndpoint, config.apiKey),
   });

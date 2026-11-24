@@ -9,10 +9,10 @@ import { REQUEST_CONFIG_KEYS, loadConfig, loginEnforcement } from "./lib/config.
 import { daemonSocketPath, prepareDaemonSocketDir } from "./lib/daemon-socket.mjs";
 import { seedBuiltinProfiles } from "./lib/policy-profiles.mjs";
 import {
-  OUTBOX_SIZE_LIMITS,
+  AUDIT_SIZE_LIMITS,
   LOGIN_TAG,
   auditLoginConfig,
-  createOutbox,
+  createAuditWal,
   loginTag,
 } from "./lib/audit-wal.mjs";
 import { buildAuthHeaders, postJson } from "./lib/common.mjs";
@@ -41,7 +41,7 @@ import { sessionOutput } from "./lib/relogin.mjs";
 import { startIntentRefreshLoop } from "./lib/intent.mjs";
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-const MAX_LINE_BYTES = OUTBOX_SIZE_LIMITS.maxRowBytes + 16 * 1024; // Include the socket envelope around a fitted row.
+const MAX_LINE_BYTES = AUDIT_SIZE_LIMITS.maxRowBytes + 16 * 1024; // Include the socket envelope around a fitted row.
 
 let config = loadConfig();
 ensurePrivateDirSync(config.dataDir);
@@ -154,7 +154,7 @@ function loginWal(tag, binding) {
   if (!logins.has(tag) || (binding && !logins.get(tag).binding))
     logins.set(tag, {
       binding,
-      wal: createOutbox({ dataDir: config.dataDir, login: tag, binding }),
+      wal: createAuditWal({ dataDir: config.dataDir, login: tag, binding }),
     });
   return logins.get(tag);
 }
@@ -206,7 +206,7 @@ async function shipLogin(entry) {
   if (!cfg) return;
   if (!entry.binding) {
     entry.binding = binding;
-    entry.wal = createOutbox({ dataDir: config.dataDir, login: binding.keyId, binding });
+    entry.wal = createAuditWal({ dataDir: config.dataDir, login: binding.keyId, binding });
   }
   await restoreAuditLogin(entry, cfg);
   await entry.wal.drain(
@@ -378,7 +378,7 @@ async function handleLine(rawLine, socket) {
         void wal
           .pendingBytes()
           .then((size) => {
-            if (size > OUTBOX_SIZE_LIMITS.maxBatchBytes) return flushAudit("threshold");
+            if (size > AUDIT_SIZE_LIMITS.maxBatchBytes) return flushAudit("threshold");
           })
           .catch((error) => {
             process.stderr.write(`[daemon] audit threshold check failed: ${error.message}\n`);

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { capabilityOf } from "./backend-posture.mjs";
 import { withBackendPosture } from "./config.mjs";
 import { decisionCode } from "./decision-codes.mjs";
-import { createOutbox, fitOutboxRow, loginTag, recordCaptureFailure } from "./audit-wal.mjs";
+import { createAuditWal, fitAuditRow, loginTag, recordCaptureFailure } from "./audit-wal.mjs";
 
 // conmap-auto mirrors this UUID namespace in block-capture-v1.json.
 const NAMESPACE = Buffer.from("38e3839fd44e5317b41fb2738b0a247a", "hex");
@@ -64,7 +64,7 @@ export async function emitAudit({ dto: row, config, fallback = false }) {
     return "capture failure";
   }
   const captured = fallback ? row : { ...row, capability: capabilityOf(row.tool) };
-  const dto = fitOutboxRow(captured);
+  const dto = fitAuditRow(captured);
   if (config.daemonEnabled && dto) {
     try {
       const { enqueueAuditViaDaemon } = await import("./daemon-client.mjs");
@@ -77,7 +77,7 @@ export async function emitAudit({ dto: row, config, fallback = false }) {
   }
   try {
     const login = loginTag(config.backendEndpoint, config.apiKey);
-    const wal = createOutbox({
+    const wal = createAuditWal({
       dataDir: config.dataDir,
       login,
       binding: { backend: config.backendEndpoint, keyId: login },

@@ -273,6 +273,18 @@ MCP tools: `policy_read`, `register_intent_plan`, and Trust Update tools. There 
 - **Fail-Closed**: Missing tokens, failed planning, invalid proofs — all result in denied tool calls in enforce mode.
 - **Allow-all policy**: With the `all-allow` template, or with no confirmed policy yet, intent is captured but never blocks. Claude is still asked to register a plan, a signed intent token is requested, and audit rows are linked to that plan, but missing plans, drift, expired tokens and proof failures do not deny a tool call. The session banner shows `intent=capture`.
 
+Audit delivery keeps transient failures pending without spending delivery attempts. An authentication
+failure pauses only that login. The daemon checks the original credential every two minutes while it
+is available. A successful check, another successful authenticated call with that same backend and
+credential, or an explicit login restore lets delivery resume.
+
+This version uses separate audit queue files and leaves released versions' files and cursors
+untouched. Unsent older rows without a saved login binding and client row id stay local and are never
+sent by this version. `/armor status` counts them as written by an older version and not sent by this
+version. Older rows with a provable saved binding can be delivered under that original login, using
+stable row ids and receipts in this version's storage. A released daemon can continue to drain its own
+files alongside this version.
+
 ## Data & Privacy
 
 ArmorClaude's security enforcement works by inspecting prompts and tool calls. **What leaves your

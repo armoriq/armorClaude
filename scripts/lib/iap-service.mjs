@@ -7,8 +7,6 @@ import {
 } from "./common.mjs";
 
 export function createIapService(config) {
-  const backendEndpoint =
-    config.backendEndpoint || config.verifyStepEndpoint?.replace(/\/iap\/verify-step$/, "") || "";
   const csrgEndpoint = config.csrgEndpoint || "";
   const timeoutMs = config.timeoutMs || 8000;
   const headers = buildAuthHeaders(config);
@@ -46,7 +44,7 @@ export function createIapService(config) {
         };
       }
 
-      const response = await postJson(endpoint, payload, headers, timeoutMs);
+      const response = await postJson(endpoint, payload, headers, timeoutMs, config);
       if (!response.ok && !isPlainObject(response.data)) {
         throw new Error(response.text || `IAP verify-step failed with status ${response.status}`);
       }
@@ -115,38 +113,6 @@ export function createIapService(config) {
           ? `CSRG verification failed: ${response.text}`
           : `CSRG verification failed with status ${response.status}`,
       };
-    },
-
-    async createAuditLog(dto) {
-      const response = await postJson(`${backendEndpoint}/iap/audit`, dto, headers, timeoutMs);
-
-      if (!response.ok || !response.data) {
-        const message = response.text
-          ? `IAP audit creation failed: ${response.text}`
-          : `IAP audit creation failed with status ${response.status}`;
-        throw new Error(message);
-      }
-
-      return response.data;
-    },
-
-    async createAuditLogBatch(rows) {
-      if (!Array.isArray(rows) || rows.length === 0) {
-        return { written: 0, failures: [] };
-      }
-      const response = await postJson(
-        `${backendEndpoint}/iap/audit/batch`,
-        { rows },
-        headers,
-        timeoutMs
-      );
-      if (!response.ok || !response.data) {
-        const message = response.text
-          ? `IAP audit batch failed: ${response.text}`
-          : `IAP audit batch failed with status ${response.status}`;
-        throw new Error(message);
-      }
-      return response.data;
     },
 
     csrgProofsRequired() {

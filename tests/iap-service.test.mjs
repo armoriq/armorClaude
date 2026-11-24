@@ -63,40 +63,6 @@ test("verifyStep sends correct payload", async () => {
   }
 });
 
-test("createAuditLog sends correct payload", async () => {
-  const originalFetch = globalThis.fetch;
-  let capturedUrl, capturedPayload;
-  globalThis.fetch = async (url, options) => {
-    capturedUrl = url;
-    capturedPayload = JSON.parse(options.body);
-    return new Response(JSON.stringify({ audit_id: "audit-123", iap_sync_status: "synced" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  };
-
-  try {
-    const svc = createIapService(buildConfig());
-    const result = await svc.createAuditLog({
-      token: "jwt-abc",
-      step_index: 0,
-      action: "Read",
-      tool: "Read",
-      input: { file_path: "test.txt" },
-      output: { content: "hello" },
-      status: "success",
-      executed_at: "2026-04-10T00:00:00Z",
-      duration_ms: 100,
-    });
-    assert.equal(capturedUrl, "http://127.0.0.1:3000/iap/audit");
-    assert.equal(capturedPayload.token, "jwt-abc");
-    assert.equal(capturedPayload.action, "Read");
-    assert.equal(result.audit_id, "audit-123");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
 test("verifyWithCsrg sends Merkle proof payload", async () => {
   const originalFetch = globalThis.fetch;
   let capturedPayload;

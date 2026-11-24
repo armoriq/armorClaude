@@ -15,7 +15,7 @@ import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.m
 import { savePolicyState } from "../scripts/lib/policy.mjs";
 import { saveProfile, loadProfile } from "../scripts/lib/policy-profiles.mjs";
 import { postJson } from "../scripts/lib/common.mjs";
-import { createOutbox, loginTag } from "../scripts/lib/audit-wal.mjs";
+import { createAuditWal, loginTag } from "../scripts/lib/audit-wal.mjs";
 import { getSdkClient } from "../scripts/lib/intent.mjs";
 
 // regression: #0010
@@ -36,7 +36,7 @@ test("successful authenticated backend calls lift only the matching persisted au
     });
   };
   for (const call of [pullProfiles, (cfg) => autoRegisterMcp(cfg, "test-server"), sdkCall]) {
-    const wal = createOutbox(options);
+    const wal = createAuditWal(options);
     await wal.appendLine({ tool: "Read" });
     await wal.drain(async () => ({ status: 401, body: {} }), { resolveLogin: () => binding });
     for (const other of [
@@ -53,7 +53,7 @@ test("successful authenticated backend calls lift only the matching persisted au
     assert.equal((await wal.status(() => binding)).undeliverable, 1);
     status = 200;
     await call(config);
-    const recovered = createOutbox(options);
+    const recovered = createAuditWal(options);
     assert.equal((await recovered.status(() => binding)).undeliverable, 0);
     await recovered.drain(async () => ({ status: 200, body: { failures: [] } }), {
       resolveLogin: () => binding,
