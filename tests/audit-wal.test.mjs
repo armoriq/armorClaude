@@ -4,6 +4,9 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:
 import { readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 
 import { OUTBOX_SIZE_LIMITS, createAuditWal, createOutbox } from "../scripts/lib/audit-wal.mjs";
@@ -11,6 +14,10 @@ import { OUTBOX_SIZE_LIMITS, createAuditWal, createOutbox } from "../scripts/lib
 const defaultBinding = { backend: "https://a.invalid", keyId: "0123456789abcdef" };
 const dirs = [];
 after(() => Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true }))));
+const deliver = (wal) =>
+  wal.drain(async () => ({ status: 200, body: { failures: [] } }), {
+    resolveLogin: () => defaultBinding,
+  });
 
 async function fixture() {
   const dir = await mkdtemp(path.join(os.tmpdir(), "armorclaude-wal-"));
@@ -208,6 +215,65 @@ test("appendLine + readPending round-trip", async () => {
   assert.equal(rows[2].action, "c");
 });
 
+test("drain persists across new wal instance (restart)", async () => {
+  const { dir, wal } = await fixture();
+  await wal.appendLine({ id: 1 });
+  await wal.appendLine({ id: 2 });
+  const rows = (await wal.readPending()).map(({ row }) => row);
+  assert.equal(rows.length, 2);
+  await deliver(wal);
+
+  const wal2 = createOutbox({ dataDir: dir, login: "0123456789abcdef" });
+  const second = await wal2.readPending();
+  assert.equal(second.length, 0, "shipped rows should not be re-read");
+
+  await wal2.appendLine({ id: 3 });
+  const third = (await wal2.readPending()).map(({ row }) => row);
+  assert.equal(third.length, 1);
+  assert.equal(third[0].id, 3);
+});
+
+test("crash-replay: missing advance leaves rows for next read", async () => {
+  const { dir, wal } = await fixture();
+  await wal.appendLine({ id: 1 });
+  await wal.appendLine({ id: 2 });
+  await wal.readPending();
+
+  const wal2 = createOutbox({ dataDir: dir, login: "0123456789abcdef" });
+  const rows = (await wal2.readPending()).map(({ row }) => row);
+  assert.equal(rows.length, 2, "uncommitted rows are replayed");
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    [1, 2]
+  );
+});
+
+test("rotation: oversize triggers archive + offset reset", async () => {
+  const { dir } = await fixture();
+  const wal = createOutbox({
+    dataDir: dir,
+    login: "0123456789abcdef",
+    binding: defaultBinding,
+    rotateBytes: 200,
+  });
+
+  for (let i = 0; i < 6; i++) {
+    await wal.appendLine({ id: i, pad: "x".repeat(20) });
+  }
+  const rows = (await wal.readPending()).map(({ row }) => row);
+  assert.equal(rows.length, 6);
+  await deliver(wal);
+
+  const archiveDir = wal._paths.archiveDir;
+  const archived = readdirSync(archiveDir).filter((f) => f.endsWith(".jsonl"));
+  assert.equal(archived.length, 1, "rotation creates one archive segment");
+
+  await wal.appendLine({ id: 99 });
+  const after = (await wal.readPending()).map(({ row }) => row);
+  assert.equal(after.length, 1);
+  assert.equal(after[0].id, 99);
+});
+
 test("malformed line is skipped, not blocking the stream", async () => {
   const { wal } = await fixture();
   await wal.appendLine({ id: 1 });
@@ -223,6 +289,185 @@ test("malformed line is skipped, not blocking the stream", async () => {
     rows.map((r) => r.id),
     [1, 3]
   );
+});
+
+test("metadata over the shared cap is retained as an oversize dead letter", async () => {
+  const { wal } = await fixture();
+  const huge = { pad: "x".repeat(300_000) };
+  await wal.appendLine(huge);
+  assert.deepEqual(
+    (await wal.readPending()).map(({ row }) => row),
+    []
+  );
+  assert.deepEqual(
+    (await wal.readDeadLetters()).map(({ row, reason, attempts }) => ({ row, reason, attempts })),
+    [{ row: huge, reason: "oversize", attempts: 0 }]
+  );
+});
+
+test("dead letters and the immutable login binding survive reopening with private file modes", async () => {
+  const { dir } = await fixture();
+  const binding = { backend: "https://a.invalid", keyId: "key-a" };
+  const opts = { dataDir: dir, login: "0123456789abcdef", binding };
+  const wal = createOutbox(opts);
+  await wal.appendLine({ client_row_id: "row-a", tool: "Bash", input: {} });
+  await wal.drain(
+    async ({ rows }) => ({
+      status: 200,
+      body: {
+        results: rows.map(({ client_row_id }) => ({
+          client_row_id,
+          outcome: "rejected",
+          error: "invalid tool",
+        })),
+      },
+    }),
+    { resolveLogin: () => binding }
+  );
+  const recovered = createOutbox(opts);
+  assert.equal((await recovered.readDeadLetters()).length, 1);
+  assert.equal((await stat(wal._paths.offsetPath)).mode & 0o777, 0o600);
+  assert.equal((await stat(path.dirname(wal._paths.currentPath))).mode & 0o777, 0o700);
+  const stored = await readFile(wal._paths.offsetPath, "utf8");
+  assert.ok(stored.includes("key-a"));
+  await assert.rejects(
+    () => createOutbox({ ...opts, binding: { ...binding, keyId: "key-b" } }).appendLine({}),
+    /binding/
+  );
+});
+
+test("batch_oversize outcomes split and resend without losing accepted rows", async () => {
+  const { dir } = await fixture();
+  const binding = { backend: "https://a.invalid", keyId: "key-a" };
+  const wal = createOutbox({ dataDir: dir, login: "0123456789abcdef", binding });
+  const [one, two, three] = Array.from({ length: 3 }, () => randomUUID());
+  for (const client_row_id of [one, two, three])
+    await wal.appendLine({ client_row_id, tool: "Bash" });
+  const sizes = [];
+  await wal.drain(
+    async ({ rows }) => {
+      sizes.push(rows.length);
+      return {
+        status: 200,
+        body: {
+          results: rows.map(({ client_row_id }) => ({
+            client_row_id,
+            outcome: rows.length > 1 || client_row_id !== one ? "retryable" : "accepted",
+            ...(rows.length > 1 ? { error: "batch_oversize" } : { error: "busy" }),
+          })),
+        },
+      };
+    },
+    { resolveLogin: () => binding }
+  );
+  assert.deepEqual(sizes, [3, 1, 2, 1, 1]);
+  assert.deepEqual(
+    (await wal.readPending()).map(({ row, attempts }) => [row.client_row_id, attempts]),
+    [
+      [two, 0],
+      [three, 0],
+    ]
+  );
+});
+
+// regression: #0010
+test("batch resizing keeps Retry-After across restart before resending smaller requests", async () => {
+  const { dir } = await fixture();
+  let now = 1_000;
+  const binding = { backend: "https://a.invalid", keyId: "key-a" };
+  const options = {
+    dataDir: dir,
+    login: "0123456789abcdef",
+    binding,
+    clock: { now: () => now, random: () => 0.5 },
+  };
+  const wal = createOutbox(options);
+  for (const client_row_id of ["one", "two"]) await wal.appendLine({ client_row_id, tool: "Read" });
+  let sends = 0;
+  await wal.drain(
+    async ({ rows }) => {
+      sends += 1;
+      return {
+        status: 429,
+        headers: { "retry-after": "120" },
+        body: {
+          results: rows.map(({ client_row_id }) => ({
+            client_row_id,
+            outcome: "retryable",
+            error: "batch_oversize",
+          })),
+        },
+      };
+    },
+    { resolveLogin: () => binding }
+  );
+  assert.equal(sends, 1);
+  const recovered = createOutbox(options);
+  await recovered.drain(() => assert.fail("sent before Retry-After"), {
+    resolveLogin: () => binding,
+  });
+  now += 120_000;
+  const sizes = [];
+  await recovered.drain(
+    async ({ rows }) => {
+      sizes.push(rows.length);
+      return { status: 200, body: { failures: [] } };
+    },
+    { resolveLogin: () => binding }
+  );
+  assert.deepEqual(sizes, [1, 1]);
+  assert.deepEqual(await recovered.readPending(), []);
+  for (let n = 0; n < 3; n += 1)
+    await recovered.appendLine({ client_row_id: randomUUID(), tool: "Healthy" });
+  const healthySizes = [];
+  await recovered.drain(
+    async ({ rows }) => {
+      healthySizes.push(rows.length);
+      return { status: 200, body: { failures: [] } };
+    },
+    { resolveLogin: () => binding }
+  );
+  assert.deepEqual(healthySizes, [3]);
+});
+
+test("an accepted tenth delivery whose acknowledgement failed is recovered without a false dead letter or an eleventh send", async () => {
+  const { dir } = await fixture();
+  const binding = { backend: "https://a.invalid", keyId: "key-a" };
+  let now = 1_000;
+  let fault = null;
+  const options = {
+    dataDir: dir,
+    login: "0123456789abcdef",
+    binding,
+    clock: { now: () => now, random: () => 0.5 },
+    beforeCommit(point) {
+      if (fault === point) {
+        fault = null;
+        throw new Error("injected ack failure");
+      }
+    },
+  };
+  const wal = createOutbox(options);
+  await wal.appendLine({ client_row_id: "one", tool: "Read" });
+  for (let attempt = 1; attempt < 10; attempt += 1) {
+    await wal.drain(async () => ({ status: 409, body: {} }), { resolveLogin: () => binding });
+    now = (await wal.readPending())[0].nextAttemptAt;
+  }
+  fault = "ack";
+  await assert.rejects(
+    () =>
+      wal.drain(async () => ({ status: 200, body: { failures: [] } }), {
+        resolveLogin: () => binding,
+      }),
+    /injected/
+  );
+  const recovered = createOutbox(options);
+  assert.equal((await recovered.readPending())[0].attempts, 9);
+  await recovered.drain(() => assert.fail("sent an eleventh time"), {
+    resolveLogin: () => binding,
+  });
+  assert.deepEqual(await recovered.readPending(), []);
+  assert.deepEqual(await recovered.readDeadLetters(), []);
 });
 
 test("readPending returns rows in enqueue order even when disk order is scrambled", async () => {
@@ -271,6 +516,183 @@ test("concurrent appends from many writers do not interleave", async () => {
   assert.equal(ids.size, N, "no rows lost or duplicated");
 });
 
+test("a separate process owns the delivery lease and its acknowledgement preserves another process's append", async (t) => {
+  const { dir } = await fixture();
+  const binding = { backend: "https://a.invalid", keyId: "key-a" };
+  const options = { dataDir: dir, login: "0123456789abcdef", binding };
+  const wal = createOutbox(options);
+  await wal.appendLine({ client_row_id: "first", tool: "Read" });
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+    import { createOutbox } from ${JSON.stringify(new URL("../scripts/lib/audit-wal.mjs", import.meta.url).href)};
+    const options = JSON.parse(process.argv[1]);
+    const wal = createOutbox(options);
+    await wal.drain(async ({ rows }) => {
+      process.stdout.write("sending\\n");
+      await new Promise((resolve) => process.stdin.once("data", resolve));
+      return { status: 200, body: { failures: [] } };
+    }, { resolveLogin: () => options.binding });
+  `,
+      JSON.stringify(options),
+    ],
+    { stdio: ["pipe", "pipe", "pipe"] }
+  );
+  const exited = once(child, "exit");
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  });
+  const lines = createInterface({ input: child.stdout });
+  await Promise.race([
+    once(lines, "line"),
+    exited.then(() => {
+      throw new Error("drainer exited before delivery");
+    }),
+  ]);
+  try {
+    await wal.drain(() => assert.fail("a second process sent while the lease was live"), {
+      resolveLogin: () => binding,
+    });
+    await wal.appendLine({ client_row_id: "second", tool: "Write" });
+  } finally {
+    child.stdin.end("reply");
+  }
+  assert.equal((await exited)[0], 0);
+  assert.deepEqual(
+    (await wal.readPending()).map(({ row }) => row.client_row_id),
+    ["second"]
+  );
+});
+
+test("pendingBytes shrinks after drain", async () => {
+  const { wal } = await fixture();
+  assert.equal(await wal.pendingBytes(), 0);
+  await wal.appendLine({ id: 1 });
+  await wal.appendLine({ id: 2 });
+  const before = await wal.pendingBytes();
+  assert.ok(before > 0);
+
+  await deliver(wal);
+  const after = await wal.pendingBytes();
+  assert.equal(after, 0);
+});
+
+// regression: #0010
+test("rotation keeps every delivered segment", async () => {
+  const { dir } = await fixture();
+  const wal = createOutbox({
+    dataDir: dir,
+    login: "0123456789abcdef",
+    binding: defaultBinding,
+    rotateBytes: 50,
+  });
+
+  for (let r = 0; r < 8; r++) {
+    for (let i = 0; i < 3; i++) {
+      await wal.appendLine({ rotation: r, id: i });
+    }
+    await deliver(wal);
+  }
+  assert.equal(readdirSync(wal._paths.archiveDir).length, 8, "every delivered segment is retained");
+  await wal.pruneArchive(3);
+  const retained = (
+    await Promise.all(
+      readdirSync(wal._paths.archiveDir, { recursive: true })
+        .filter((name) => name.endsWith(".jsonl"))
+        .map((name) => readFile(path.join(wal._paths.archiveDir, name), "utf8"))
+    )
+  )
+    .join("")
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.equal(retained.length, 24);
+});
+
+// regression: #0010
+test("a long transport outage never exhausts rows and every captured row is delivered after recovery", async (t) => {
+  for (const failure of ["network", "timeout", 503, 429]) {
+    await t.test(String(failure), async () => {
+      const { dir } = await fixture();
+      const binding = { backend: "https://a.invalid", keyId: "key-a" };
+      let now = 1_000;
+      const options = {
+        dataDir: dir,
+        login: "0123456789abcdef",
+        binding,
+        clock: { now: () => now, random: () => 0.5 },
+      };
+      let wal = createOutbox(options);
+      const captured = Array.from({ length: 12 }, () => ({
+        client_row_id: randomUUID(),
+        tool: "Read",
+      }));
+      for (const row of captured) await wal.appendLine(row);
+      for (let retry = 0; retry < 40; retry += 1) {
+        await wal.drain(
+          async () => {
+            if (failure === "network") throw new Error("connection lost");
+            if (failure === "timeout")
+              throw Object.assign(new Error("request timed out"), { name: "TimeoutError" });
+            return { status: failure, body: {} };
+          },
+          { resolveLogin: () => binding }
+        );
+        wal = createOutbox(options);
+        const pending = await wal.readPending();
+        assert.equal(pending.length, captured.length);
+        assert.ok(pending.every(({ attempts }) => attempts === 0));
+        const next = Math.max(...pending.map(({ nextAttemptAt }) => nextAttemptAt));
+        assert.ok(next > now && next - now <= 300_000);
+        now = next;
+      }
+      assert.ok(now > 30 * 60_000);
+      const delivered = [];
+      await wal.drain(
+        async ({ rows }) => {
+          delivered.push(...rows);
+          return { status: 200, body: { failures: [] } };
+        },
+        { resolveLogin: () => binding }
+      );
+      assert.deepEqual(delivered, captured);
+      assert.deepEqual(await wal.readPending(), []);
+      assert.deepEqual(await wal.readDeadLetters(), []);
+    });
+  }
+});
+
+// regression: #0010
+test("settled history compacts and dead letter history stays off append, restore and idle drain paths", async () => {
+  const { dir } = await fixture();
+  const binding = { backend: "https://a.invalid", keyId: "key-a" };
+  const wal = createOutbox({ dataDir: dir, login: "0123456789abcdef", binding });
+  for (let n = 0; n < 100; n += 1)
+    await wal.appendLine({ client_row_id: randomUUID(), metadata: "x".repeat(20_000) });
+  for (let n = 0; n < 200; n += 1)
+    await wal.appendLine({ client_row_id: randomUUID(), tool: "Read" });
+  await wal.drain(async () => ({ status: 200, body: { failures: [] } }), {
+    resolveLogin: () => binding,
+  });
+  const statePath = path.join(dir, "audit", "0123456789abcdef", "outbox-state.json");
+  const deadPath = path.join(dir, "audit", "0123456789abcdef", "dead-letters.jsonl");
+  await wal.restoreLogin("same-login");
+  const before = await stat(statePath);
+  const dead = await stat(deadPath);
+  assert.ok(before.size < 4096);
+  assert.ok(dead.size > 2_000_000);
+  await wal.restoreLogin("same-login");
+  await wal.drain(() => assert.fail("an idle drain sent rows"), { resolveLogin: () => binding });
+  await wal.appendLine({ client_row_id: randomUUID(), tool: "Write" });
+  assert.equal((await stat(statePath)).ino, before.ino);
+  assert.equal((await stat(deadPath)).size, dead.size);
+  assert.equal((await wal.status()).deadLetters, 100);
+  assert.equal((await stat(deadPath)).mode & 0o777, 0o600);
+});
+
 // regression: #0010
 test("status does not turn malformed input into a write or a dead letter", async () => {
   const { wal } = await fixture();
@@ -280,6 +702,63 @@ test("status does not turn malformed input into a write or a dead letter", async
   assert.equal((await wal.status()).undeliverable, 2);
   assert.deepEqual(await wal.readDeadLetters(), []);
   assert.equal(await readFile(wal._paths.offsetPath, "utf8"), before);
+});
+
+// regression: #0010
+test("the shipped row keeps the base 4000 byte content cap", async () => {
+  const { wal } = await fixture();
+  const row = {
+    client_row_id: randomUUID(),
+    tool: "Write",
+    input: { content: "x".repeat(5000) },
+    executed_at: "2026-11-18T00:00:00.000Z",
+  };
+  await wal.appendLine(row);
+  const [pending] = await wal.readPending();
+  assert.deepEqual(pending.row, { ...row, input: { truncated: true } });
+  assert.ok(Buffer.byteLength(JSON.stringify(pending.row)) <= 4000);
+});
+
+// regression: #0010
+test("a dead letter committed before settlement recovers once after a storage failure", async () => {
+  const { dir } = await fixture();
+  const binding = { backend: "https://a.invalid", keyId: "key-a" };
+  let fail = true;
+  const options = {
+    dataDir: dir,
+    login: "0123456789abcdef",
+    binding,
+    beforeCommit(point) {
+      if (point === "deadLetterWritten" && fail) {
+        fail = false;
+        throw new Error("storage failed after dead letter sync");
+      }
+    },
+  };
+  const wal = createOutbox(options);
+  const row = { client_row_id: randomUUID(), tool: "Read" };
+  await wal.appendLine(row);
+  await assert.rejects(
+    () =>
+      wal.drain(
+        async ({ rows }) => ({
+          status: 200,
+          body: {
+            results: rows.map(({ client_row_id }) => ({
+              client_row_id,
+              outcome: "rejected",
+              error: "invalid",
+            })),
+          },
+        }),
+        { resolveLogin: () => binding }
+      ),
+    /storage failed/
+  );
+  const recovered = createOutbox(options);
+  assert.deepEqual(await recovered.readPending(), []);
+  assert.deepEqual(await recovered.readDeadLetters(), [{ row, reason: "invalid", attempts: 1 }]);
+  assert.equal((await recovered.status()).deadLetters, 1);
 });
 
 // regression: #0010

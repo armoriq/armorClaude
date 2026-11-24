@@ -9,6 +9,7 @@ import {
   fsyncSync,
   fstatSync,
   ftruncateSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -28,6 +29,7 @@ import {
   tightenDirFilesOnce,
   writePrivateFile,
 } from "./fs-store.mjs";
+import { sdkModule } from "./sdk.mjs";
 import sizeLimits from "./audit-size-limits.json" with { type: "json" };
 
 const MAX_LINE_BYTES = 4000;
@@ -732,8 +734,320 @@ export function createOutbox(opts) {
     });
   }
 
+  const clock = opts.clock ?? { now: () => Date.now(), random: () => Math.random() };
+  const timing = {
+    baseMs: 1000,
+    maxMs: 300_000,
+    lockTtlMs: 120_000,
+    authProbeMs: 120_000,
+    ...opts.timing,
+  };
+
+  function rotate(state) {
+    const file = path.join(dir, state.active);
+    if (!existsSync(file) || state.offset < statSync(file).size) return;
+    const info = statSync(file);
+    if (
+      info.size < (opts.rotateBytes ?? 10 * 1024 * 1024) &&
+      clock.now() - info.mtimeMs < (opts.rotateAgeMs ?? 60 * 60 * 1000)
+    )
+      return;
+    privateDir(archiveDir);
+    const archived = path.join(
+      archiveDir,
+      `${new Date(clock.now()).toISOString().slice(0, 10)}-${randomUUID()}.jsonl`
+    );
+    linkSync(file, archived);
+    syncDir(archiveDir);
+    const next = `outbox-current-${randomUUID()}.jsonl`;
+    durableAppend(path.join(dir, next), "");
+    // The pointer and acknowledgements commit together, so rotation cannot replay another segment's offset.
+    state.active = next;
+    state.offset = 0;
+    state.settled = [];
+    state.attempts = {};
+    state.identities = {};
+    persist(state);
+    unlinkSync(file);
+    syncDir(dir);
+  }
+
+  function parseResults(body, batch) {
+    if (!body || typeof body !== "object") return null;
+    const results = new Map();
+    if (Object.hasOwn(body, "results")) {
+      if (!Array.isArray(body.results)) return null;
+      const ids = new Set(batch.map(({ row }) => row.client_row_id));
+      for (const result of body.results) {
+        if (
+          !result ||
+          !ids.has(result.client_row_id) ||
+          results.has(result.client_row_id) ||
+          !["accepted", "duplicate", "retryable", "rejected"].includes(result.outcome) ||
+          (result.error !== undefined && typeof result.error !== "string")
+        )
+          return null;
+        results.set(result.client_row_id, result);
+      }
+      return new Map(batch.map((entry) => [entry.id, results.get(entry.row.client_row_id)]));
+    }
+    if (!Array.isArray(body.failures)) return null;
+    for (const failure of body.failures) {
+      if (
+        !failure ||
+        !Number.isInteger(failure.index) ||
+        failure.index < 0 ||
+        failure.index >= batch.length ||
+        results.has(batch[failure.index].id) ||
+        typeof failure.error !== "string"
+      )
+        return null;
+      results.set(batch[failure.index].id, { outcome: "retryable", error: failure.error });
+    }
+    return new Map(
+      batch.map((entry) => [entry.id, results.get(entry.id) ?? { outcome: "accepted" }])
+    );
+  }
+
+  function delay(attempts, header) {
+    const cap = Math.min(timing.maxMs, timing.baseMs * 2 ** Math.min(32, attempts - 1));
+    let retryAfter = 0;
+    if (typeof header === "string" && header.trim()) {
+      const seconds = Number(header);
+      retryAfter = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - clock.now();
+    }
+    return Math.max(
+      cap / 2 + (clock.random() * cap) / 2,
+      Number.isFinite(retryAfter) ? retryAfter : 0
+    );
+  }
+
+  async function authenticationSucceeded(login) {
+    return transaction((state) => {
+      if (!state.paused || !sameLogin(state.binding, login)) return;
+      state.paused = false;
+      delete state.nextProbeAt;
+      persist(state);
+    });
+  }
+
+  async function drain(send, { resolveLogin = () => null, probe } = {}) {
+    const login = await resolveLogin(bound);
+    const generation = randomUUID();
+    let batchRows = limits.maxBatchRows;
+    const selection = await transaction((state) => {
+      if (!sameLogin(state.binding, login) || (state.lease && state.lease.expiresAt > clock.now()))
+        return null;
+      batchRows = Math.min(batchRows, state.batchRows ?? batchRows);
+      const pending = entries(state).filter((entry) => entry.nextAttemptAt <= clock.now());
+      if (state.paused) {
+        if (!probe) return null;
+        if (state.nextProbeAt === undefined) {
+          state.nextProbeAt = clock.now() + timing.authProbeMs;
+          persist(state);
+        }
+        if (state.nextProbeAt > clock.now()) return null;
+        state.nextProbeAt = clock.now() + timing.authProbeMs;
+        state.lease = { generation, expiresAt: clock.now() + timing.lockTtlMs };
+        persist(state);
+        return { probe: true };
+      }
+      if (!pending.length) return null;
+      state.lease = { generation, expiresAt: clock.now() + timing.lockTtlMs };
+      for (const entry of pending) {
+        if (
+          entry.malformed ||
+          (typeof entry.row.client_row_id === "string" && ROW_ID.test(entry.row.client_row_id))
+        )
+          continue;
+        // Persist generated ids before sending so a crash cannot replay a row under a new identity.
+        const id = randomUUID();
+        state.identities ??= {};
+        state.identities[entry.id] = id;
+        entry.row.client_row_id = id;
+      }
+      persist(state);
+      return { pending };
+    });
+    if (!selection) return;
+    const owns = (state) =>
+      state.lease?.generation === generation && state.lease.expiresAt > clock.now();
+    async function deliver(batch) {
+      const current = await resolveLogin(bound);
+      const allowed = await transaction(
+        (state) => owns(state) && !state.paused && sameLogin(state.binding, current)
+      );
+      if (!allowed) return;
+      let reply;
+      let networkError;
+      try {
+        reply = await send({ login: copy(bound), rows: batch.map(({ row }) => copy(row)) });
+      } catch (error) {
+        networkError = String(error);
+        reply = { status: 0, body: null };
+      }
+      const hasResults =
+        !!reply?.body && typeof reply.body === "object" && Object.hasOwn(reply.body, "results");
+      const results =
+        hasResults || (reply?.status >= 200 && reply.status < 300)
+          ? parseResults(reply.body, batch)
+          : null;
+      const split = !hasResults && [400, 422].includes(reply?.status) && batch.length > 1;
+      if (split) {
+        const middle = Math.floor(batch.length / 2);
+        await deliver(batch.slice(0, middle));
+        await deliver(batch.slice(middle));
+        return;
+      }
+      const resize = await transaction((state) => {
+        if (!owns(state)) return [];
+        if (reply?.status === 401 || (reply?.status === 403 && !(hasResults && results))) {
+          state.paused = true;
+          state.nextProbeAt = clock.now() + timing.authProbeMs;
+          persist(state);
+          return [];
+        }
+        const decisions = new Map();
+        for (const entry of batch) {
+          const prior = state.attempts[entry.id] ?? { attempts: 0 };
+          const result = results?.get(entry.id);
+          const transient =
+            !reply?.status ||
+            [408, 429].includes(reply.status) ||
+            reply.status >= 500 ||
+            (reply.status === 409 && reply.body?.error === "request_in_progress") ||
+            result?.outcome === "retryable" ||
+            (hasResults && (!results || !result)) ||
+            (reply.status >= 200 && reply.status < 300);
+          const attempts = prior.attempts + (result?.outcome === "rejected" || !transient ? 1 : 0);
+          const failures = (prior.failures ?? prior.attempts) + 1;
+          const reason =
+            result?.error ||
+            networkError ||
+            (result ? result.outcome : `HTTP ${reply?.status ?? 0}: unreadable or missing outcome`);
+          const ack = ["accepted", "duplicate"].includes(result?.outcome);
+          const dead =
+            result?.outcome === "rejected" ||
+            attempts >= 10 ||
+            (!hasResults && batch.length === 1 && [400, 422].includes(reply?.status));
+          state.attempts[entry.id] = {
+            attempts,
+            failures,
+            delivered: ack,
+            lastError: reason,
+            nextAttemptAt:
+              ack || dead ? 0 : clock.now() + delay(failures, reply?.headers?.["retry-after"]),
+          };
+          if (ack) decisions.set(entry.id, "ack");
+          else if (dead) decisions.set(entry.id, "deadLetter");
+        }
+        persist(state);
+        if ([...decisions.values()].includes("ack")) opts.beforeCommit?.("ack");
+        for (const entry of batch) {
+          const decision = decisions.get(entry.id);
+          if (!decision) continue;
+          if (decision === "deadLetter")
+            deadLetter(
+              state,
+              entry.row,
+              state.attempts[entry.id].lastError,
+              state.attempts[entry.id].attempts,
+              entry
+            );
+          else settle(state, entry);
+        }
+        const oversized = batch.filter(
+          (entry) =>
+            batch.length > 1 &&
+            !decisions.has(entry.id) &&
+            results?.get(entry.id)?.outcome === "retryable" &&
+            results?.get(entry.id)?.error === "batch_oversize"
+        );
+        if (oversized.length) {
+          batchRows = Math.min(batchRows, Math.max(1, Math.floor(batch.length / 2)));
+          state.batchRows = batchRows;
+        }
+        if (batch.every((entry) => decisions.get(entry.id) === "ack")) {
+          delete state.batchRows;
+          batchRows = limits.maxBatchRows;
+        }
+        persist(state);
+        return reply?.headers?.["retry-after"] ? [] : oversized;
+      });
+      if (resize.length) {
+        const middle = Math.max(1, Math.floor(resize.length / 2));
+        await deliver(resize.slice(0, middle));
+        if (middle < resize.length) await deliver(resize.slice(middle));
+      }
+    }
+    try {
+      let selected = selection.pending;
+      if (selection.probe) {
+        let reply;
+        try {
+          reply = await probe({ login: copy(bound) });
+        } catch {
+          return;
+        }
+        const current = await resolveLogin(bound);
+        selected = await transaction((state) => {
+          if (!owns(state) || !sameLogin(state.binding, current)) return null;
+          if (!(reply?.status >= 200 && reply.status < 300)) return null;
+          state.paused = false;
+          delete state.nextProbeAt;
+          persist(state);
+          return entries(state).filter((entry) => entry.nextAttemptAt <= clock.now());
+        });
+        if (!selected) return;
+      }
+      let batch = [];
+      for (const entry of selected) {
+        if (entry.malformed || entry.delivered || entry.attempts >= 10) {
+          await transaction((state) => {
+            if (!owns(state)) return;
+            if (entry.delivered) {
+              opts.beforeCommit?.("ack");
+              settle(state, entry);
+            } else
+              deadLetter(
+                state,
+                entry.row,
+                entry.malformed ? "malformed" : entry.lastError,
+                entry.attempts,
+                entry
+              );
+            persist(state);
+          });
+          continue;
+        }
+        if (
+          batch.length &&
+          (batch.length >= batchRows ||
+            batch.some(
+              ({ row }) => row.client_row_id && row.client_row_id === entry.row.client_row_id
+            ) ||
+            bytes({ rows: [...batch, entry].map(({ row }) => row) }) > limits.maxBatchBytes)
+        ) {
+          await deliver(batch);
+          batch = [];
+        }
+        batch.push(entry);
+      }
+      if (batch.length) await deliver(batch);
+    } finally {
+      await transaction((state) => {
+        if (state.lease?.generation !== generation) return;
+        state.lease = null;
+        persist(state);
+        rotate(state);
+      });
+    }
+  }
+
   return {
     appendLine,
+    drain,
+    authenticationSucceeded,
     readPending: () => transaction((state) => pendingEntries(state), { write: false }),
     readDeadLetters: () =>
       transaction(
@@ -820,4 +1134,77 @@ export function createOutbox(opts) {
       archiveDir,
     },
   };
+}
+
+export async function recordCaptureFailure(dataDir, code, executedAt = new Date().toISOString()) {
+  await locked(dataDir, () => {
+    const fd = openSync(path.join(dataDir, "audit-capture-failures.jsonl"), "a", PRIVATE_FILE_MODE);
+    try {
+      writeFileSync(fd, JSON.stringify({ code, executed_at: executedAt }) + "\n");
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    syncDir(dataDir);
+  });
+}
+
+export async function auditStatus(dataDir, resolveLogin = () => null) {
+  const root = path.join(dataDir, "audit");
+  const total = { undeliverable: 0, olderVersion: 0, deadLetters: 0, captureFailures: 0 };
+  if (existsSync(root))
+    for (const name of readdirSync(root)) {
+      if (LOGIN_TAG.test(name)) {
+        const wal = createOutbox({ dataDir, login: name });
+        const status = await wal.status(resolveLogin);
+        total.undeliverable += status.undeliverable;
+        total.olderVersion += status.olderVersion;
+        total.deadLetters += status.deadLetters;
+      } else if (name === "current.jsonl") {
+        const buffer = readFileSync(path.join(root, name));
+        const offsetFile = path.join(root, "shipped.offset");
+        const offset = existsSync(offsetFile) ? Number(readFileSync(offsetFile, "utf8").trim()) : 0;
+        if (!Number.isSafeInteger(offset) || offset < 0)
+          throw new Error("Invalid legacy audit offset");
+        const olderVersion = buffer
+          .subarray(offset <= buffer.length ? offset : 0)
+          .toString("utf8")
+          .split("\n")
+          .filter(Boolean).length;
+        total.undeliverable += olderVersion;
+        total.olderVersion += olderVersion;
+      }
+    }
+  const failures = path.join(dataDir, "audit-capture-failures.jsonl");
+  if (existsSync(failures))
+    total.captureFailures = readFileSync(failures, "utf8").split("\n").filter(Boolean).length;
+  return total;
+}
+
+export async function recordAuthenticationSuccess(config) {
+  if (!config?.dataDir || !config.backendEndpoint || !config.apiKey || config.signedOut) return;
+  const keyId = loginTag(config.backendEndpoint, config.apiKey);
+  const statePath = path.join(config.dataDir, "audit", keyId, "outbox-state.json");
+  if (!existsSync(statePath) || !JSON.parse(readFileSync(statePath, "utf8")).paused) return;
+  const binding = { backend: config.backendEndpoint, keyId };
+  await createOutbox({ dataDir: config.dataDir, login: keyId, binding }).authenticationSucceeded(
+    binding
+  );
+}
+
+export function auditLoginConfig(binding, base = {}) {
+  if (!identified(binding)) return null;
+  if (base.signedOut && base.backendEndpoint === binding.backend) return null;
+  const profile = sdkModule("credentials").loadLoginContext({
+    backend: binding.backend,
+    product: "armorclaude",
+  })?.profile;
+  const local =
+    base.armoriqEnv === "local" &&
+    base.backendEndpoint === binding.backend &&
+    !base.signedOut &&
+    base.apiKey === "ak_test_localmock000000000000";
+  const apiKey = profile?.apiKey || (local ? base.apiKey : "");
+  if (!apiKey || loginTag(binding.backend, apiKey) !== binding.keyId) return null;
+  return { ...base, apiKey, backendEndpoint: binding.backend, loggedInAt: profile?.loggedInAt };
 }
