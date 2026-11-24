@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import { savePolicyState } from "../scripts/lib/policy.mjs";
 import { markReloginRequired } from "../scripts/lib/relogin.mjs";
@@ -25,9 +26,9 @@ const POLICY = {
   ],
 };
 
-async function orgSession(t, active) {
+async function orgSession(t, active, status = 200) {
   const backend = await startBackend({
-    "GET /policies/profiles/active": () => [200, { version: 1, policy: null, ...active }],
+    "GET /policies/profiles/active": () => [status, { version: 1, policy: null, ...active }],
   });
   const session = await startHookSession(t, backend, { ARMORIQ_ORG_MODE: "" });
   await savePolicyState(path.join(session.dataDir, "policy.json"), { version: 1, policy: POLICY });
@@ -116,6 +117,46 @@ test("an org that says Enforce blocks the call", async (t) => {
   });
   assert.equal(out.hookSpecificOutput.permissionDecision, "deny");
 });
+
+for (const [label, status, active, loseModeFile] of [
+  ["cannot fetch its mode on the first session", 500, {}, false],
+  ["sends a mode the plugin does not know", 200, { enforcementMode: "block" }, false],
+  ["confirmed Enforce and then lost its mode file", 200, { enforcementMode: "enforce" }, true],
+]) {
+  // regression: #13
+  test(`an org that ${label} blocks calls that change things, reports them, and still runs reads`, async (t) => {
+    const { hook, backend, dataDir } = await orgSession(t, active, status);
+    if (loseModeFile) await rm(path.join(dataDir, "org-mode.json"));
+    const pre = (tool_name, tool_input) =>
+      hook({
+        hook_event_name: "PreToolUse",
+        tool_name,
+        tool_input,
+        tool_use_id: `use-${tool_name}`,
+      });
+
+    const bash = await pre("Bash", { command: "ls" });
+    assert.equal(bash?.hookSpecificOutput?.permissionDecision, "deny", JSON.stringify(bash));
+    assert.match(
+      bash.hookSpecificOutput.permissionDecisionReason,
+      /ArmorIQ has not confirmed this org's enforcement mode/
+    );
+    const read = await pre("Read", { file_path: "/tmp/x" });
+    assert.notEqual(read?.hookSpecificOutput?.permissionDecision, "deny", JSON.stringify(read));
+    const ask = await pre("AskUserQuestion", { questions: [] });
+    assert.doesNotMatch(JSON.stringify(ask), /enforcement mode/);
+
+    await hook({ hook_event_name: "Stop" });
+    await waitFor(() => backend.auditRows.length === 2, 15_000, "the blocked rows");
+    assert.deepEqual(
+      backend.auditRows.map((r) => [r.tool, r.status, r.error_message]),
+      [
+        ["Bash", "blocked", "org_mode_unknown"],
+        ["AskUserQuestion", "blocked", "intent_plan_missing"],
+      ]
+    );
+  });
+}
 
 test("an org in Monitor shows nothing in the session from the session start that learns it, and an Enforce org shows its sign-in line from the same point", async (t) => {
   const mode = { enforcementMode: "shadow" };

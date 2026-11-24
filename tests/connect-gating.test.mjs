@@ -11,15 +11,23 @@ import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
 const PROD = "https://api.armoriq.ai";
 const LOGIN_LINE = `No ArmorClaude login for ${PROD}. Run: armoriq login --product armorclaude --backend ${PROD}`;
 
-for (const [org, forced, orgMonitor] of [
-  [null, "", true],
-  ["shadow", "", true],
-  ["enforce", "", false],
-  ["shadow", "enforce", false],
+for (const [file, forced, orgMonitor, orgModeUnknown] of [
+  [null, "", false, true],
+  ["{not json", "", false, true],
+  [{ mode: "block" }, "", false, true],
+  [{ mode: "shadow" }, "", true, false],
+  [{ mode: "enforce" }, "", false, false],
+  [{ mode: "shadow" }, "enforce", false, false],
+  [null, "enforce", false, false],
 ]) {
-  test(`loadConfig: a usable key with org mode ${org} and ARMORIQ_ORG_MODE=${forced} gives orgMonitor=${orgMonitor}`, async () => {
+  // regression: #13
+  test(`loadConfig: a usable key with org mode file ${JSON.stringify(file)} and ARMORIQ_ORG_MODE=${forced} gives orgMonitor=${orgMonitor}, orgModeUnknown=${orgModeUnknown}`, async () => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "connect-gating-"));
-    if (org) await writeFile(path.join(dataDir, "org-mode.json"), JSON.stringify({ mode: org }));
+    if (file !== null)
+      await writeFile(
+        path.join(dataDir, "org-mode.json"),
+        typeof file === "string" ? file : JSON.stringify(file)
+      );
     const config = loadConfigWithLogins([{ backend: PROD, apiKey: "ak_live_abc1234567890" }], {
       ARMORIQ_ENV: "production",
       CLAUDE_PLUGIN_DATA: dataDir,
@@ -28,6 +36,7 @@ for (const [org, forced, orgMonitor] of [
     assert.equal(config.apiKey, "ak_live_abc1234567890");
     assert.equal(config.mode, "enforce");
     assert.equal(config.orgMonitor, orgMonitor);
+    assert.equal(config.orgModeUnknown, orgModeUnknown);
     assert.equal(config.intentRequired, !orgMonitor);
     assert.equal(config.unconfigured, false);
   });
