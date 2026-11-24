@@ -160,20 +160,26 @@ test("a backend nobody listens on blocks Bash with backend_unreachable and lets 
   assert.match(reasonOf(bash), /backend_unreachable/);
 });
 
-test("a 401 signs the plugin out instead of marking the backend unreachable", async (t) => {
+// regression: #13
+test("a 401 signs the plugin out, blocks calls that change things with a sign-in prompt, and stops calling the backend", async (t) => {
   const backend = await switchableBackend();
   const { hook, dataDir } = await startHookSession(t, backend);
-  const bash = () =>
-    hook({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls" } });
+  const pre = (tool_name, tool_input) =>
+    hook({ hook_event_name: "PreToolUse", tool_name, tool_input });
+  const bash = () => pre("Bash", { command: "ls" });
 
   backend.mode = "401";
   const first = await bash();
   assert.doesNotMatch(reasonOf(first), /backend_unreachable/);
-  assert.equal(decisionOf(first), "allow", JSON.stringify(first));
+  assert.equal(decisionOf(first), "deny", JSON.stringify(first));
+  assert.match(reasonOf(first), /armoriq login --product armorclaude .*--force/);
 
   const sent = backend.requests.length;
   const second = await bash();
-  assert.equal(decisionOf(second), "allow", JSON.stringify(second));
+  assert.equal(decisionOf(second), "deny", JSON.stringify(second));
+  assert.match(reasonOf(second), /sign in again/);
+  const read = await pre("Read", { file_path: "/tmp/x.txt" });
+  assert.equal(decisionOf(read), "allow", JSON.stringify(read));
   const start = await hook({ hook_event_name: "SessionStart", source: "startup" });
   assert.match(JSON.stringify(start), /No ArmorClaude login/);
   assert.deepEqual(

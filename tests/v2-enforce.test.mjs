@@ -188,6 +188,7 @@ test("in Monitor a v2 hold runs the call and files no approval request, even wit
     enforce: () => ({ allowed: false, enforcementAction: "hold", reason: "hold:Write#0" }),
   });
   const { hook, dataDir, sessionId } = await startHookSession(t, backend, { ARMORIQ_ORG_MODE: "" });
+  await writeFile(path.join(dataDir, "org-mode.json"), JSON.stringify({ mode: "shadow" }));
   const token = { planId, jwtToken: "jwt-test", rawToken: { plan_id: planId } };
   await writeFile(
     path.join(dataDir, "runtime.json"),
@@ -306,7 +307,8 @@ test("in Monitor a workspace-floor block runs the call and its row records the w
     entry("agent-1", "args-and-holds", POLICY_DOCUMENT, "agent"),
   ]);
   const backend = await v2Backend(randomUUID(), { bundle: () => [200, bundle] });
-  const { hook } = await startHookSession(t, backend, { ARMORIQ_ORG_MODE: "" });
+  const { hook, dataDir } = await startHookSession(t, backend, { ARMORIQ_ORG_MODE: "" });
+  await writeFile(path.join(dataDir, "org-mode.json"), JSON.stringify({ mode: "shadow" }));
   const call = {
     tool_name: "Bash",
     tool_use_id: "toolu-curl",

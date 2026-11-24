@@ -3,7 +3,7 @@ import { enforceCall } from "./backend-client.mjs";
 import { getSdkClient } from "./intent.mjs";
 import { sdkModule } from "./sdk.mjs";
 import { parseToolIdentity } from "./tool-registry.mjs";
-import { statusCommand } from "./config.mjs";
+import { loginCommand, statusCommand } from "./config.mjs";
 import {
   BACKEND_TIMEOUT_MS,
   UNREACHABLE_FOR_MS,
@@ -124,6 +124,12 @@ export async function activeV2PolicyNames(config) {
   }
 }
 
+export const signedOutReason = (config) =>
+  `ArmorClaude: ArmorIQ rejected the saved login, so tools that change files or run commands are blocked until you sign in again. Reads still work. Run: ${loginCommand(config.backendEndpoint)} --force`;
+
+export const orgModeUnknownReason = () =>
+  `ArmorClaude: ArmorIQ has not confirmed this org's enforcement mode, so tools that change files or run commands are blocked. Reads still work. Start a new session once ArmorIQ is reachable. If this keeps happening, run: ${statusCommand()}`;
+
 export async function decideV2(config, toolName, toolArgs) {
   const ir = await loadPolicyIr();
   const { PolicyBundleCache } = sdkModule("policy-bundle");
@@ -136,7 +142,10 @@ export async function decideV2(config, toolName, toolArgs) {
   }
   const read = capabilityOf(toolName) === "read";
   const state = await bundleState(config, read);
-  if (signedOut(config)) return { allowed: true, action: "allow", reason: "signed_out" };
+  if (signedOut(config)) {
+    if (read) return { allowed: true, action: "allow", reason: "signed_out" };
+    return { allowed: false, action: "block", code: "signed_out", reason: signedOutReason(config) };
+  }
   if (backendUnreachable(config)) {
     if (!read) {
       return {

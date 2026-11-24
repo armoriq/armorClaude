@@ -62,7 +62,13 @@ import { sha256Hex } from "./common.mjs";
 import { invokesPolicyAdmin, isProtectedPath, writesProtectedPath } from "./shell-guard.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
-import { activeV2PolicyNames, decideV2, resolveV2Hold } from "./v2-decision.mjs";
+import {
+  activeV2PolicyNames,
+  decideV2,
+  orgModeUnknownReason,
+  resolveV2Hold,
+  signedOutReason,
+} from "./v2-decision.mjs";
 import { dropWouldBe, monitorAfterFetch, rememberWouldBe, takeWouldBe } from "./org-mode.mjs";
 import { evaluateOpa } from "./opa-client.mjs";
 import { compileToOpaInput } from "./policy-compiler.mjs";
@@ -903,6 +909,16 @@ async function sessionPlanCheck(config, sessionId) {
   return readJson(file, null);
 }
 
+const INERT_TOOLS = new Set([
+  "askuserquestion",
+  "enterplanmode",
+  "task",
+  "agent",
+  "bashoutput",
+  "killshell",
+  "killbash",
+]);
+
 async function decidePreToolUse(input, config, ctx = {}) {
   // Record start timestamp BEFORE any deny/early-return so even denied calls
   // have timing data available for PostToolUse/PostToolUseFailure.
@@ -1012,11 +1028,17 @@ async function decidePreToolUse(input, config, ctx = {}) {
     return null;
   }
 
+  if (capabilityOf(toolName) !== "read" && !INERT_TOOLS.has(norm)) {
+    if (config.signedOut) return denyPreTool("signed_out", signedOutReason(config));
+    if (config.orgModeUnknown) return denyPreTool("org_mode_unknown", orgModeUnknownReason());
+  }
+
   // --- Policy v2: the org's verdict for this exact call, from the raw input
   //     (sanitizeParams truncates long values, which a rule could miss). ---
   const v2 = config.apiKey ? await decideV2(config, toolName, input.tool_input) : null;
   ctx.v2 = v2;
-  if (v2?.code === "backend_unreachable") return denyPreTool("backend_unreachable", v2.reason);
+  if (v2?.code === "backend_unreachable" || v2?.code === "signed_out")
+    return denyPreTool(v2.code, v2.reason);
   if (v2?.reason === "signed_out") config = localOnly(config);
   if (v2?.active) ctx.notice = await policyChangeNotice(config, sessionId, v2.active);
   await logShadowVerdicts(config, toolName, v2?.shadow);

@@ -105,7 +105,10 @@ function effectiveConfigFor(configEnv) {
     if (configEnv[k] !== undefined) merged[k] = configEnv[k];
   }
   const localMock = merged.armoriqEnv === "local" && !merged.signedOut;
-  Object.assign(merged, loginEnforcement(merged.apiKey, localMock, merged.orgMonitor));
+  Object.assign(
+    merged,
+    loginEnforcement(merged.apiKey, localMock, merged.orgMonitor, merged.orgModeUnknown)
+  );
   // verify-step endpoint derives from backendEndpoint; keep it consistent.
   if (configEnv.backendEndpoint) {
     merged.verifyStepEndpoint = `${configEnv.backendEndpoint}/iap/verify-step`;

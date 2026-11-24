@@ -23,8 +23,11 @@ export const orgModeForced = (env = process.env) => env.ARMORIQ_ORG_MODE?.trim()
 
 export function orgMonitorFor(dataDir, env = process.env) {
   if (orgModeForced(env)) return false;
-  return cachedOrgMode(dataDir) !== "enforce";
+  return cachedOrgMode(dataDir) === "shadow";
 }
+
+export const orgModeUnknownFor = (dataDir, env = process.env) =>
+  !orgModeForced(env) && cachedOrgMode(dataDir) === null;
 
 /** Monitor that also tells the user in the chat what Enforce would have done. */
 export const orgMonitorNoticesFor = (dataDir, env = process.env) =>

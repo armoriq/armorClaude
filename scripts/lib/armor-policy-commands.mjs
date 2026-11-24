@@ -2677,7 +2677,7 @@ export async function syncActivePolicyFromBackend(config) {
   const result = await pullProfilesFromBackend(config);
   if (!result.ok)
     return { ok: false, changed: false, reason: result.reason || `HTTP ${result.status}` };
-  await saveOrgMode(config.dataDir, result.mode, result.notices);
+  await saveOrgMode(config.dataDir, result.mode ?? "shadow", result.notices);
 
   const active = result.profiles.find((p) => p?.policy);
   if (!active?.policy)
