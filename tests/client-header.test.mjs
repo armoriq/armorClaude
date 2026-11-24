@@ -5,7 +5,12 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { startBackend, startHookSession, waitFor } from "./helpers/hook-session.mjs";
+import {
+  startBackend,
+  startHookSession,
+  startPolicyMcp,
+  waitFor,
+} from "./helpers/hook-session.mjs";
 import {
   assistant,
   isoAgo,
@@ -44,12 +49,18 @@ for (const [dataDirName, product] of [
 ]) {
   test(`every backend call from a ${dataDirName} install names ${product}/<plugin version>`, async (t) => {
     const backend = await startBackend({ "POST /iap/sdk/token": tokenReply });
-    const { hook } = await startHookSession(t, backend, {
+    const { env, sessionId, hook } = await startHookSession(t, backend, {
       CLAUDE_PLUGIN_DATA: pluginDataDir(dataDirName),
     });
     const ls = { tool_name: "Bash", tool_input: { command: "ls" } };
     await hook({ hook_event_name: "SessionStart", source: "startup" });
     await hook({ hook_event_name: "UserPromptSubmit", prompt: "list the files" });
+    const client = await startPolicyMcp(t, env, sessionId);
+    const result = await client.callTool({
+      name: "register_intent_plan",
+      arguments: { goal: "list files", steps: [{ action: "Bash" }] },
+    });
+    assert.notEqual(result.isError, true, result.content[0].text);
     await hook({ hook_event_name: "PreToolUse", ...ls });
     await hook({ hook_event_name: "PostToolUse", ...ls, tool_response: { stdout: "a\n" } });
     await hook({ hook_event_name: "Stop" });
