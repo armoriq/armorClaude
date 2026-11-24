@@ -38,6 +38,7 @@ import { normalizeIntentPlan } from "../scripts/lib/intent-schema.mjs";
 import { loadPolicyState, savePolicyState } from "../scripts/lib/policy.mjs";
 import { handleArmorPolicyCommand } from "../scripts/lib/armor-policy-commands.mjs";
 import { noteBackendUnreachable } from "../scripts/lib/backend-posture.mjs";
+import { loadConfig } from "../scripts/lib/config.mjs";
 import { createAuditWal, loginTag } from "../scripts/lib/audit-wal.mjs";
 import { dispatchHook } from "../scripts/hook-router.mjs";
 import { flushRunReports, recordRunTool } from "../scripts/lib/runs.mjs";
@@ -153,7 +154,7 @@ test("a crash while publishing a prompt leaves its durable run recoverable", asy
       const pending = JSON.parse(await readFile(from, "utf8"));
       const id = pending.sessions[s.sessionId].promptId;
       if (id) {
-        publishedRun = (await loadRunState(s.config)).runs[id];
+        publishedRun = JSON.parse(await readFile(runStateFile(s.config), "utf8")).runs[id];
         throw new Error("simulated crash before prompt publication");
       }
     }
@@ -167,6 +168,34 @@ test("a crash while publishing a prompt leaves its durable run recoverable", asy
   assert.equal((await s.state()).sessions[s.sessionId].promptId, null);
   await handleSessionStart({ session_id: s.sessionId }, s.config);
   assert.equal((await s.run(publishedRun.run_id)).reports.at(-1).end_reason, "recovered");
+});
+
+// regression: #0013
+test("prompt start acquires the run lock before holding the session lock", async (t) => {
+  const s = await session(t);
+  const link = fsPromises.link;
+  const sessionLocks = [];
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  t.mock.method(fsPromises, "link", async (from, to) => {
+    if (to === `${runStateFile(s.config)}.lock`) {
+      sessionLocks.push(
+        await stat(`${s.config.runtimeFile}.lock`).then(
+          () => true,
+          (error) => {
+            assert.equal(error.code, "ENOENT");
+            return false;
+          }
+        )
+      );
+    }
+    return link(from, to);
+  });
+  syncBuiltinESMExports();
+  await s.prompt();
+  assert.deepEqual(sessionLocks, [false]);
 });
 
 // regression: #0013
@@ -223,7 +252,7 @@ test("run storage failures preserve prompt retirement, registration replies and 
           assert.equal((await s.state()).sessions[s.sessionId], undefined);
         }
         const failures = (
-          await readFile(path.join(s.config.dataDir, "audit-capture-failures.jsonl"), "utf8")
+          await readFile(path.join(s.config.dataDir, "run-capture-failures.jsonl"), "utf8")
         )
           .trim()
           .split("\n")
@@ -254,7 +283,7 @@ test("a reporting failure preserves a tool denial and its audit row", async (t) 
   assert.equal(rows[0].prompt_id, id);
   assert.notEqual(rows[0].decision_code, "internal_error");
   assert.equal(
-    (await readFile(path.join(s.config.dataDir, "audit-capture-failures.jsonl"), "utf8"))
+    (await readFile(path.join(s.config.dataDir, "run-capture-failures.jsonl"), "utf8"))
       .trim()
       .split("\n").length,
     1
@@ -365,10 +394,13 @@ test("corrupt run snapshots and journal lines are kept and reported once before 
       await flushRunReports(s.config);
       if (damage === "journal") assert.equal((await s.run(first)).tool_calls, 2);
       const failures = await readFile(
-        path.join(s.config.dataDir, "audit-capture-failures.jsonl"),
+        path.join(s.config.dataDir, "run-capture-failures.jsonl"),
         "utf8"
       );
       assert.equal(failures.trim().split("\n").length, 1);
+      const status = await handleArmorPolicyCommand("/armor status", s.config);
+      assert.match(status, /Capture failures: 0/);
+      assert.match(status, /Run bookkeeping failures: 1/);
       const archived = (await readdir(s.config.dataDir)).filter((name) =>
         name.startsWith(path.basename(file) + ".corrupt.")
       );
@@ -380,7 +412,7 @@ test("corrupt run snapshots and journal lines are kept and reported once before 
       await s.stop();
       assert.equal((await s.run(next)).reports.at(-1).tool_calls, 1);
       assert.equal(
-        await readFile(path.join(s.config.dataDir, "audit-capture-failures.jsonl"), "utf8"),
+        await readFile(path.join(s.config.dataDir, "run-capture-failures.jsonl"), "utf8"),
         failures
       );
     });
@@ -798,10 +830,43 @@ test("durable handoff retains the original login after logout and exposes pendin
 });
 
 // regression: #0013
+test("MCP schemas and invalid argument replies are identical with run reporting on and off", async (t) => {
+  const s = await session(t);
+  await s.prompt();
+  const home = await mkdtemp(path.join(os.tmpdir(), "aq-run-schema-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const clients = [];
+  for (const enabled of [false, true]) {
+    clients.push(
+      await startPolicyMcp(
+        t,
+        {
+          PATH: process.env.PATH,
+          HOME: home,
+          CLAUDE_PLUGIN_DATA: s.config.dataDir,
+          ARMORIQ_RUN_REPORTING_ENABLED: String(enabled),
+          ...(process.env.NODE_OPTIONS ? { NODE_OPTIONS: process.env.NODE_OPTIONS } : {}),
+        },
+        s.sessionId
+      )
+    );
+  }
+  assert.deepEqual(await clients[1].listTools(), await clients[0].listTools());
+  for (const arguments_ of [{}, { goal: 5 }, { goal: "", steps: [] }]) {
+    const request = { name: "register_intent_plan", arguments: arguments_ };
+    const off = await clients[0].callTool(request);
+    const on = await clients[1].callTool(request);
+    assert.equal(off.isError, true);
+    assert.deepEqual(on, off);
+  }
+});
+
+// regression: #0013
 test("MCP validation failures record local rejection for registration and reanchor", async (t) => {
   const s = await session(t);
   const home = await mkdtemp(path.join(os.tmpdir(), "aq-run-mcp-"));
   t.after(() => rm(home, { recursive: true, force: true }));
+  writeLoginProfiles(home, [{ backend: s.config.backendEndpoint, apiKey: s.config.apiKey }]);
   const id = await s.prompt();
   const client = await startPolicyMcp(
     t,
@@ -822,8 +887,8 @@ test("MCP validation failures record local rejection for registration and reanch
     claudeCodeProcessId(process.pid, () => ({ comm: "claude", ppid: 1 }))
   );
   for (const [name, args] of [
-    ["register_intent_plan", { goal: "", steps: [] }],
-    ["trust_reanchor", { updatedPlan: { goal: "invalid", steps: [] } }],
+    ["register_intent_plan", {}],
+    ["trust_reanchor", { updatedPlan: { goal: "write notes", steps: [{ action: "Write" }] } }],
   ]) {
     assert.equal((await client.callTool({ name, arguments: args })).isError, true);
   }
@@ -855,7 +920,7 @@ test("MCP validation failures record local rejection for registration and reanch
   await mkdir(runStateFile(s.config));
   for (const [name, args] of [
     ["register_intent_plan", {}],
-    ["trust_reanchor", { updatedPlan: { goal: "", steps: [] } }],
+    ["trust_reanchor", { updatedPlan: { goal: "write notes", steps: [{ action: "Write" }] } }],
   ]) {
     const reply = await client.callTool({ name, arguments: args });
     assert.equal(reply.isError, true);
@@ -868,14 +933,14 @@ test("MCP validation failures record local rejection for registration and reanch
   assert.match(contextReply.content[0].text, /^Plan not registered:/);
   assert.doesNotMatch(contextReply.content[0].text, /EISDIR|run state/);
   const failuresBeforeOff = await readFile(
-    path.join(s.config.dataDir, "audit-capture-failures.jsonl"),
+    path.join(s.config.dataDir, "run-capture-failures.jsonl"),
     "utf8"
   );
   const offReply = await strict.callTool({ name: "register_intent_plan", arguments: {} });
   assert.match(offReply.content[0].text, /^Plan not registered:/);
   assert.doesNotMatch(offReply.content[0].text, /EISDIR|run state/);
   assert.equal(
-    await readFile(path.join(s.config.dataDir, "audit-capture-failures.jsonl"), "utf8"),
+    await readFile(path.join(s.config.dataDir, "run-capture-failures.jsonl"), "utf8"),
     failuresBeforeOff
   );
 });
@@ -931,7 +996,20 @@ test("reanchor reports a failed session read with reporting on or off", async (t
   }
 });
 
+// regression: #0013
 test("the rollout switch and logged out prompts cannot enqueue reports, while monitor prompts can", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "aq-run-switch-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  withHome(home, () => {
+    for (const value of [undefined, "false", "1", "yes", "y", "on", "TRUE", " true ", "true"]) {
+      assert.equal(
+        loadConfig({ CLAUDE_PLUGIN_DATA: home, ARMORIQ_RUN_REPORTING_ENABLED: value })
+          .runReportingEnabled,
+        value === "true",
+        String(value)
+      );
+    }
+  });
   const { flushRunReports } = await import("../scripts/lib/runs.mjs");
   for (const patch of [
     { runReportingEnabled: false },
@@ -1203,7 +1281,7 @@ test("the daemon preserves a denied tool and its audit row when the run file is 
   assert.notEqual(row.decision_code, "internal_error");
   assert.equal(backend.auditRows.filter((row) => row.tool === "Write").length, 1);
   assert.ok(
-    (await readFile(path.join(s.dataDir, "audit-capture-failures.jsonl"), "utf8")).trim().length > 0
+    (await readFile(path.join(s.dataDir, "run-capture-failures.jsonl"), "utf8")).trim().length > 0
   );
 });
 

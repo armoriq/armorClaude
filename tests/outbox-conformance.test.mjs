@@ -224,11 +224,11 @@ describe("health outbox conformance", () => {
   it("keeps one hourly stall bookmark per source queue across restarts and logins", async () => {
     const store = await healthStore();
     await store.open().appendLine({ client_row_id: randomUUID() });
-    store.advance(60_000);
-    await store.open().reportHealth("backend_unreachable", store);
     const other = { backend: store.binding.backend, keyId: "bbbbbbbbbbbbbbbb" };
     const otherWal = store.open("audit", { login: other.keyId, binding: other });
     await otherWal.appendLine({ client_row_id: randomUUID() });
+    store.advance(60_000);
+    await store.open().reportHealth("backend_unreachable", store);
     await otherWal.reportHealth("backend_unreachable", { resolveLogin: () => other });
     await store.open().reportHealth("backend_unreachable", store);
     const health = store.open("health");
@@ -249,6 +249,41 @@ describe("health outbox conformance", () => {
     assert.equal(events[1].count, 1);
     assert.equal(events[1].oldest_pending_seconds, 3660);
     assert.ok(!(await readdir(path.join(store.dataDir, "audit"))).includes(".storage-lock"));
+  });
+
+  // regression: #0012
+  it("counts only aged rows past their persisted retry deadline as stalled", async () => {
+    for (const retryAfter of [undefined, "3600"]) {
+      const store = await healthStore();
+      const audit = store.open("audit", { timing: { baseMs: 600_000, maxMs: 600_000 } });
+      await audit.appendLine({ client_row_id: randomUUID() });
+      await audit.drain(
+        () => ({
+          status: 429,
+          body: {},
+          headers: retryAfter ? { "retry-after": retryAfter } : {},
+        }),
+        store
+      );
+      store.advance(30_000);
+      await store.open().appendLine({ client_row_id: randomUUID() });
+      store.advance(59_999);
+      await store.open().reportHealth("rate_limited", store);
+      assert.deepEqual(await store.open("health").readPending(), []);
+      store.advance(1);
+      await store.open().appendLine({ client_row_id: randomUUID() });
+      await store.open().reportHealth("rate_limited", store);
+      const events = (await store.open("health").readPending()).map(({ row }) => row);
+      assert.deepEqual(
+        events.map(({ count, oldest_pending_seconds }) => [count, oldest_pending_seconds]),
+        [[1, 60]]
+      );
+      await store.open("health").drain(({ login, rows }) => {
+        assert.deepEqual(login, store.binding);
+        return delivered({ rows });
+      }, store);
+      assert.deepEqual(await store.open("health").readPending(), []);
+    }
   });
 
   // regression: #0012
@@ -328,6 +363,7 @@ describe("health outbox conformance", () => {
     assert.deepEqual(await reopened.readPending(), []);
   });
 
+  // regression: #0012
   it("reports why delivery is stalled from the login or the last response", async () => {
     for (const [status, expected] of [
       [null, "undeliverable_login"],
@@ -340,6 +376,7 @@ describe("health outbox conformance", () => {
       const audit = store.open();
       await audit.appendLine({ client_row_id: randomUUID() });
       if (status !== null) await audit.drain(async () => ({ status, body: {} }), store);
+      store.advance(60_000);
       await audit.reportHealth(undefined, status === null ? {} : store);
       const events = (await store.open("health").readPending()).map(({ row }) => row);
       assert.equal(events.length, 1, expected);
@@ -538,7 +575,49 @@ for (const stream of ["audit", "health", "runs"]) {
       await wal.drain(accepted, store);
       assert.deepEqual(await wal.readPending(), []);
     });
+    // regression: #0012
+    it("replaces an org_required hold with an authentication pause on 401 or auth 403", async () => {
+      for (const status of [401, 403]) {
+        const store = await healthStore();
+        const wal = store.open(stream);
+        const value = row();
+        await wal.appendLine(value);
+        await wal.drain(() => ({ status: 403, body: { error: "org_required" } }), store);
+        store.advance(300_000);
+        await store.open(stream).drain(() => ({ status, body: {} }), store);
+        const paused = await wal.status(store.resolveLogin);
+        assert.equal(paused.held, null);
+        assert.equal(paused.authPaused, true);
+        assert.equal((await wal.readPending())[0].attempts, 0);
+        await store.open(stream).drain(() => assert.fail("auth pause sent without a probe"), store);
+        store.advance(120_000);
+        await store.open(stream).drain(accepted, {
+          ...store,
+          probe: () => ({ status: 200 }),
+        });
+        assert.deepEqual(await wal.readPending(), []);
+      }
+    });
     if (stream === "audit") return;
+    // regression: #0010
+    it("charges permanent whole batch refusals and keeps their exhausted rows", async () => {
+      for (const status of [405, 409, 410, 413, 418]) {
+        const store = await healthStore();
+        const wal = store.open(stream);
+        const value = row();
+        await wal.appendLine(value);
+        for (let attempt = 1; attempt <= 10; attempt++) {
+          await store.open(stream).drain(() => ({ status, body: {} }), store);
+          if (attempt < 10) assert.equal((await wal.readPending())[0].attempts, attempt);
+          store.advance(1);
+        }
+        assert.deepEqual(await wal.readPending(), []);
+        assert.deepEqual(
+          (await wal.readDeadLetters()).map(({ row, attempts }) => [row, attempts]),
+          [[value, 10]]
+        );
+      }
+    });
     // regression: #0012
     it("retains every row without charging through repeated transient failures", async () => {
       for (const failure of [503, 429, 408, "network", "retryable", "missing"]) {

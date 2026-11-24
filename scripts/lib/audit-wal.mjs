@@ -789,20 +789,34 @@ export function createAuditWal(opts) {
       }
       const resize = await transaction((state) => {
         if (!owns(state)) return [];
-        const hold =
-          reply?.hold ||
-          (reply?.status === 403 && reply.body?.error === "org_required"
-            ? "org_required"
-            : !hasResults &&
-                reply?.status >= 400 &&
-                reply.status < 500 &&
-                ![400, 401, 403, 408, 409, 413, 422, 429].includes(reply.status)
-              ? `http_${reply.status}`
-              : state.held === "org_required" && !results
-                ? state.held
-                : !reply?.status && state.endpointPaused
-                  ? (state.held ?? "endpoint_unavailable")
-                  : null);
+        const authFailure =
+          reply?.status === 401 ||
+          (reply?.status === 403 && !hasResults && reply.body?.error !== "org_required");
+        const hold = authFailure
+          ? null
+          : reply?.hold ||
+            (reply?.status === 403 && reply.body?.error === "org_required"
+              ? "org_required"
+              : !hasResults &&
+                  reply?.status >= 400 &&
+                  reply.status < 500 &&
+                  (reply.status === 404 ||
+                    (!health &&
+                      !runs &&
+                      ![400, 401, 403, 408, 409, 413, 422, 429].includes(reply.status)))
+                ? `http_${reply.status}`
+                : state.held === "org_required" &&
+                    !results &&
+                    (!reply?.status ||
+                      reply.status < 400 ||
+                      reply.status >= 500 ||
+                      [408, 429].includes(reply.status) ||
+                      hasResults ||
+                      (reply.status === 409 && reply.body?.error === "request_in_progress"))
+                  ? state.held
+                  : !reply?.status && state.endpointPaused
+                    ? (state.held ?? "endpoint_unavailable")
+                    : null);
         state.holdRetries = hold === "org_required" ? (state.holdRetries ?? 0) + 1 : 0;
         state.endpointPaused = Boolean(hold);
         state.held = hold;
@@ -822,7 +836,7 @@ export function createAuditWal(opts) {
           persist(state);
           return [];
         }
-        if (reply?.status === 401 || (reply?.status === 403 && !hasResults)) {
+        if (authFailure) {
           state.paused = true;
           state.stallReason = "auth_paused";
           state.nextProbeAt = clock.now() + timing.authProbeMs;
@@ -989,7 +1003,9 @@ export function createAuditWal(opts) {
     if (health) return;
     const reports = await transaction((state) => {
       const before = JSON.stringify(state);
-      const pending = entries(state);
+      const pending = entries(state).filter(
+        (entry) => entry.nextAttemptAt <= clock.now() && clock.now() - entry.enqueuedAt >= 60_000
+      );
       const reason = state.held
         ? null
         : state.paused
@@ -1227,7 +1243,10 @@ export async function recordAuthenticationSuccess(config) {
 
 export async function runsStatus(dataDir, resolveLogin = () => null) {
   const root = path.join(dataDir, "runs");
-  const total = { pending: 0, paused: false, deadLetters: 0, undeliverable: 0 };
+  const total = { pending: 0, paused: false, deadLetters: 0, undeliverable: 0, captureFailures: 0 };
+  const failures = path.join(dataDir, "run-capture-failures.jsonl");
+  if (existsSync(failures))
+    total.captureFailures = readFileSync(failures, "utf8").split("\n").filter(Boolean).length;
   if (!existsSync(root)) return total;
   for (const login of readdirSync(root).filter((name) => LOGIN_TAG.test(name))) {
     const status = await createAuditWal({ dataDir, login, stream: "runs" }).status(resolveLogin);

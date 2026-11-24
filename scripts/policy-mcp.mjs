@@ -10,6 +10,8 @@ import {
   resolveProcessSession,
   appendTrustOp,
   saveRuntimeState,
+  retirePlan,
+  sameGenerations,
   syncSessionAuth,
   updateRuntimeState,
 } from "./lib/runtime-state.mjs";
@@ -90,7 +92,6 @@ async function run() {
       await reportRunCaptureFailure(initialConfig);
     }
   }
-  const planArgument = (schema) => (countRejections ? z.union([schema, z.unknown()]) : schema);
   const server = new McpServer({
     name: "armorclaude-policy",
     version: "0.1.0",
@@ -134,13 +135,17 @@ async function run() {
       // whole plan wrapped in a `plan` field). The handler below coerces
       // them to the canonical shape before validating with INTENT_PLAN_ZOD.
       inputSchema: {
-        goal: planArgument(z.string().min(1))
+        goal: z
+          .string()
+          .min(1)
           .optional()
           .describe("One-line summary of what the plan accomplishes"),
-        steps: planArgument(z.union([z.array(PLAN_STEP_SCHEMA).min(1), z.string().min(1)]))
+        steps: z
+          .union([z.array(PLAN_STEP_SCHEMA).min(1), z.string().min(1)])
           .optional()
           .describe("Ordered list of tool calls (array, or JSON-stringified array)"),
-        plan: planArgument(z.union([INTENT_PLAN_ZOD, z.string().min(1)]))
+        plan: z
+          .union([INTENT_PLAN_ZOD, z.string().min(1)])
           .optional()
           .describe("Alternative: pass the whole plan as an object or JSON string"),
       },
@@ -209,7 +214,7 @@ async function run() {
       },
     },
     async (args) => {
-      const { config, runtimeState, sessionId, session } = await resolveActiveSession();
+      const { config, sessionId, session } = await resolveActiveSession();
       if (!session) {
         return toTextResult("No active session — nothing to revoke.");
       }
@@ -227,16 +232,22 @@ async function run() {
         reason: args.reason,
         cascade: args.cascade,
       });
-      appendTrustOp(runtimeState, sessionId, {
-        operation: "Revoke",
-        trustId: result.trustId,
-        reason: args.reason,
-        ok: result.ok,
+      await updateRuntimeState(config.runtimeFile, (state) => {
+        syncSessionAuth(state, loadConfig(), resolveProcessSession(state));
+        const current = state.sessions[sessionId];
+        if (
+          result.ok &&
+          sameGenerations(session, current) &&
+          current?.retirementEpoch === session.retirementEpoch
+        )
+          retirePlan(current);
+        appendTrustOp(state, sessionId, {
+          operation: "Revoke",
+          trustId: result.trustId,
+          reason: args.reason,
+          ok: result.ok,
+        });
       });
-      await updateRuntimeState(config.runtimeFile, (state) =>
-        syncSessionAuth(state, loadConfig(), resolveProcessSession(state))
-      );
-      await saveRuntimeState(config.runtimeFile, runtimeState);
       if (!result.ok) {
         return toTextResult(`Revoke failed: ${result.error || "unknown error"}`);
       }
@@ -259,7 +270,7 @@ async function run() {
         "tamper-evident lineage in the IAP audit log. Re-mints the working " +
         "token so subsequent tool calls succeed.",
       inputSchema: {
-        updatedPlan: planArgument(INTENT_PLAN_ZOD).describe("The revised plan structure"),
+        updatedPlan: INTENT_PLAN_ZOD.describe("The revised plan structure"),
         reason: z
           .string()
           .optional()
