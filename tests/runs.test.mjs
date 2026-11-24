@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -13,6 +14,7 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   handlePreToolUse,
   handleSessionEnd,
@@ -37,8 +39,14 @@ import { noteBackendUnreachable } from "../scripts/lib/backend-posture.mjs";
 import { createAuditWal, loginTag } from "../scripts/lib/audit-wal.mjs";
 import { dispatchHook } from "../scripts/hook-router.mjs";
 import { flushRunReports, recordRunTool } from "../scripts/lib/runs.mjs";
-import { loadConfigWithLogins } from "./helpers/login-profile.mjs";
-import { startPolicyMcp } from "./helpers/hook-session.mjs";
+import { loadConfigWithLogins, writeLoginProfiles, withHome } from "./helpers/login-profile.mjs";
+import {
+  API_KEY,
+  claudeExecutable,
+  startBackend,
+  startHookSession,
+  startPolicyMcp,
+} from "./helpers/hook-session.mjs";
 
 const fixture = JSON.parse(await readFile(new URL("./fixtures/runs-v1.json", import.meta.url)));
 const plan = normalizeIntentPlan({ goal: "write notes", steps: [{ action: "Write" }] });
@@ -759,5 +767,264 @@ test("the rollout switch and logged out prompts cannot enqueue reports, while mo
     const reports = (await wal.readPending()).map(({ row }) => row);
     assert.equal(reports.length, patch.mode === "monitor" ? 2 : 0);
     if (reports.length) assert.equal(reports.at(-1).run_id, id);
+  }
+});
+
+// regression: #0013
+test("run handoff errors leave audit and health delivery working and the daemon alive", async (t) => {
+  const events = [];
+  const backend = await startBackend({
+    "POST /iap/runs/batch": (body) => [
+      200,
+      {
+        results: body.reports.map(({ run_id, report_seq }) => ({
+          run_id,
+          report_seq,
+          outcome: "accepted",
+        })),
+      },
+    ],
+    "POST /iap/client-events": (body) => {
+      events.push(...body.events);
+      return [
+        200,
+        { results: body.events.map(({ event_id }) => ({ event_id, outcome: "accepted" })) },
+      ];
+    },
+  });
+  const s = await startHookSession(t, backend, { ARMORIQ_RUN_REPORTING_ENABLED: "true" });
+  await s.hook({ hook_event_name: "UserPromptSubmit", prompt: "record a run" });
+  const binding = { backend: backend.url, keyId: loginTag(backend.url, API_KEY) };
+  const options = { dataDir: s.dataDir, login: binding.keyId, binding };
+  await createAuditWal(options).appendLine({
+    client_row_id: randomUUID(),
+    tool: "Read",
+    action: "Read",
+    input: {},
+    status: "success",
+  });
+  await createAuditWal({ ...options, stream: "health" }).appendLine({
+    event_id: randomUUID(),
+    type: "plan_request_failed",
+    queue: "health",
+    count: 1,
+    reason_code: "timeout",
+    occurred_at: new Date().toISOString(),
+  });
+  await writeFile(
+    path.join(s.dataDir, "runs", binding.keyId, "outbox-state.json"),
+    "invalid state"
+  );
+  await s.hook({ hook_event_name: "Stop" });
+  await backend.waitForRequest("POST /iap/audit/batch");
+  await backend.waitForRequest("POST /iap/client-events");
+  assert.equal(backend.auditRows.length, 1);
+  assert.equal(events.length, 1);
+  await s.hook({
+    hook_event_name: "PreToolUse",
+    tool_name: "Read",
+    tool_input: {},
+    tool_use_id: randomUUID(),
+  });
+  const config = { runtimeFile: path.join(s.dataDir, "runtime.json"), runReportingEnabled: true };
+  assert.equal(
+    Object.values((await loadRunState(config)).runs).filter((run) => run.reports.length).length,
+    1
+  );
+});
+
+// regression: #0013
+test("daemon sends the start at prompt submission and final at Stop under the original login", async (t) => {
+  if (path.basename(process.execPath).replace(/\.exe$/, "") !== "claude") {
+    const runner = await claudeExecutable();
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawn(
+      runner,
+      [
+        "--test",
+        "--import",
+        new URL("./setup/no-network.mjs", import.meta.url).href,
+        "--test-name-pattern",
+        `^${t.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        fileURLToPath(import.meta.url),
+      ],
+      { env, stdio: ["ignore", "pipe", "pipe"] }
+    );
+    let output = "";
+    child.stdout.on("data", (chunk) => (output += chunk));
+    child.stderr.on("data", (chunk) => (output += chunk));
+    const code = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("exit", resolve);
+    });
+    assert.equal(code, 0, output);
+    return;
+  }
+  const reports = [];
+  const entered = deferred();
+  const release = deferred();
+  const logoutStart = deferred();
+  let loggingOut = false;
+  t.after(() => release.resolve());
+  const backend = await startBackend({
+    "POST /iap/runs/batch": async (body) => {
+      reports.push(...body.reports);
+      if (loggingOut) {
+        for (const report of body.reports) {
+          if (report.report_seq === 1) logoutStart.resolve(report.run_id);
+        }
+      }
+      if (reports.length === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return [
+        200,
+        {
+          results: body.reports.map(({ run_id, report_seq }) => ({
+            run_id,
+            report_seq,
+            outcome: "accepted",
+          })),
+        },
+      ];
+    },
+  });
+  const s = await startHookSession(t, backend, { ARMORIQ_RUN_REPORTING_ENABLED: "true" });
+  const prompt = s.hook({ hook_event_name: "UserPromptSubmit", prompt: "hello" });
+  await entered.promise;
+  await prompt;
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].report_seq, 1);
+  assert.equal(reports[0].ended_at, undefined);
+  const current = await loadRuntimeState(path.join(s.dataDir, "runtime.json"));
+  assert.equal(current.sessions[s.sessionId].promptId, reports[0].run_id);
+  await s.hook({ hook_event_name: "SessionStart", source: "compact" });
+  assert.equal(
+    (await loadRuntimeState(path.join(s.dataDir, "runtime.json"))).sessions[s.sessionId].promptId,
+    reports[0].run_id
+  );
+  release.resolve();
+  await s.hook({ hook_event_name: "Stop" });
+  await backend.waitForRequest("POST /iap/runs/batch", (body) =>
+    body.reports.some((report) => report.run_id === reports[0].run_id && report.report_seq === 2)
+  );
+  assert.equal(reports.length, 2);
+  assert.equal(reports[1].end_reason, "stop");
+  const client = await startPolicyMcp(t, s.env, s.sessionId);
+  await s.hook({ hook_event_name: "UserPromptSubmit", prompt: "bad plan" });
+  const invalid = await client.callTool({ name: "register_intent_plan", arguments: {} });
+  assert.equal(invalid.isError, true);
+  await s.hook({
+    hook_event_name: "PreToolUse",
+    tool_name: "Write",
+    tool_use_id: randomUUID(),
+    tool_input: {},
+  });
+  await s.hook({ hook_event_name: "Stop" });
+  await backend.waitForRequest("POST /iap/runs/batch", (body) =>
+    body.reports.some((report) => report.no_plan_reason === "plan_rejected")
+  );
+  assert.equal(reports.at(-1).no_plan_reason, "plan_rejected");
+  loggingOut = true;
+  await s.hook({ hook_event_name: "UserPromptSubmit", prompt: "logout during turn" });
+  const originalId = (await loadRuntimeState(path.join(s.dataDir, "runtime.json"))).sessions[
+    s.sessionId
+  ].promptId;
+  assert.equal(await logoutStart.promise, originalId);
+  writeLoginProfiles(s.env.HOME, [
+    { backend: backend.url, apiKey: "ak_test_otherlogin000000000000000000" },
+  ]);
+  await s.hook({ hook_event_name: "Stop" });
+  assert.equal(reports.filter(({ run_id }) => run_id === originalId).length, 1);
+  const { runsStatus } = await import("../scripts/lib/audit-wal.mjs");
+  const status = await withHome(s.env.HOME, () => runsStatus(s.dataDir));
+  assert.equal(status.pending, 1);
+  writeLoginProfiles(s.env.HOME, [{ backend: backend.url, apiKey: API_KEY }]);
+  await s.hook({ hook_event_name: "Stop" });
+  await s.shutdown();
+  const originalReports = reports.filter(({ run_id }) => run_id === originalId);
+  assert.deepEqual(
+    originalReports.map(({ report_seq }) => report_seq),
+    [1, 2]
+  );
+  assert.equal(originalReports[1].end_reason, "stop");
+  assert.equal((await withHome(s.env.HOME, () => runsStatus(s.dataDir))).pending, 0);
+});
+
+// regression: #0013
+test("the daemon preserves a denied tool and its audit row when the run file is unwritable", async (t) => {
+  const backend = await startBackend();
+  const s = await startHookSession(t, backend, { ARMORIQ_RUN_REPORTING_ENABLED: "true" });
+  const policyFile = path.join(s.dataDir, "policy.json");
+  const policy = await loadPolicyState(policyFile);
+  policy.policy.statements.push({
+    id: "deny-write",
+    effect: "forbid",
+    principal: { type: "agent", id: "claude-code" },
+    action: { type: "tool", eq: "Write" },
+    resource: { type: "workspace", scope: "current" },
+    conditions: [],
+  });
+  await savePolicyState(policyFile, policy);
+  await s.hook({ hook_event_name: "UserPromptSubmit", prompt: "deny an unplanned write" });
+  const config = { runtimeFile: path.join(s.dataDir, "runtime.json"), runReportingEnabled: true };
+  await rm(runStateFile(config));
+  await mkdir(runStateFile(config));
+  const output = await s.hook({
+    hook_event_name: "PreToolUse",
+    tool_name: "Write",
+    tool_use_id: randomUUID(),
+    tool_input: {},
+  });
+  assert.equal(output?.hookSpecificOutput?.permissionDecision, "deny");
+  await s.hook({ hook_event_name: "Stop" });
+  const captured = await backend.waitForRequest("POST /iap/audit/batch", (body) =>
+    body.rows.some((row) => row.tool === "Write")
+  );
+  const row = captured.rows.find((row) => row.tool === "Write");
+  assert.equal(row.status, "blocked");
+  assert.notEqual(row.decision_code, "internal_error");
+  assert.equal(backend.auditRows.filter((row) => row.tool === "Write").length, 1);
+  assert.ok(
+    (await readFile(path.join(s.dataDir, "audit-capture-failures.jsonl"), "utf8")).trim().length > 0
+  );
+});
+
+// regression: #0013
+test("Stop and SessionEnd release the daemon session lock while delivery is stalled", async (t) => {
+  for (const hook_event_name of ["Stop", "SessionEnd"]) {
+    await t.test(hook_event_name, async (t) => {
+      const entered = deferred();
+      const release = deferred();
+      t.after(() => release.resolve());
+      const backend = await startBackend({
+        "POST /iap/runs/batch": async (body, request) => {
+          entered.resolve(request.socket);
+          await release.promise;
+          return [
+            200,
+            {
+              results: body.reports.map(({ run_id, report_seq }) => ({
+                run_id,
+                report_seq,
+                outcome: "accepted",
+              })),
+            },
+          ];
+        },
+      });
+      const s = await startHookSession(t, backend, { ARMORIQ_RUN_REPORTING_ENABLED: "true" });
+      await s.hook({ hook_event_name: "UserPromptSubmit", prompt: "first" });
+      const socket = await entered.promise;
+      await s.hook({ hook_event_name });
+      assert.equal(socket.destroyed, false, "the hook waited until the delivery request timed out");
+      await s.hook({ hook_event_name: "UserPromptSubmit", prompt: "second" });
+      assert.equal(socket.destroyed, false, "the next prompt waited behind the network flush");
+      const state = await loadRuntimeState(path.join(s.dataDir, "runtime.json"));
+      assert.equal(state.sessions[s.sessionId].lastPrompt, "second");
+      release.resolve();
+    });
   }
 });

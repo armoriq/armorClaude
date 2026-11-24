@@ -16,6 +16,7 @@ import {
   loginTag,
 } from "./lib/audit-wal.mjs";
 import { buildAuthHeaders, postJson } from "./lib/common.mjs";
+import { flushRunReports } from "./lib/runs.mjs";
 import { ensurePrivateDirSync, writePrivateFileSync } from "./lib/fs-store.mjs";
 import { appendDaemonLog, capDaemonLog, daemonLogPath } from "./lib/daemon-log.mjs";
 import {
@@ -44,6 +45,7 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_LINE_BYTES = AUDIT_SIZE_LIMITS.maxRowBytes + 16 * 1024; // Include the socket envelope around a fitted row.
 
 let config = loadConfig();
+let runReportingEnabled = config.runReportingEnabled;
 ensurePrivateDirSync(config.dataDir);
 // Seed built-in profiles eagerly so new templates are available immediately
 // after a daemon restart — no lazy first-access required.
@@ -163,7 +165,10 @@ function loginWal(tag, binding, stream = "audit") {
 async function trackLogin(cfg) {
   if (!cfg.apiKey || cfg.signedOut) return;
   const tag = loginTag(cfg.backendEndpoint, cfg.apiKey);
-  for (const stream of cfg.auditEnabled ? ["audit", "health"] : ["health"]) {
+  for (const stream of [
+    ...(cfg.auditEnabled ? ["audit", "health"] : ["health"]),
+    ...(cfg.runReportingEnabled ? ["runs"] : []),
+  ]) {
     const entry = loginWal(tag, { backend: cfg.backendEndpoint, keyId: tag }, stream);
     await restoreAuditLogin(entry, cfg);
   }
@@ -177,7 +182,7 @@ async function restoreAuditLogin(entry, cfg) {
 }
 
 function adoptAuditDir() {
-  for (const stream of ["audit", "health"]) {
+  for (const stream of ["audit", "health", ...(runReportingEnabled ? ["runs"] : [])]) {
     const root = path.join(config.dataDir, stream);
     if (!existsSync(root)) continue;
     try {
@@ -191,6 +196,7 @@ function adoptAuditDir() {
 }
 
 async function flushAudit(reason) {
+  if (runReportingEnabled) await stageRunReports({ ...loadConfig(), runReportingEnabled }, reason);
   adoptAuditDir();
   await flushEntries(
     [...logins.values()].filter((entry) => entry.stream !== "health"),
@@ -201,6 +207,15 @@ async function flushAudit(reason) {
     [...logins.values()].filter((entry) => entry.stream === "health"),
     reason
   );
+}
+
+async function stageRunReports(cfg, reason) {
+  if (!cfg.runReportingEnabled) return;
+  try {
+    await flushRunReports(cfg);
+  } catch {
+    process.stderr.write(`[daemon] run report handoff failed reason=${reason}\n`);
+  }
 }
 
 function requestFlush(reason) {
@@ -233,6 +248,7 @@ async function flushEntries(entries, reason) {
 }
 
 async function shipLogin(entry) {
+  if (entry.stream === "runs" && !runReportingEnabled) return;
   const binding = entry.binding || (await entry.wal.readBinding());
   if (!binding) return;
   const cfg = auditLoginConfig(binding, loadConfig());
@@ -251,10 +267,15 @@ async function shipLogin(entry) {
     await entry.wal.drain(
       async ({ rows }) => {
         const current = auditLoginConfig(binding, loadConfig());
+        if (entry.stream === "runs" && !runReportingEnabled) return { status: 0, body: null };
         if (!current) return { status: 401, body: {} };
         const response = await postJson(
-          `${binding.backend}${entry.stream === "health" ? "/iap/client-events" : "/iap/audit/batch"}`,
-          entry.stream === "health" ? { events: rows } : { rows },
+          `${binding.backend}${entry.stream === "health" ? "/iap/client-events" : entry.stream === "runs" ? "/iap/runs/batch" : "/iap/audit/batch"}`,
+          entry.stream === "health"
+            ? { events: rows }
+            : entry.stream === "runs"
+              ? { reports: rows }
+              : { rows },
           buildAuthHeaders(current),
           current.timeoutMs || 8000
         );
@@ -313,12 +334,24 @@ const stopIntentRefresh = startIntentRefreshLoop(() => loadConfig());
 // session mutated between enqueue and execution.
 async function dispatchHook(event, input, cfg) {
   switch (event) {
-    case "SessionStart":
-      return handleSessionStart(input, cfg);
+    case "SessionStart": {
+      const out = await handleSessionStart(input, cfg);
+      if (cfg.runReportingEnabled) {
+        await stageRunReports(cfg, "session_start");
+        requestFlush("session_start");
+      }
+      return out;
+    }
     case "UserPromptExpansion":
       return handleUserPromptExpansion(input, cfg);
-    case "UserPromptSubmit":
-      return handleUserPromptSubmit(input, cfg);
+    case "UserPromptSubmit": {
+      const out = await handleUserPromptSubmit(input, cfg);
+      if (cfg.runReportingEnabled) {
+        await stageRunReports(cfg, "prompt_start");
+        requestFlush("prompt_start");
+      }
+      return out;
+    }
     case "PreToolUse":
       return handlePreToolUse(input, cfg);
     case "PostToolUse":
@@ -328,11 +361,13 @@ async function dispatchHook(event, input, cfg) {
     case "Stop": {
       const out = await handleStop(input, cfg);
       // Stage turn-end rows before returning, then deliver without holding the session lock.
+      await stageRunReports(cfg, "stop");
       requestFlush("stop");
       return out;
     }
     case "SessionEnd": {
       const out = await handleSessionEnd(input, cfg);
+      await stageRunReports(cfg, "session_end");
       requestFlush("session_end");
       return out;
     }
@@ -446,6 +481,7 @@ async function handleLine(rawLine, socket) {
       const input = msg.input ?? {};
       const sessionId = typeof input.session_id === "string" ? input.session_id : "";
       const effectiveConfig = effectiveConfigFor(msg.configEnv);
+      runReportingEnabled = effectiveConfig.runReportingEnabled;
       await trackLogin(effectiveConfig);
       let output;
       try {
@@ -521,6 +557,7 @@ process.on("SIGHUP", async () => {
     const before = config.apiKey ? loginTag(config.backendEndpoint, config.apiKey) : "(unset)";
     const after = fresh.apiKey ? loginTag(fresh.backendEndpoint, fresh.apiKey) : "(unset)";
     config = fresh;
+    runReportingEnabled = fresh.runReportingEnabled;
     await trackLogin(fresh);
     process.stderr.write(
       `[armorclaude-daemon] SIGHUP: config reloaded. key id: ${before} -> ${after}\n`
