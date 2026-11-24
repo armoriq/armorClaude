@@ -1,7 +1,9 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
+import path from "node:path";
+import { claudeConfigDir } from "../scripts/lib/claude-paths.mjs";
 import { loadConfig } from "../scripts/lib/config.mjs";
 import { handlePreToolUse, handleSessionStart } from "../scripts/lib/engine.mjs";
 import { tempHome } from "./helpers/login-profile.mjs";
@@ -10,20 +12,34 @@ const home = tempHome();
 const workDir = tempHome();
 const savedHome = process.env.HOME;
 let config;
+const settings = () => path.join(claudeConfigDir(), "settings.json");
+const SETTINGS = {
+  theme: "dark",
+  enabledPlugins: { "armorclaude@armoriq": true },
+  hooks: {},
+};
 
 before(() => {
   process.env.HOME = home;
   assert.equal(os.homedir(), home);
   config = loadConfig({ CLAUDE_PLUGIN_DATA: tempHome(), ARMORIQ_ENV: "staging" });
   assert.equal(config.mode, "monitor");
+  mkdirSync(path.join(home, ".armoriq"), { recursive: true });
+  mkdirSync(claudeConfigDir(), { recursive: true });
+  writeFileSync(settings(), JSON.stringify(SETTINGS));
+  writeFileSync(path.join(config.dataDir, "org-mode.json"), "{}");
+  symlinkSync(path.join(home, ".armoriq"), path.join(workDir, "aq-link"));
+  mkdirSync(path.join(workDir, "proj", ".claude"), { recursive: true });
+  mkdirSync(path.join(workDir, "proj", "sub"));
+  writeFileSync(path.join(workDir, "proj", ".claude", "settings.json"), JSON.stringify(SETTINGS));
 });
 after(() => {
   process.env.HOME = savedHome;
 });
 
-async function toolDecision(tool_name, tool_input) {
+async function toolDecision(tool_name, tool_input, cwd = workDir) {
   const out = await handlePreToolUse(
-    { hook_event_name: "PreToolUse", session_id: "guard", tool_name, tool_input, cwd: workDir },
+    { hook_event_name: "PreToolUse", session_id: "guard", tool_name, tool_input, cwd },
     config
   );
   return out?.hookSpecificOutput?.permissionDecision ?? "allow";
@@ -50,6 +66,23 @@ const ALLOWED = [
   () => "cp ~/.armoriq/cred* /tmp/",
   () => "rm -f ./build/*.o",
   () => 'for f in *.log; do rm "$f"; done',
+  () => "find . -name '*.pyc' -delete",
+  () => 'python3 -c "print(1)"',
+  () => `node -e "console.log(require('os').homedir())"`,
+  () => "rsync -a src/ build/",
+  () => "tar -xf /tmp/a.tar -C build",
+  () => "touch notes.txt",
+  () => "cat ~/.claude/settings.json",
+  () => `python3 -c "import json; print(json.load(open('package.json')))"`,
+  () => 'rm -rf "$BUILD_DIR"',
+  () => "rm -f $TMPDIR/out.txt",
+  () => "tar -xzf a.tar.gz",
+  () => "find . -type f -exec grep -l foo {} +",
+  () => 'find . -name "[" -delete',
+  () => "chmod -R u+w .",
+  () => "rsync -a --delay-updates build/ ./out/",
+  () => "python3 quickstart.py --credentials credentials.json",
+  () => `node -e "require('./.vscode/settings.json')"`,
 ];
 
 const DENIED = [
@@ -102,6 +135,30 @@ const DENIED = [
   () => `echo {} > ${data()}/runtime.json`,
   () => `cp /tmp/forged.json ${data()}/runtime.json`,
   () => `echo '{"mode":"shadow"}' > ${data()}/org-mode.json`,
+  () => `find ${data()} -name org-mode.json -delete`,
+  () => `find ${path.dirname(data())} -name org-mode.json -delete`,
+  () => `find ${data()} -name org-mode.json -exec rm {} +`,
+  () => `python3 -c "import os; os.remove('${data()}/org-mode.json')"`,
+  () => `python3 -c "import os; os.remove(os.path.expanduser('~/.armoriq/credentials.json'))"`,
+  () => `node -e "require('fs').rmSync('${data()}/org-mode.json')"`,
+  () => `perl -pi -e s/enforce/shadow/ ${data()}/org-mode.json`,
+  () => `bash -c "rm ${data()}/org-mode.json"`,
+  () => `rsync -a /tmp/evil/ ${data()}/`,
+  () => "rsync -a --delete /tmp/empty/ ~/",
+  () => `tar -xf /tmp/evil.tar -C ${data()}`,
+  () => "cd ~ && tar xf /tmp/evil.tar",
+  () => "touch ~/.armoriq/local-mode",
+  () => "mkdir -p ~/.armoriq/local-mode",
+  () => "ln -s ~/.armoriq /tmp/aq && rm /tmp/aq/credentials.json",
+  () => "rm aq-link/credentials.json",
+  () => `echo '{"disableAllHooks":true}' > ${settings()}`,
+  () => "sed -i s/true/false/ .claude/settings.json",
+  () => "cp /tmp/evil.json .claude/settings.json",
+  () => "rm -rf .claude",
+  () => "if true; then rm ~/.armoriq/credentials.json; fi",
+  () => "sort -o ~/.armoriq/credentials.json /tmp/x",
+  () => "ditto /tmp/evil ~/.armoriq",
+  () => "unzip /tmp/evil.zip -d ~/.armoriq",
 ];
 
 for (const [tool, input] of [
@@ -109,9 +166,82 @@ for (const [tool, input] of [
   ["Edit", () => ({ file_path: `${data()}/runtime.json`, old_string: "a", new_string: "b" })],
   ["Write", () => ({ file_path: `${data()}/org-mode.json`, content: '{"mode":"shadow"}' })],
   ["Write", () => ({ file_path: `${data()}/pending-plan.guard.json`, content: "{}" })],
+  [
+    "MultiEdit",
+    () => ({ file_path: `${data()}/org-mode.json`, edits: [{ old_string: "a", new_string: "b" }] }),
+  ],
 ]) {
   test(`the guard denies ${tool} to ArmorClaude state (#84): ${input().file_path}`, async () => {
     assert.equal(await toolDecision(tool, input()), "deny");
+  });
+}
+
+for (const [label, tool, input, expected, cwd = () => workDir] of [
+  [
+    "turns all hooks off",
+    "Write",
+    () => ({
+      file_path: settings(),
+      content: JSON.stringify({ ...SETTINGS, disableAllHooks: true }),
+    }),
+    "deny",
+  ],
+  [
+    "drops the plugin",
+    "Edit",
+    () => ({ file_path: settings(), old_string: "true", new_string: "false" }),
+    "deny",
+  ],
+  [
+    "rewrites the hooks",
+    "MultiEdit",
+    () => ({
+      file_path: settings(),
+      edits: [
+        { old_string: '"dark"', new_string: '"light"' },
+        { old_string: '"hooks":{}', new_string: '"hooks":{"PreToolUse":[]}' },
+      ],
+    }),
+    "deny",
+  ],
+  [
+    "leaves the file unreadable",
+    "Edit",
+    () => ({ file_path: settings(), old_string: '"dark"', new_string: '"dark' }),
+    "deny",
+  ],
+  [
+    "matches no text in the file",
+    "Edit",
+    () => ({ file_path: settings(), old_string: "\u201cdark\u201d", new_string: '"light"' }),
+    "deny",
+  ],
+  [
+    "turns all hooks off in a parent project from a subdirectory",
+    "Write",
+    () => ({
+      file_path: "../.claude/settings.json",
+      content: JSON.stringify({ ...SETTINGS, disableAllHooks: true }),
+    }),
+    "deny",
+    () => path.join(workDir, "proj", "sub"),
+  ],
+  [
+    "only changes the theme",
+    "Edit",
+    () => ({ file_path: settings(), old_string: '"dark"', new_string: '"light"' }),
+    "allow",
+  ],
+  [
+    "only changes the theme of a project copy",
+    "Write",
+    () => ({ file_path: `${workDir}/.claude/settings.json`, content: '{"theme":"light"}' }),
+    "allow",
+  ],
+]) {
+  // regression: #13
+  test(`the guard decides ${expected} for a ${tool} that ${label} in Claude Code settings`, async () => {
+    assert.equal(await toolDecision(tool, input(), cwd()), expected);
   });
 }
 

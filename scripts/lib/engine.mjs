@@ -46,7 +46,6 @@ import { capabilityOf } from "./backend-posture.mjs";
 import { readJson, writePrivateFile } from "./fs-store.mjs";
 import { stat, unlink } from "node:fs/promises";
 import path from "node:path";
-import { homedir } from "node:os";
 import {
   appendTrustOp,
   getSession,
@@ -60,6 +59,7 @@ import {
 } from "./runtime-state.mjs";
 import { sha256Hex } from "./common.mjs";
 import { invokesPolicyAdmin, isProtectedPath, writesProtectedPath } from "./shell-guard.mjs";
+import { changesHookSettings, protectedPaths } from "./self-protection.mjs";
 import { parseToolIdentity, getMcpServerStatus, setMcpServerStatus } from "./tool-registry.mjs";
 import { autoRegisterMcp, syncMcpRegistry } from "./backend-client.mjs";
 import {
@@ -762,6 +762,12 @@ async function policyFileProblem(config, error) {
   return error;
 }
 
+const SELF_PROTECTION = new Set([
+  "protected_policy_file",
+  "protected_hook_settings",
+  "policy_admin_command",
+]);
+
 export async function handlePreToolUse(input, config) {
   const ctx = {};
   const output = await decidePreToolUse(input, config, ctx).catch(async (error) => {
@@ -771,7 +777,8 @@ export async function handlePreToolUse(input, config) {
   const code = output?.[DECISION_CODE];
   const source = policySource(code, ctx);
   const decision = output?.hookSpecificOutput?.permissionDecision;
-  if (config.orgMonitor) return monitorPreToolUse(input, config, output, source, ctx.notice);
+  if (config.orgMonitor && !SELF_PROTECTION.has(code))
+    return monitorPreToolUse(input, config, output, source, ctx.notice);
   if (decision === "deny") {
     await auditBlocked(input, withBackendPosture(config), code, source, ctx.v2);
   } else if (source) {
@@ -965,25 +972,26 @@ async function decidePreToolUse(input, config, ctx = {}) {
     }
   }
 
-  // --- Path guard: block write operations targeting policy/credential files.
-  //     Read operations (cat, Read tool) are allowed --- only mutations blocked.
-  const PROTECTED_PATHS = [
-    config.dataDir,
-    config.policyFile,
-    config.runtimeFile,
-    path.join(homedir(), ".armoriq", "credentials.json"),
-  ];
   const sessionCwd = typeof input.cwd === "string" && input.cwd ? input.cwd : null;
-  if (["write", "edit", "notebookedit"].includes(norm)) {
-    const target = toolInput?.file_path || toolInput?.notebook_path || toolInput?.path || "";
+  const guarded = protectedPaths(config, sessionCwd);
+  const rawInput = isPlainObject(input.tool_input) ? input.tool_input : {};
+  if (["write", "edit", "multiedit", "notebookedit"].includes(norm)) {
+    const target = rawInput.file_path || rawInput.notebook_path || rawInput.path || "";
     const resolved =
       typeof target === "string" && target && (path.isAbsolute(target) || sessionCwd)
         ? path.resolve(sessionCwd ?? "/", target)
         : null;
-    if (
+    const settings = [guarded.userSettings, ...guarded.projectSettings];
+    if (resolved && isProtectedPath(resolved, settings)) {
+      if (changesHookSettings(resolved, norm, rawInput))
+        return denyPreTool(
+          "protected_hook_settings",
+          "ArmorClaude: changing the hooks or enabled plugins in Claude Code settings is blocked. Ask the user to make this change."
+        );
+    } else if (
       typeof target === "string" &&
       target &&
-      ((resolved && isProtectedPath(resolved, PROTECTED_PATHS)) ||
+      ((resolved && isProtectedPath(resolved, guarded.state)) ||
         target.includes("armorclaude/policy") ||
         target.includes("armorclaude/profiles"))
     ) {
@@ -994,17 +1002,22 @@ async function decidePreToolUse(input, config, ctx = {}) {
     }
   }
   if (norm === "bash") {
-    const cmd = typeof toolInput?.command === "string" ? toolInput.command : "";
+    const cmd = typeof rawInput.command === "string" ? rawInput.command : "";
     if (invokesPolicyAdmin(cmd)) {
       return denyPreTool(
         "policy_admin_command",
         "ArmorClaude: policy management is human-only. Type /armorclaude:armor policy in the terminal."
       );
     }
-    if (writesProtectedPath(cmd, sessionCwd, PROTECTED_PATHS)) {
+    if (
+      writesProtectedPath(cmd, sessionCwd, [...guarded.state, guarded.userSettings], {
+        exactOnly: guarded.projectSettings,
+        markers: guarded.markers,
+      })
+    ) {
       return denyPreTool(
         "protected_policy_file",
-        "ArmorClaude: shell commands that write, move or delete ArmorClaude policy, state or credential files are blocked. Use /armorclaude:armor policy commands."
+        "ArmorClaude: shell commands that write, move or delete ArmorClaude state, credentials or Claude Code settings are blocked. Use /armorclaude:armor policy commands."
       );
     }
   }
