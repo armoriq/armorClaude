@@ -439,25 +439,49 @@ test("late prompt and auth responses cannot install a registration", async (t) =
   }
 });
 
-test("logged out and monitor registrations are explicit local records and send nothing", async (t) => {
-  for (const [patch, reason] of [
-    [{ apiKey: "" }, "logged_out"],
-    [{ mode: "monitor" }, "monitor_mode"],
-  ]) {
-    await t.test(reason, async (t) => {
-      const s = await session(t, patch);
-      const requests = wire(t, async () => {
-        throw new Error("must not send");
-      });
-      const result = await intent.registerIntentPlan(s.config, plan);
-      assert.equal(result.content[0].text, `Plan recorded locally, not registered (${reason}).`);
-      assert.notEqual(result.isError, true);
-      assert.equal(requests.length, 0);
-      assert.equal((await s.state()).unregisteredLocalPlan.reason, reason);
-      assert.deepEqual((await s.state()).unregisteredLocalPlan.plan, plan);
-      assert.equal((await s.state()).countedPlanId, null);
-    });
-  }
+test("a logged out registration is an explicit local record and sends nothing", async (t) => {
+  const s = await session(t, { apiKey: "" });
+  const requests = wire(t, async () => {
+    throw new Error("must not send");
+  });
+  const result = await intent.registerIntentPlan(s.config, plan);
+  assert.equal(result.content[0].text, "Plan recorded locally, not registered (logged_out).");
+  assert.notEqual(result.isError, true);
+  assert.equal(requests.length, 0);
+  assert.equal((await s.state()).unregisteredLocalPlan.reason, "logged_out");
+  assert.deepEqual((await s.state()).unregisteredLocalPlan.plan, plan);
+  assert.equal((await s.state()).countedPlanId, null);
+});
+
+test("a signed in monitor registration and reanchor send the plan as Enforce does", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const s = await session(t, { mode: "monitor" });
+  const requests = wire(t, async (request, attempt) => [
+    200,
+    issued(attempt === 1 ? firstId : secondId, request.headers["X-ArmorIQ-Plan-Kind"]),
+  ]);
+  const registered = await intent.registerIntentPlan(s.config, plan);
+  assert.equal(
+    registered.content[0].text,
+    `Intent registered: plan ${firstId} (new), 1 steps. Token valid until 2027-01-15T09:00:00.000Z.`
+  );
+  const reanchored = await intent.registerIntentPlan(s.config, plan, { forceRevision: true });
+  assert.match(reanchored.content[0].text, new RegExp(`^Intent registered: plan ${secondId} `));
+  const state = await s.state();
+  assert.deepEqual(
+    requests.map(({ headers }) => [
+      headers["X-ArmorIQ-Plan-Kind"],
+      headers["X-ArmorIQ-Prompt-Id"],
+      headers["X-ArmorIQ-Parent-Plan-Id"],
+    ]),
+    [
+      ["new", state.promptId, undefined],
+      ["revision", state.promptId, firstId],
+    ]
+  );
+  assert.match(requests[0].headers["Idempotency-Key"], /^pcc1:[0-9a-f]{64}$/);
+  assert.equal(state.countedPlanId, secondId);
+  assert.equal(state.unregisteredLocalPlan, null);
 });
 
 test("older backends still register and log the absent kind once", async (t) => {

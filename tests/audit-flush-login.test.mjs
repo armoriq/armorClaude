@@ -206,6 +206,7 @@ test("the daemon adopts a health spool on disk and sends its events only with th
   assert.equal((await health.readPending()).length, 1);
   login(backend, A);
   await stop(backend, "session-a");
+  await waitFor(() => backend.health.length === 1, 15_000, "the adopted health event");
   assert.deepEqual(backend.health, [[A.apiKey, event]]);
   assert.deepEqual(await health.readPending(), []);
 });
@@ -218,10 +219,12 @@ test("each audit row ships with the key of the login that wrote it, across a log
   login(backend, B);
   await bash(backend, "session-b");
   await stop(backend, "session-b");
+  await waitFor(() => backend.shipped.length === 1, 15_000, "the row of login B");
   assert.deepEqual(owners(backend), [[B.userId, B.apiKey]]);
   assert.equal((await auditStatus(dataDir)).undeliverable, 1);
   login(backend, A);
   await stop(backend, "session-a");
+  await waitFor(() => backend.shipped.length === 2, 15_000, "the row of login A");
   assert.deepEqual(owners(backend), [
     [A.userId, A.apiKey],
     [B.userId, B.apiKey],
@@ -237,6 +240,7 @@ test("a login whose uploads fail neither blocks another login nor loses its own 
   login(backend, B);
   await bash(backend, "session-b");
   await stop(backend, "session-b");
+  await waitFor(() => backend.shipped.length === 1, 15_000, "the row of login B");
   assert.deepEqual(owners(backend), [[B.userId, B.apiKey]]);
   backend.refuse.clear();
   await stop(backend, "session-b");
@@ -245,6 +249,7 @@ test("a login whose uploads fail neither blocks another login nor loses its own 
   assert.equal((await wal.readPending())[0].attempts, 0);
   login(backend, { ...A, loggedInAt: "2026-11-15T12:00:00.000Z" });
   await stop(backend, "session-a");
+  await waitFor(() => backend.shipped.length === 2, 15_000, "the restored row of login A");
   assert.deepEqual(owners(backend), [
     [A.userId, A.apiKey],
     [B.userId, B.apiKey],
@@ -286,6 +291,7 @@ test("the old shared WAL remains visible as undeliverable and is never shipped (
   login(backend, A);
   await bash(backend, "session-a");
   await stop(backend, "session-a");
+  await waitFor(() => backend.shipped.length === 1, 15_000, "the tagged row");
   assert.deepEqual(
     backend.shipped.map(([key, row]) => [row.tool, key]),
     [["Bash", A.apiKey]]

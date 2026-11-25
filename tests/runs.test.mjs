@@ -997,7 +997,7 @@ test("reanchor reports a failed session read with reporting on or off", async (t
 });
 
 // regression: #0013
-test("the rollout switch and logged out prompts cannot enqueue reports, while monitor prompts can", async (t) => {
+test("reporting is on unless the switch says otherwise, and logged out prompts cannot enqueue reports, while monitor prompts can", async (t) => {
   const home = await mkdtemp(path.join(os.tmpdir(), "aq-run-switch-"));
   t.after(() => rm(home, { recursive: true, force: true }));
   withHome(home, () => {
@@ -1005,7 +1005,7 @@ test("the rollout switch and logged out prompts cannot enqueue reports, while mo
       assert.equal(
         loadConfig({ CLAUDE_PLUGIN_DATA: home, ARMORIQ_RUN_REPORTING_ENABLED: value })
           .runReportingEnabled,
-        value === "true",
+        value === undefined || value === "true",
         String(value)
       );
     }

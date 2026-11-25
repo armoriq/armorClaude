@@ -297,8 +297,7 @@ async function run() {
         forceRevision: true,
         runId: config.runReportingEnabled ? runtimeState?.sessions[sessionId]?.promptId : undefined,
       });
-      if (registration.isError || !intentToken || !config.apiKey || config.mode === "monitor")
-        return registration;
+      if (registration.isError || !intentToken || !config.apiKey) return registration;
       const result = await reanchorViaSdk({
         getClient: getSdkClient,
         config,

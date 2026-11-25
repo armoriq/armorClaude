@@ -138,6 +138,7 @@ function isFrictionlessAllowPolicy(policy) {
 }
 
 function intentMode(config, policy) {
+  if (config.orgMonitor) return "capture";
   if (!config.intentRequired) return "optional";
   return isFrictionlessAllowPolicy(policy) ? "capture" : "required";
 }
@@ -146,6 +147,7 @@ async function captureNotice(config) {
   const recorded = "Tool calls are recorded against the registered plan.";
   const names = await activeV2PolicyNames(config);
   if (names?.length === 0) return `${recorded} The current policy blocks none of them.`;
+  if (config.orgMonitor) return recorded;
   const which = names?.length
     ? `ArmorIQ ${names.length > 1 ? "policies" : "policy"} ${names.map((n) => `"${n}"`).join(", ")}`
     : "Your organization's ArmorIQ policies";

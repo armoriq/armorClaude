@@ -494,9 +494,9 @@ test("a hold read from the product-slug bundle is enforced as the agent the inte
   assert.equal(routed(backend, "POST /delegation/request").length, 1);
 });
 
-const capturePrompt = async (t, bundle) => {
+const capturePrompt = async (t, bundle, env) => {
   const backend = await v2Backend(randomUUID(), { bundle: () => [200, bundle] });
-  const { hook } = await startHookSession(t, backend);
+  const { hook } = await startHookSession(t, backend, env);
   const prompt = await hook({ hook_event_name: "UserPromptSubmit", prompt: "write hello.txt" });
   return prompt?.hookSpecificOutput?.additionalContext ?? "";
 };
@@ -517,15 +517,19 @@ test("in capture mode the prompt directive names the v2 policies that still bloc
   assert.doesNotMatch(directive, /blocks none/);
 });
 
-test("in capture mode the directive asks for the plan without enforcement wording", async (t) => {
-  const directive = await capturePrompt(
-    t,
-    slugBundle([entry("agent-1", "args-and-holds", POLICY_DOCUMENT, "agent")])
-  );
+test("in capture mode the directive asks for the plan without enforcement wording, and Monitor drops only the claim that a call may be blocked or held", async (t) => {
+  const bundle = slugBundle([entry("agent-1", "args-and-holds", POLICY_DOCUMENT, "agent")]);
+  const directive = await capturePrompt(t, bundle);
   assert.match(directive, /ArmorClaude intent capture is active/);
   assert.match(directive, /as your first tool call/);
-  assert.match(directive, /ArmorIQ policy "args-and-holds" still decides each call/);
+  assert.match(
+    directive,
+    /ArmorIQ policy "args-and-holds" still decides each call: a call may be blocked, or held/
+  );
   assert.doesNotMatch(directive, /BEFORE any other tool call|relying on enforcement|enforcement/);
+  const monitor = await capturePrompt(t, bundle, { ARMORIQ_ORG_MODE: "" });
+  assert.doesNotMatch(monitor, /block|held/);
+  assert.equal(monitor, directive.slice(0, directive.indexOf(' ArmorIQ policy "args-and-holds"')));
 });
 
 test("in enforcement mode the directive keeps the mandatory wording", async (t) => {

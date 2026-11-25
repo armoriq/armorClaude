@@ -114,10 +114,14 @@ test("fast path tools leave runtime state untouched", async (t) => {
 
 // regression: #0007
 test("the 15 second loop refreshes at min(120 seconds, validity / 3) using backend expiry", async (t) => {
-  for (const validitySeconds of [180, 900]) {
-    await t.test(String(validitySeconds), async (t) => {
+  for (const [validitySeconds, mode] of [
+    [180, "enforce"],
+    [900, "enforce"],
+    [180, "monitor"],
+  ]) {
+    await t.test(`${validitySeconds} ${mode}`, async (t) => {
       t.mock.timers.enable({ apis: ["Date", "setInterval"], now });
-      const s = await session(t, undefined, { validitySeconds });
+      const s = await session(t, undefined, { validitySeconds, mode });
       const tick = loop(t, s.config);
       const expiry = new Date(now + 180_000).toISOString();
       await s.change((current) => {
@@ -159,13 +163,13 @@ test("the 15 second loop refreshes at min(120 seconds, validity / 3) using backe
 });
 
 // regression: #0007
-test("closed, idle, retired, logged out and monitor sessions never refresh", async (t) => {
+test("closed, idle, retired, logged out and mode changed sessions never refresh", async (t) => {
   for (const change of [
     "stop",
     "idle",
     "retire",
     "logout",
-    "monitor",
+    "mode-change",
     "other-backend",
     "other-key",
   ]) {
@@ -176,7 +180,7 @@ test("closed, idle, retired, logged out and monitor sessions never refresh", asy
       if (change === "stop") await handleStop({ session_id: s.sessionId }, s.config);
       if (change === "retire") await s.change(retirePlan);
       if (change === "logout") s.config.apiKey = "";
-      if (change === "monitor") s.config.mode = "monitor";
+      if (change === "mode-change") s.config.mode = "monitor";
       if (change === "idle") t.mock.timers.tick(30 * 60_000);
       const before = await s.state();
       if (change === "other-backend") s.config.backendEndpoint = "https://api.armoriq.ai";
