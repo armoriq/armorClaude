@@ -550,7 +550,7 @@ export function validateCsrgProofHeaders(proofs, required) {
 }
 
 export async function requestIntent(config, payload) {
-  if (!config.apiKey || config.signedOut || config.mode === "monitor") {
+  if (!config.apiKey || config.signedOut) {
     return { skipped: true };
   }
   if (config.runtimeFile && payload.session_id) {
@@ -928,7 +928,6 @@ async function refreshCurrentIntent(config, sessionId, expiredOnly, reloadConfig
     if (
       !config.apiKey ||
       config.signedOut ||
-      config.mode === "monitor" ||
       !promptIsOpen(session) ||
       !session.countedPlanId ||
       !session.intentTokenRaw ||
@@ -1067,16 +1066,10 @@ export async function registerIntentPlan(
       runId = session.promptId;
       if (expectedRunId && expectedRunId !== runId)
         throw registrationError("plan retired before registration completed");
-      const reason =
-        !config.apiKey || config.signedOut
-          ? "logged_out"
-          : config.mode === "monitor"
-            ? "monitor_mode"
-            : null;
-      if (reason) {
-        session.unregisteredLocalPlan = { plan, reason, recordedAt: Date.now() };
+      if (!config.apiKey || config.signedOut) {
+        session.unregisteredLocalPlan = { plan, reason: "logged_out", recordedAt: Date.now() };
         await writePendingPlan(config, sessionId, session, { plan });
-        return { reply: registrationReply(`Plan recorded locally, not registered (${reason}).`) };
+        return { reply: registrationReply("Plan recorded locally, not registered (logged_out).") };
       }
       if (forceRevision && !session.countedPlanId)
         throw Object.assign(registrationError("no current plan in this prompt to reanchor"), {

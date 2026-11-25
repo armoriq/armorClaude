@@ -208,7 +208,7 @@ export function loadConfig(env = process.env) {
     apiKey: effectiveApiKey,
     orgId,
     auditEnabled: Boolean(effectiveApiKey),
-    runReportingEnabled: env.ARMORIQ_RUN_REPORTING_ENABLED === "true",
+    runReportingEnabled: [undefined, "true"].includes(env.ARMORIQ_RUN_REPORTING_ENABLED),
     defaultTemplate,
 
     ...loginEnforcement(effectiveApiKey, localMock, orgMonitorFor(dataDir, env)),

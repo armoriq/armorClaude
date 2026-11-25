@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { startBackend, startHookSession } from "./helpers/hook-session.mjs";
+import { startBackend, startHookSession, waitFor } from "./helpers/hook-session.mjs";
 import { captureSession } from "./helpers/audit-capture.mjs";
 import { emitAudit } from "../scripts/lib/audit-capture.mjs";
 import { AUDIT_SIZE_LIMITS, createAuditWal, loginTag } from "../scripts/lib/audit-wal.mjs";
@@ -70,7 +70,7 @@ test("PostToolUse rows link the plan by id instead of carrying the intent token,
   }
 
   await hook({ hook_event_name: "Stop" });
-  assert.equal(backend.auditRows.length, 3);
+  await waitFor(() => backend.auditRows.length === 3, 15_000, "three rows");
   assert.deepEqual(
     backend.auditRows.map((r) => [r.tool, r.step_index]),
     [

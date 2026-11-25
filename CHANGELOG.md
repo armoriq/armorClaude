@@ -5,6 +5,8 @@ Changes to the ArmorClaude plugin, newest first. A stable install picks up code 
 ## [Unreleased]
 
 - This version needs @armoriq/sdk 0.8.24 or later for plan request options.
+- feat(monitor): a signed-in session in Monitor asks Claude for a plan and registers it as Enforce does, with the same kind, prompt id and request id, refresh, retirement, revoke and replies. Monitor still never blocks or holds a call, and its would-be audit rows link to the live plan. A failed plan request in Monitor lets the call run and records the failure. Signed out stays local and sends nothing.
+- feat(runs): run reporting is on by default. Set `ARMORIQ_RUN_REPORTING_ENABLED=false` to turn it off.
 
 ## [0.2.23] - 2026-11-24
 

@@ -23,7 +23,7 @@ Tool Result ──► PostToolUse hook ──► Audit log sent to IAP
 
 A signed-in ArmorClaude follows the mode its workspace picks under **Tool calls in the chat** on the [Monitor page](https://tools.armoriq.ai/monitor), read at the start of each session.
 
-- **Quiet** (the default): every tool call runs and nothing from ArmorClaude shows in the session. Each call your policy would have blocked or held is listed on the Monitor page.
+- **Quiet** (the default): every tool call runs and the only thing ArmorClaude adds to the session is the plan request. Claude registers its plan with `register_intent_plan` as it does in Block, and each call your policy would have blocked or held is listed on the Monitor page, linked to that plan. A failed plan registration never stops a call.
 - **Show in chat**: every tool call still runs, and the chat shows one line on each call your policy would have blocked or held, for example `ArmorIQ would block this call in Enforce (<reason>). Monitor let it run.`
 - **Block**: blocked calls stop in the chat and held calls ask first, as described above.
 
@@ -212,7 +212,7 @@ Whether calls are blocked comes from your login and the workspace mode above, no
 |----------|---------|-------------|
 | `ARMORIQ_OBSERVABILITY_DISABLED` | `false` | Set to `true`/`1`/`yes` to stop sending execution traces to the ArmorIQ dashboard. Observability is **on by default** when an API key is set — see [Data & Privacy](#data--privacy). Equivalent to the `disable_observability` plugin option. |
 | `ARMORIQ_USAGE_SYNC_DISABLED` | `false` | Set to `true`/`1`/`yes` to stop the token usage sync. Applies only while observability is on. Equivalent to the `disable_usage_sync` plugin option. |
-| `ARMORIQ_RUN_REPORTING_ENABLED` | `false` | Set to `true` only after every serving backend revision supports prompt ids. Reports prompt starts and turn endings, tool counts, confirmed plan ids and reasons for missing plans through `/iap/runs/batch`. Reports stay bound to the login at prompt start. Delivery pauses on logout or a missing endpoint. Authenticated monitor sessions are included. Run state and unsent receipts live beside the runtime file in `runtime.json.runs.json`. Each hook's switch value also controls daemon delivery until the next hook or daemon reload. `/armorclaude:armor status` shows pending and paused run reports. |
+| `ARMORIQ_RUN_REPORTING_ENABLED` | `true` | On when unset or exactly `true`. Exactly `false` turns it off, and so does any other value. Reports prompt starts and turn endings, tool counts, confirmed plan ids and reasons for missing plans through `/iap/runs/batch`. Reports stay bound to the login at prompt start. Delivery pauses on logout or a missing endpoint. Authenticated monitor sessions are included. Run state and unsent receipts live beside the runtime file in `runtime.json.runs.json`. Each hook's switch value also controls daemon delivery until the next hook or daemon reload. `/armorclaude:armor status` shows pending and paused run reports. |
 
 **Policy Management:**
 | Variable | Default | Description |
